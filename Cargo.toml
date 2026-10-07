@@ -8,6 +8,10 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 # src/metal/adapter.rs), by treuenten, so iOS GPUs that sample BC can keep textures
 # compressed instead of expanding them to RGBA8. Remove once on wgpu 30+.
 wgpu-hal = { path = "vendor/wgpu-hal" }
+# winit 0.30 has no UIScene support, and iOS 27 won't launch apps built with the iOS 27 SDK
+# without it. vendor/winit is 0.30.13 plus a scene delegate (see
+# vendor/winit/src/platform_impl/ios/scene_delegate.rs); ios/Info.plist names it.
+winit = { path = "vendor/winit" }
 
 [workspace]
 resolver = "3"
