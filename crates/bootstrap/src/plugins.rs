@@ -46,6 +46,11 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
         .add_plugins(ReplayPlugin)
         .add_plugins(RenderPlugin)
         .add_plugins(SessionPlugin);
+    // Render setup can finish after Startup, so watch for the resource.
+    app.add_systems(
+        First,
+        note_gpu_bc.run_if(resource_added::<bevy::image::CompressedImageFormatSupport>),
+    );
 
     app.edit_schedule(Update, |schedule| {
         schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
@@ -93,12 +98,23 @@ pub fn assemble_listen_app() -> App {
     app
 }
 
+/// Tells the texture decoder whether the GPU samples BC directly, so iOS can
+/// keep BC1/2/3/5 compressed (4-8x smaller) instead of expanding to RGBA8.
+fn note_gpu_bc(support: Res<bevy::image::CompressedImageFormatSupport>) {
+    asset_material::set_gpu_bc_textures(
+        support.0.contains(bevy::image::CompressedImageFormats::BC),
+    );
+}
+
 pub fn default_plugins_with_quiet_log(mut window: WindowPlugin) -> bevy::app::PluginGroupBuilder {
     if let Some(primary) = window.primary_window.as_mut() {
         primary.desired_maximum_frame_latency = core::num::NonZeroU32::new(frame_latency());
     }
     let mut wgpu = WgpuSettings::default();
-    // Apple GPUs have no BC compression: on iOS textures are decoded to RGBA8 instead.
+    // BC is required everywhere but iOS. Only Apple9+ iPhone/iPad GPUs have it
+    // (A15/A16 do not), so iOS takes it when the adapter offers it (the default
+    // priority requests every adapter feature) and decodes to RGBA8 otherwise;
+    // see `note_gpu_bc`.
     #[cfg(not(target_os = "ios"))]
     {
         wgpu.features |= WgpuFeatures::TEXTURE_COMPRESSION_BC;

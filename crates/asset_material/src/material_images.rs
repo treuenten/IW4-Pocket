@@ -551,7 +551,11 @@ pub fn decode_in_zone_builtin_images(catalog: &mut MaterialDefinitions) -> usize
         };
         let is_normal = name.contains("normal");
         #[cfg(target_os = "ios")]
-        let (storage, payload, out_w, out_h, levels) = ios_expand_to_rgba8(&mips, &mips.packed);
+        let (storage, payload, out_w, out_h, levels) = {
+            let mut mips = mips;
+            let packed = std::mem::take(&mut mips.packed);
+            ios_fit_for_gpu(&mips, packed)
+        };
         #[cfg(not(target_os = "ios"))]
         let (storage, payload, out_w, out_h, levels) =
             (mips.storage, mips.packed.clone(), mips.width, mips.height, mips.level_count());
@@ -1033,18 +1037,21 @@ fn wrap_payload(payload: &PreparedPayload, wrap: WrapRecipe) -> Arc<Image> {
                 state.images.push((wrap, Arc::clone(&image)));
                 return image;
             }
-            // This is already a fully wrapped Image (RGBA on iOS). Feeding its
-            // bytes back through wrap_mips would decode RGBA as BC a second time.
-            // A distinct sampler/colour space needs one Image copy, not a decode.
+            // This is already a fully wrapped Image (on iOS capped, and RGBA8
+            // unless the GPU samples BC). Feeding its bytes back through
+            // wrap_mips would decode them as the original chain a second time.
+            // A distinct sampler/colour space needs one Image copy, not a decode:
+            // keep its format and flip only the sRGB suffix (a no-op for BC5).
             let mut image = state.images[0].1.as_ref().clone();
             let bytes = image_bytes(&image);
             WRAPPED_BYTES.fetch_add(bytes, Ordering::Relaxed);
             diag::memtrack::add(diag::memtrack::Cat::ImageDupCopy, bytes);
-            #[cfg(target_os = "ios")]
-            let storage = MipStorage::Rgba8;
-            #[cfg(not(target_os = "ios"))]
-            let storage = state.mips.storage;
-            image.texture_descriptor.format = DecodedMips::texture_format(storage, wrap.linear());
+            let format = image.texture_descriptor.format;
+            image.texture_descriptor.format = if wrap.linear() {
+                format.remove_srgb_suffix()
+            } else {
+                format.add_srgb_suffix()
+            };
             image.sampler = ImageSampler::Descriptor(sampler_from_iw4(
                 wrap.sampler_state, image.texture_descriptor.mip_level_count, wrap.alpha_test_color,
             ));
@@ -1057,7 +1064,7 @@ fn wrap_payload(payload: &PreparedPayload, wrap: WrapRecipe) -> Arc<Image> {
 /// caller could afford.
 fn wrap_mips(mips: &DecodedMips, data: Vec<u8>, wrap: WrapRecipe) -> Image {
     #[cfg(target_os = "ios")]
-    let (storage, data, out_w, out_h, levels) = ios_expand_to_rgba8(mips, &data);
+    let (storage, data, out_w, out_h, levels) = ios_fit_for_gpu(mips, data);
     #[cfg(not(target_os = "ios"))]
     let (storage, out_w, out_h, levels) = (mips.storage, mips.width, mips.height, mips.level_count());
     let format = DecodedMips::texture_format(storage, wrap.linear());
@@ -3586,18 +3593,103 @@ fn ios_texture_cap() -> u32 {
     if left_mb < 500 { base.min(128) } else if left_mb < 900 { base.min(256) } else { base }
 }
 
-/// iOS/Apple GPUs have no BC (DXT) texture support: decode every kept mip level to RGBA8
-/// and drop the largest levels while the texture is wider than `ios_texture_cap()`.
-/// Returns (storage, payload, width, height, level count). BC5 becomes (R, G, 0, 255)
-/// so a shader reading .rg sees the same two channels.
+/// Whether the GPU samples BC1/2/3/5 directly. Only Apple9+ iOS GPUs do; until
+/// the renderer reports it (and on older devices) iOS expands BC to RGBA8.
+static GPU_BC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called once the render device exists. `IW4L_IOS_BC=0` (e.g. in
+/// Documents/iw4l-env.txt) forces the RGBA8 path for comparison.
+pub fn set_gpu_bc_textures(supported: bool) {
+    let allowed = diag::memory_settings::get().ios_bc;
+    let on = supported && allowed;
+    GPU_BC.store(on, Ordering::Relaxed);
+    #[cfg(target_os = "ios")]
+    diag::boot_crumb(&format!(
+        "gpu bc textures: {} (device {}, IW4L_IOS_BC={})",
+        if on { "on" } else { "off" },
+        if supported {
+            "supports BC"
+        } else {
+            "has no BC"
+        },
+        u8::from(allowed),
+    ));
+}
+
 #[cfg(target_os = "ios")]
-fn ios_expand_to_rgba8(mips: &DecodedMips, data: &[u8]) -> (MipStorage, Vec<u8>, u32, u32, u32) {
+fn gpu_bc() -> bool {
+    GPU_BC.load(Ordering::Relaxed)
+}
+
+/// Mip levels to drop so the texture is no wider than `ios_texture_cap()`.
+#[cfg(target_os = "ios")]
+fn ios_cap_skip(mips: &DecodedMips) -> usize {
     let cap = ios_texture_cap();
     let total = mips.level_sizes.len();
     let mut skip = 0usize;
     while skip + 1 < total && (mips.width.max(mips.height) >> skip) > cap {
         skip += 1;
     }
+    skip
+}
+
+/// Fits a decoded mip chain for the iOS GPU, dropping the levels above
+/// `ios_texture_cap()`. BC stays compressed when the GPU supports it (4-8x
+/// smaller than RGBA8); otherwise every kept level is expanded to RGBA8.
+/// Returns (storage, payload, width, height, level count).
+#[cfg(target_os = "ios")]
+fn ios_fit_for_gpu(mips: &DecodedMips, mut data: Vec<u8>) -> (MipStorage, Vec<u8>, u32, u32, u32) {
+    let cap_skip = ios_cap_skip(mips);
+    let total = mips.level_sizes.len();
+    let chain: usize = mips.level_sizes.iter().map(|size| *size as usize).sum();
+    if gpu_bc() && mips.storage != MipStorage::Rgba8 && data.len() >= chain {
+        // A BC texture's base level must be whole 4x4 blocks; keep a larger
+        // level than the cap asks for rather than lose BC.
+        let mut skip = cap_skip;
+        while skip > 0 && ((mips.width >> skip) % 4 != 0 || (mips.height >> skip) % 4 != 0) {
+            skip -= 1;
+        }
+        if mips.width >> skip >= 4
+            && mips.height >> skip >= 4
+            && (mips.width >> skip) % 4 == 0
+            && (mips.height >> skip) % 4 == 0
+        {
+            let offset: usize = mips.level_sizes[..skip]
+                .iter()
+                .map(|size| *size as usize)
+                .sum();
+            // `split_off` moves the kept levels into their own allocation so the
+            // dropped full-size levels are freed with `data`.
+            let mut tail = if skip == 0 {
+                data
+            } else {
+                data.split_off(offset)
+            };
+            tail.truncate(chain - offset);
+            diag::IOS_TEXTURE_BYTES.fetch_add(tail.len() as u64, Ordering::Relaxed);
+            diag::memtrack::add(diag::memtrack::Cat::ImageCpu, tail.len() as u64);
+            return (
+                mips.storage,
+                tail,
+                (mips.width >> skip).max(1),
+                (mips.height >> skip).max(1),
+                (total - skip) as u32,
+            );
+        }
+    }
+    ios_expand_to_rgba8(mips, &data, cap_skip)
+}
+
+/// Expands every kept mip level to RGBA8, skipping the first `skip` levels.
+/// BC5 becomes (R, G, 0, 255) so a shader reading .rg sees the same two
+/// channels.
+#[cfg(target_os = "ios")]
+fn ios_expand_to_rgba8(
+    mips: &DecodedMips,
+    data: &[u8],
+    skip: usize,
+) -> (MipStorage, Vec<u8>, u32, u32, u32) {
+    let total = mips.level_sizes.len();
     let width = (mips.width >> skip).max(1);
     let height = (mips.height >> skip).max(1);
     let mut out = Vec::new();

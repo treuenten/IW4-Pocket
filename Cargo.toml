@@ -7,6 +7,10 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 # without it. vendor/winit is 0.30.13 plus a scene delegate (see
 # vendor/winit/src/platform_impl/ios/scene_delegate.rs); ios/Info.plist names it.
 winit = { path = "vendor/winit" }
+# wgpu-hal 29 only reports BC texture compression on macOS. vendor/wgpu-hal is
+# 29.0.4 with the iOS detection from gfx-rs/wgpu#9656, so iOS can keep textures
+# BC-compressed instead of expanding them to RGBA8. Remove once on wgpu 30+.
+wgpu-hal = { path = "vendor/wgpu-hal" }
 
 [workspace]
 resolver = "3"
