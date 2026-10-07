@@ -19,6 +19,9 @@ const CONTENTS_SOLID: u32 = 1;
 const SLEEP_SPEED: f32 = 4.0;
 const GROUND_NZ: f32 = 0.7;
 const CONTACT_SLOP: f32 = 0.125;
+/// Highest a stuck body is lifted in one step; about what the old per-step
+/// lift reached during one wake.
+const UNSTICK_MAX_LIFT: f32 = 16.0;
 const SLEEP_MS: i32 = 200;
 
 #[derive(Resource, Clone, Default)]
@@ -214,16 +217,24 @@ fn integrate_body(body: &mut DynEntPhysBody, clip: &ClipCollision, dt: f32) {
         // it every step (it is re-woken whenever the player walks past)
         // walked props up the wall to the ceiling. Such a body stays where it
         // was placed and sleeps.
-        let lifted = body.origin + Vec3::Z * (lift + CONTACT_SLOP);
-        let probe = clip.sweep_box(
-            lifted.to_array(),
-            lifted.to_array(),
-            body.mins,
-            body.maxs,
-            CONTENTS_SOLID,
-        );
-        if !probe.startsolid && !probe.allsolid {
-            body.origin = lifted;
+        // Doubling probes up to a small cap still free a body sunk a little
+        // into a floor or resting on a slope, as the old step-by-step lift did.
+        let mut dz = lift + CONTACT_SLOP;
+        let cap = dz.max(UNSTICK_MAX_LIFT);
+        while dz <= cap {
+            let lifted = body.origin + Vec3::Z * dz;
+            let probe = clip.sweep_box(
+                lifted.to_array(),
+                lifted.to_array(),
+                body.mins,
+                body.maxs,
+                CONTENTS_SOLID,
+            );
+            if !probe.startsolid && !probe.allsolid {
+                body.origin = lifted;
+                break;
+            }
+            dz *= 2.0;
         }
         return;
     }
