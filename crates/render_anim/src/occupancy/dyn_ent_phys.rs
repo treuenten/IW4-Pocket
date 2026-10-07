@@ -209,7 +209,22 @@ fn integrate_body(body: &mut DynEntPhysBody, clip: &ClipCollision, dt: f32) {
         } else {
             1.0
         };
-        body.origin.z += lift;
+        // Lift out of a floor only when the lifted spot is clear. A body that
+        // overlaps a wall or roof is still inside after any lift, and lifting
+        // it every step (it is re-woken whenever the player walks past)
+        // walked props up the wall to the ceiling. Such a body stays where it
+        // was placed and sleeps.
+        let lifted = body.origin + Vec3::Z * (lift + CONTACT_SLOP);
+        let probe = clip.sweep_box(
+            lifted.to_array(),
+            lifted.to_array(),
+            body.mins,
+            body.maxs,
+            CONTENTS_SOLID,
+        );
+        if !probe.startsolid && !probe.allsolid {
+            body.origin = lifted;
+        }
         return;
     }
     if hit.fraction < 1.0 {
