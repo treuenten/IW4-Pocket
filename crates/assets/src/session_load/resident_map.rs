@@ -81,7 +81,17 @@ pub async fn load_prepared_match(
     let MatchLoadOutcome::Ready(mut prepared) = outcome else {
         return outcome;
     };
-    if let (Some(zone), Some(common)) = (stamp, common) {
+    // The kept copy shares every decoded Arc<Image>, so on iOS each world
+    // texture would stay in main memory beside its GPU copy for the whole
+    // spawn (~1.2 GB on mp_abandon). IW4L_RESIDENT_MAP=1 turns it back on.
+    let keep = diag::memory_settings::get().resident_map;
+    if !keep {
+        prepared.report.push(
+            "resident map: not kept (IW4L_RESIDENT_MAP=0; its texels would stay alive beside their GPU copies)"
+                .into(),
+        );
+    }
+    if keep && let (Some(zone), Some(common)) = (stamp, common) {
         let keeping = std::time::Instant::now();
         let resident = prepared.clone();
         prepared.report.push(format!(

@@ -884,6 +884,7 @@ pub(crate) fn reset_world_spawn_on_teardown(
     mut demand: ResMut<super::world_gpu::PipelineDemandTracker>,
     mut image_handles: Option<ResMut<crate::assemble::drawsurf::RuntimeImageHandles>>,
     mut retiring: ResMut<frame::Retiring>,
+    mut common_images: ResMut<super::world_images::ResidentGpuImages>,
     images: Res<Assets<Image>>,
     mut commands: Commands,
 ) {
@@ -891,6 +892,11 @@ pub(crate) fn reset_world_spawn_on_teardown(
         return;
     }
     let live_before = images.len();
+    // With a bounded FPV cache (iOS) the next load decodes FPV images again;
+    // holding their GPU copies as well would stack both through that load.
+    if diag::memory_settings::get().fpv_retain_bytes != u64::MAX {
+        common_images.release_common();
+    }
     retiring.hand_over(std::mem::take(&mut *job));
     *gpu = WorldGpuReady::default();
     *demand = super::world_gpu::PipelineDemandTracker::default();

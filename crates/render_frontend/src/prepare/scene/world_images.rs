@@ -205,6 +205,14 @@ pub struct ResidentGpuImages {
     map: ResidentMapImages,
 }
 
+impl ResidentGpuImages {
+    /// Lets go of the common (FPV) GPU textures kept by variant, leaving the
+    /// resident map's handles alone.
+    pub(crate) fn release_common(&mut self) {
+        self.by_variant.clear();
+    }
+}
+
 #[derive(Default)]
 struct ResidentMapImages {
     products_id: u64,
@@ -640,7 +648,10 @@ impl WorldImageUpload {
         }
         // Every slot has been handed over: this is the boundary the owner
         // meant, not merely `done == total`.
-        if self.products_id != 0 {
+        // Without a resident map no later walk can have this products id, so
+        // keeping the handles would only hold this map's GPU textures through
+        // the next map's load.
+        if self.products_id != 0 && diag::memory_settings::get().resident_map {
             common.map = ResidentMapImages {
                 products_id: self.products_id,
                 exact: self.exact_handles.clone(),
