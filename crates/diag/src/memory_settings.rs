@@ -175,6 +175,7 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_IMAGE_DECODE_BUDGET_MIB" | "IW4L_CACHE_BUDGET_MIB" =>
             value.parse::<u64>().is_ok_and(|n| n <= 4096),
         "IW4L_SOUND" => matches!(value, "off" | "0" | "on" | "1"),
+        "IW4L_FRAME_LATENCY" => matches!(value, "1" | "2" | "3"),
         // Personal build only: console lines run when the first match starts
         // (e.g. `bot add 5`). Not for upstream, which excludes engine controls.
         "IW4L_CMDS" => !value.contains('\0'),
