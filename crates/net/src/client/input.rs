@@ -206,8 +206,17 @@ pub fn remote_control_axes(input: &ClientActionInput, mouse_x: f32, mouse_y: f32
         input.mouse_accel,
         input.fov_scale,
     );
+    // A controller steers with either stick, whichever is pushed further, in
+    // the same directions as the mouse: up/right on the stick is up/right on
+    // the mouse. Without this a phone (no mouse) could not steer at all.
+    let further = |a: f32, b: f32| if a.abs() >= b.abs() { a } else { b };
+    let stick_up = further(input.pad_look[1], input.pad_move[0]);
+    let stick_right = further(input.pad_look[0], input.pad_move[1]);
     let axis = |v: f32| (v.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8;
-    [axis(-input.m_pitch * my), axis(input.m_yaw * mx)]
+    [
+        axis(-input.m_pitch * my + stick_up),
+        axis(input.m_yaw * mx + stick_right),
+    ]
 }
 
 pub fn idle_usercmd(server_time: i32) -> UserCmd {
