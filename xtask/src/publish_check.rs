@@ -49,6 +49,12 @@ const EXEMPT: &[&str] = &[
     "xtask/src/publish_check.rs",
 ];
 
+/// Third-party crates copied from crates.io so a marked patch can sit on top
+/// (see `[patch.crates-io]` in Cargo.toml). Their own tests and the numbers in
+/// their comments are theirs, not this tree's, so neither the offset scan nor
+/// the stray-test scan reads them. The leak scans (paths, pasted keys) still do.
+const THIRD_PARTY: &str = "vendor/";
+
 fn stray_test(rel: &str, text: &str) -> Option<(usize, &'static str)> {
     if rel.split('/').rev().skip(1).any(|part| part == "tests") {
         return Some((0, "tests/ directory"));
@@ -439,7 +445,8 @@ pub fn run_cli(root: &Path) -> Res<()> {
         }
         // Not every text file is valid UTF-8; what is in one still counts.
         let text = String::from_utf8_lossy(&bytes);
-        if let Some((line, what)) = stray_test(&rel, &text) {
+        let third_party = rel.starts_with(THIRD_PARTY);
+        if !third_party && let Some((line, what)) = stray_test(&rel, &text) {
             tests.push(Finding {
                 path: path.clone(),
                 line,
@@ -460,6 +467,9 @@ pub fn run_cli(root: &Path) -> Res<()> {
                 what: "pasted private key".to_string(),
                 text: "(redacted)".to_string(),
             });
+            continue;
+        }
+        if third_party {
             continue;
         }
         scanned += 1;
