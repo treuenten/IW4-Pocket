@@ -3,6 +3,10 @@
 # Remove when a crates.io release includes quinn-rs/quinn#2806.
 [patch.crates-io]
 quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01ea7bebd60023e5df7df65e5c2bd" }
+# winit 0.30 has no UIScene support, and iOS 27 won't launch apps built with the iOS 27 SDK
+# without it. vendor/winit is 0.30.13 plus a scene delegate (see
+# vendor/winit/src/platform_impl/ios/scene_delegate.rs); ios/Info.plist names it.
+winit = { path = "vendor/winit" }
 
 [workspace]
 resolver = "3"
