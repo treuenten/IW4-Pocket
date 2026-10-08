@@ -296,24 +296,28 @@ pub(crate) fn phase_run_corpse_move(world: &mut FrameWorld, time_ms: i32) {
                 slot.tr_duration = 0;
                 slot.tr_delta = [0.0; 3];
             }
-            if ragdoll {
-                let mut probe = desired;
-                probe[2] -= CORPSE_GROUND_PROBE_DROP;
-                let ground =
-                    world.trace_clip(endpos, probe, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID);
-                if ground.fraction < 1.0 || ground.startsolid != 0 {
-                    let slot = &mut world.corpses_mut().slots[i];
-                    slot.falling = true;
-                    let mut vel = slot.tr_delta;
-                    for axis in 0..3 {
-                        vel[axis] = (vel[axis] + world_delta[axis]) * CORPSE_ANIM_DELTA_TO_VELOCITY;
-                    }
-                    slot.tr_delta = vel;
-                    slot.tr_type = TR_BOUNCE_GRAVITY;
-                    slot.tr_time = time_ms;
-                    slot.tr_duration = 0;
-                    continue;
-                }
+            // The animation step left the body somewhere new. If nothing is
+            // under it (it slid off a ledge or stair edge), let it fall: the
+            // landing below puts it down. This used to run only for ragdolls,
+            // which never happen, and with the test reversed, so bodies that
+            // slid off an edge stayed in the air at their death height.
+            let mut probe = endpos;
+            probe[2] -= CORPSE_GROUND_PROBE_DROP;
+            let ground =
+                world.trace_clip(endpos, probe, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID);
+            if ground.fraction >= 1.0 && ground.startsolid == 0 {
+                let slot = &mut world.corpses_mut().slots[i];
+                slot.falling = true;
+                slot.tr_type = if ragdoll {
+                    TR_BOUNCE_GRAVITY
+                } else {
+                    TR_GRAVITY
+                };
+                slot.tr_base = endpos;
+                slot.tr_time = time_ms;
+                slot.tr_duration = 0;
+                slot.tr_delta = world_delta.map(|d| d * CORPSE_ANIM_DELTA_TO_VELOCITY);
+                continue;
             }
             world.corpses_mut().slots[i].falling = false;
             continue;
