@@ -1608,7 +1608,20 @@ fn sound_visual(name: String) -> OwnedFxVisual {
 }
 
 fn model_visual(name: Option<String>) -> OwnedFxVisual {
-    match name.filter(|n| !n.is_empty()) {
+    model_visual_from(name, diag::memory_settings::get().fx_models)
+}
+
+/// `,name` is a zone's placeholder for a model already loaded from another zone
+/// (mp_terminal's `,fx_cash01` is common_mp's fx_cash01), so with
+/// `resolve_references` it hints the bare name. Only with IW4L_FX_MODELS on:
+/// off keeps the effect model catalog and edges as they were.
+fn model_visual_from(name: Option<String>, resolve_references: bool) -> OwnedFxVisual {
+    let hint = match name {
+        Some(name) if resolve_references => Some(crate::AssetRef::bare_name(&name).to_owned()),
+        name => name,
+    }
+    .filter(|name| !name.is_empty());
+    match hint {
         Some(hint) => OwnedFxVisual::Model {
             edge: AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
             hint: Some(hint),
@@ -2466,4 +2479,102 @@ fn capture_elem_t6(
         trail_def: None,
         spark_fountain_def: None,
     })
+}
+
+#[cfg(test)]
+mod model_visual_tests {
+    use super::*;
+
+    fn hint(visual: &OwnedFxVisual) -> Option<&str> {
+        match visual {
+            OwnedFxVisual::Model { hint, .. } => hint.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn skel(name: &str) -> crate::ModelSkel {
+        crate::ModelSkel {
+            name: name.to_owned(),
+            bones: Vec::new(),
+            bone_collision: Vec::new(),
+            bone_names: Vec::new(),
+            tag_view: None,
+            tag_weapon: None,
+            pose: None,
+            positions: Vec::new(),
+            normals: Vec::new(),
+            colors: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+            surface_materials: Vec::new(),
+            surface_vertex_ranges: Vec::new(),
+            surface_index_ranges: Vec::new(),
+            surface_part_bits: Vec::new(),
+            surface_deformed: Vec::new(),
+            surface_vert_list_count: Vec::new(),
+            vert_skin: Vec::new(),
+            rigid_verts: 0,
+            blend_verts: 0,
+            packed_vertices: Vec::new(),
+            radius: None,
+            bounds: None,
+            contents: None,
+            coll_lod: 0,
+            coll_surfs: Vec::new(),
+            movement_brushes: Vec::new(),
+            mount_tag: None,
+            lod: None,
+            lod_smc: None,
+            lod_part_bits: None,
+            lod_surf_span: [(0, 0); 4],
+        }
+    }
+
+    fn on(name: &str) -> OwnedFxVisual {
+        model_visual_from(Some(name.to_owned()), true)
+    }
+
+    #[test]
+    fn comma_placeholder_hints_the_loaded_model() {
+        assert_eq!(hint(&on(",fx_cash01")), Some("fx_cash01"));
+        assert_eq!(hint(&on("fx_cash01")), Some("fx_cash01"));
+        assert_eq!(on(","), OwnedFxVisual::None);
+        assert_eq!(on(""), OwnedFxVisual::None);
+        assert_eq!(model_visual_from(None, true), OwnedFxVisual::None);
+    }
+
+    #[test]
+    fn switch_off_keeps_the_placeholder_name() {
+        let off = model_visual_from(Some(",fx_cash01".to_owned()), false);
+        assert_eq!(hint(&off), Some(",fx_cash01"));
+        assert_eq!(
+            model_visual_from(Some(",".to_owned()), false),
+            OwnedFxVisual::Model {
+                edge: AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
+                hint: Some(",".to_owned()),
+            }
+        );
+        assert_eq!(model_visual_from(None, false), OwnedFxVisual::None);
+    }
+
+    #[test]
+    fn comma_placeholder_binds_against_common_model() {
+        let ns = crate::AssetNamespace::Iw4;
+        let mut models = crate::FxModelCatalog::default();
+        models.set_capture_ns(ns);
+        models.capture_shared(
+            std::sync::Arc::new(skel("fx_cash01")),
+            &MaterialCatalog::default(),
+        );
+        let visual = on(",fx_cash01");
+        assert_eq!(
+            model_hint_edge(ns, hint(&visual), &models).bound_index(),
+            Some(0)
+        );
+        assert!(
+            model_hint_edge(ns, Some(",fx_cash01"), &models)
+                .bound_index()
+                .is_none()
+        );
+    }
 }

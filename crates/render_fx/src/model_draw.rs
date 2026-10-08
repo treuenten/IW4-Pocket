@@ -74,6 +74,16 @@ impl FxModelDrawPlan {
         &self.geometry.packed_vertices
     }
 
+    /// Every decoded vertex has its packed row. The merged xmodel lane needs this
+    /// from each source it takes draws from, or it drops every xmodel draw
+    /// (viewmodel, bodies, script models) for that frame.
+    pub fn packed_exact(&self) -> bool {
+        matches!(
+            &self.geometry.packed_vertices,
+            asset_world::PackedVertexPayload::Iw4(rows) if rows.len() == self.geometry.vertices.len()
+        )
+    }
+
     pub fn clear(&mut self) {
         self.draws.clear();
         self.generated = 0;
