@@ -937,6 +937,26 @@ impl MaterialCatalog {
         )
     }
 
+    /// A `,name` material is a reference to one an earlier zone loaded (common_mp
+    /// for a map), streamed as a stub without a technique set, so
+    /// `capture_material` refuses it and every surface on it was left unbound
+    /// (pieces of burnt cars, wall fans and air conditioners, a six-pack's wrap).
+    /// Bind the slot to the real material of that name instead.
+    fn reference_material_index(&self, s: &ZoneStream<'_>) -> Option<usize> {
+        let name = s
+            .latest_material()?
+            .name
+            .and_then(|name| s.cstr(name).ok())
+            .map(AssetRef::decode)?;
+        if !name.is_reference() {
+            return None;
+        }
+        let namespace = self.capture_ns?;
+        self.materials
+            .iter()
+            .position(|m| m.namespace == namespace && m.name.is_real() && m.name.same_name(&name))
+    }
+
     fn capture_material(&mut self, s: &ZoneStream<'_>) -> Option<usize> {
         let geometry = s.latest_material()?;
         let name = geometry
@@ -1299,7 +1319,10 @@ impl AssetLinkSink for MaterialCatalog {
             }
             AssetType::Material => {
                 let header = s.latest_material().and_then(|g| g.header);
-                let Some(index) = self.capture_material(s) else {
+                let Some(index) = self
+                    .capture_material(s)
+                    .or_else(|| self.reference_material_index(s))
+                else {
                     self.capture_gaps += 1;
                     return Ok(());
                 };

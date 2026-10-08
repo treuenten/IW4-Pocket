@@ -111,6 +111,11 @@ pub fn scene_lit_pass_material(
     authored: assets::MaterialIndex,
 ) -> Option<SmodelPassMaterial> {
     let world_material = tess.catalog().derived(authored)?;
+    // Shadow-only surfaces never draw in the lit pass (static models already skip
+    // them); now that `,mc/shadowcaster` references bind, script models would.
+    if world_material.shadow_only {
+        return None;
+    }
     let ordinal = tess
         .catalog()
         .parts()

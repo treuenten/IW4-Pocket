@@ -80,7 +80,7 @@ struct ScriptModelPoseLocals<'w, 's> {
 #[derive(SystemParam)]
 struct ScriptModelTessLocals<'w, 's> {
     last_material_generation: Local<'s, Option<render_material::MaterialGenerationId>>,
-    last_unbound_materials: Local<'s, usize>,
+    unbound_warned: Local<'s, std::collections::HashSet<String>>,
     model_materials: Res<'w, crate::anim::model_materials::PreparedModelMaterials>,
     live_plan: Local<'s, Vec<usize>>,
     product_to_plan: Local<'s, Vec<usize>>,
@@ -788,7 +788,7 @@ fn commit_script_model_draw_plan(
 ) {
     let ScriptModelTessLocals {
         mut last_material_generation,
-        mut last_unbound_materials,
+        mut unbound_warned,
         model_materials,
         mut live_plan,
         mut product_to_plan,
@@ -821,6 +821,7 @@ fn commit_script_model_draw_plan(
         plan.generation = generation;
         plan.revisions = revisions;
         *last_material_generation = Some(material_generation);
+        unbound_warned.clear();
     }
     draws.clear();
     owners.clear();
@@ -856,13 +857,17 @@ fn commit_script_model_draw_plan(
         product_to_plan[product_index] = plan_index;
         live_plan.push(plan_index);
     }
-    if product.surface_material_unbound != *last_unbound_materials {
-        *last_unbound_materials = product.surface_material_unbound;
+    // Once per model: the count flaps between 0 and N whenever a model is re-posed
+    // after being culled, which logged this thousands of times a match.
+    if product.surface_material_unbound > 0
+        && let Some(first) = product.surface_material_first.as_deref()
+        && unbound_warned.insert(first.to_owned())
+    {
         diag::warn!(
             World,
-            "script model surfaces without a bound material: {} (first {});              MapXModelSceneCatalog resolved={}",
+            "script model surfaces without a bound material: {} (first {}); MapXModelSceneCatalog resolved={}",
             product.surface_material_unbound,
-            product.surface_material_first.as_deref().unwrap_or("-"),
+            first,
             u8::from(assets.materials_resolved()),
         );
     }
