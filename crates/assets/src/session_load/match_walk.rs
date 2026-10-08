@@ -245,6 +245,15 @@ pub(super) async fn walk_prepared_match(
             ));
             scripts
         }
+        _ if facts.campaign => {
+            let scripts = campaign_map_under_iw4_rules(&map_scripts, &zone_name);
+            report.push(format!(
+                "map script: maps/mp/{zone_name} written for the campaign map; {} of its {} scripts kept (destructible animation tables), the rest left out",
+                scripts.len().saturating_sub(2),
+                map_scripts.len()
+            ));
+            scripts
+        }
         _ => map_scripts,
     };
     let mut scripts = iw4_scripts;
@@ -275,7 +284,14 @@ pub(super) async fn walk_prepared_match(
     let common_xanim_count = xanims.len();
     let map_xanim_count = map_xanims.len();
     let t5_xanim_added = xanims.absorb(t5_xanims);
-    xanims.absorb_local(map_xanims);
+    if facts.campaign {
+        let kept = map_xanim_count - xanims.absorb_missing(map_xanims);
+        report.push(format!(
+            "campaign XAnims: {kept} of the zone's {map_xanim_count} share a name with common_mp's and are left out"
+        ));
+    } else {
+        xanims.absorb_local(map_xanims);
+    }
     weapons.resolve_sz_xanim_edges(&xanims);
     let weapon_clip_indices = weapons.bound_weapon_xanim_indices();
     let clip_prewarm_started = std::time::Instant::now();
@@ -327,7 +343,13 @@ pub(super) async fn walk_prepared_match(
     report.extend(gap_lines.iter().cloned());
     report.extend(bodies.report_lines());
     let map_fpv_n = map_fpv.len();
-    let map_fpv_added = fpv_meshes.absorb(map_fpv);
+    // The campaign's guns and hands are rigged for its own animations; the multiplayer weapons
+    // (and the hands their definitions name) are common_mp's.
+    let map_fpv_added = if facts.campaign {
+        0
+    } else {
+        fpv_meshes.absorb(map_fpv)
+    };
     fpv_meshes.set_map_namespace(map_namespace);
 
     world_weapons.seal_identity();
@@ -1269,6 +1291,36 @@ fn faction_cells(
         cells.extend((14..).zip(rgb.map(|c| c.to_string())));
     }
     cells
+}
+
+/// A campaign map plays its world and props, never its scripts: the zone's `maps/<zone>.gsc`,
+/// characters and AI types are the campaign's own, and the gametypes need none of them. The
+/// scripts that fill `level._destructible_preanims` are shared with the multiplayer maps, and stay.
+fn campaign_map_under_iw4_rules(
+    map_scripts: &crate::ScriptSources,
+    zone_name: &str,
+) -> crate::ScriptSources {
+    let mut scripts = crate::ScriptSources::default();
+    let props: Vec<String> = map_scripts
+        .modules()
+        .filter(|module| module.starts_with("common_scripts/_destructible_types_anim_"))
+        .map(str::to_owned)
+        .collect();
+    for module in &props {
+        scripts.copy_module(map_scripts, module);
+    }
+    scripts.insert_source(
+        &format!("maps/mp/{zone_name}"),
+        crate::map_scripts::campaign_map(&props),
+    );
+    scripts.insert_source(
+        "iw4l_maps/campaign",
+        crate::map_scripts::CAMPAIGN_RULES.to_owned(),
+    );
+    if let Some(entities) = map_scripts.entities() {
+        scripts.set_entities(entities.to_owned());
+    }
+    scripts
 }
 
 fn t5_map_under_iw4_rules(

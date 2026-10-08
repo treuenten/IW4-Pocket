@@ -357,6 +357,10 @@ pub fn dm_spawn_points(s: &ZoneStream<'_>) -> Vec<SpawnPoint> {
     let Some(text) = entity_string(s) else {
         return Vec::new();
     };
+    dm_spawn_points_in(text)
+}
+
+pub fn dm_spawn_points_in(text: &str) -> Vec<SpawnPoint> {
     parse_spawn_points(text, MP_SPAWN_CLASSNAMES)
 }
 
@@ -1145,7 +1149,7 @@ fn effective_script_exploder(prefab: Option<&str>, exploder: Option<&str>) -> St
     prefab.or(exploder).unwrap_or("").to_owned()
 }
 
-fn parse_vec3(value: &str) -> Option<[f32; 3]> {
+pub(crate) fn parse_vec3(value: &str) -> Option<[f32; 3]> {
     let mut values = value.split_whitespace().map(str::parse::<f32>);
     let result = [
         values.next()?.ok()?,

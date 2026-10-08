@@ -289,6 +289,34 @@ impl XAnimBuild {
         let _ = self.absorb(local);
     }
 
+    /// Like [`Self::absorb`], but a name already held keeps its clip: a campaign zone's
+    /// `viewmodel_m4_idle` must not replace the multiplayer weapon's.
+    pub fn absorb_missing(&mut self, mut local: Self) -> usize {
+        self.capture_gaps = self.capture_gaps.saturating_add(local.capture_gaps);
+        let saved_zone = self.capture_zone;
+        let saved_ns = self.capture_ns;
+        let mut added = 0;
+        let order = std::mem::take(&mut local.catalog.order);
+        let entries = std::mem::take(&mut local.catalog.entries);
+        for (i, (key, captured)) in order.into_iter().zip(entries).enumerate() {
+            if self.catalog.has_key(&key) {
+                continue;
+            }
+            self.capture_zone = local
+                .catalog
+                .zones
+                .get(i)
+                .copied()
+                .unwrap_or(local.capture_zone);
+            self.capture_ns = Some(key.namespace);
+            self.retain(key, captured);
+            added += 1;
+        }
+        self.capture_zone = saved_zone;
+        self.capture_ns = saved_ns;
+        added
+    }
+
     pub fn capture_xanim_iw5(
         &mut self,
         s: &fastfile_iw5::ZoneStream<'_>,

@@ -46,6 +46,10 @@ pub struct MapFacts {
     pub t5_teamset: Option<String>,
 
     pub objective_visuals: asset_game::ObjectiveVisuals,
+
+    /// A single-player map played under the multiplayer rules: its own scripts stay out of the
+    /// program.
+    pub campaign: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

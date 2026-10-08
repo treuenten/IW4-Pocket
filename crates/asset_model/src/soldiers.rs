@@ -42,10 +42,20 @@ enum Side {
 }
 
 pub fn soldier_kits(names: &[String]) -> SoldierKits {
+    kits_among(names, is_body_model)
+}
+
+/// The kits of a campaign zone, whose soldiers are `body_us_army_assault_a` rather than the
+/// multiplayer `mp_body_us_army_assault_a`. Heads and hands are named alike in both.
+pub fn campaign_soldier_kits(names: &[String]) -> SoldierKits {
+    kits_among(names, is_campaign_body_model)
+}
+
+fn kits_among(names: &[String], is_body: fn(&str) -> bool) -> SoldierKits {
     let bodies: Vec<&str> = names
         .iter()
         .map(String::as_str)
-        .filter(|name| is_body_model(name))
+        .filter(|name| is_body(name))
         .collect();
     let heads: Vec<&str> = names
         .iter()
@@ -82,6 +92,10 @@ pub fn is_body_model(name: &str) -> bool {
     name.starts_with("mp_body_")
         || name.contains("_mp_body_")
         || (name.starts_with("c_") && name.contains("_mp_") && name.ends_with("_fb"))
+}
+
+pub fn is_campaign_body_model(name: &str) -> bool {
+    name.starts_with("body_")
 }
 
 pub fn body_has_tp_attach_bones(bone_names: &[String]) -> bool {
@@ -277,4 +291,93 @@ fn distinctive_tokens(name: &str) -> impl Iterator<Item = &str> {
                 | "5"
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn kit(body: &str, head: &str) -> SoldierKit {
+        SoldierKit {
+            body: body.to_owned(),
+            head: Some(head.to_owned()),
+            arms: None,
+        }
+    }
+
+    #[test]
+    fn a_multiplayer_zone_keeps_its_multiplayer_bodies() {
+        let kits = soldier_kits(&names(&[
+            "mp_body_us_army_assault_a",
+            "head_us_army_a",
+            "mp_body_airborne_assault_a",
+            "head_airborne_a",
+        ]));
+        assert_eq!(
+            kits.allies,
+            Some(kit("mp_body_us_army_assault_a", "head_us_army_a"))
+        );
+        assert_eq!(
+            kits.axis,
+            Some(kit("mp_body_airborne_assault_a", "head_airborne_a"))
+        );
+    }
+
+    #[test]
+    fn a_campaign_body_is_no_multiplayer_body() {
+        let zone = names(&["body_us_army_assault_a", "head_us_army_a"]);
+        assert_eq!(soldier_kits(&zone), SoldierKits::default());
+        assert_eq!(
+            campaign_soldier_kits(&zone).allies,
+            Some(kit("body_us_army_assault_a", "head_us_army_a"))
+        );
+    }
+
+    #[test]
+    fn the_campaign_picks_rangers_against_opfor_where_the_zone_has_both() {
+        let kits = campaign_soldier_kits(&names(&[
+            "body_us_army_assault_a",
+            "body_us_army_assault_b",
+            "body_us_army_lmg",
+            "body_ally_arab_trn_assault_a",
+            "body_opforce_arab_assault_a",
+            "body_opforce_arab_lmg_a",
+            "body_vil_shepherd",
+            "head_us_army_a",
+            "head_us_army_b",
+            "head_hero_dunn",
+            "head_trn_arab_a",
+            "head_opforce_arab_a",
+            "head_opforce_arab_b",
+        ]));
+        assert_eq!(
+            kits.allies,
+            Some(kit("body_us_army_assault_a", "head_us_army_a"))
+        );
+        assert_eq!(
+            kits.axis,
+            Some(kit("body_opforce_arab_assault_a", "head_opforce_arab_a"))
+        );
+    }
+
+    #[test]
+    fn a_campaign_zone_with_one_side_dresses_both() {
+        let kits = campaign_soldier_kits(&names(&[
+            "body_us_army_assault_a",
+            "body_us_army_lmg",
+            "body_vil_shepherd",
+            "head_us_army_a",
+            "head_hero_foley",
+        ]));
+        assert!(kits.axis.is_none());
+        assert_eq!(kits.kit(true), kits.kit(false));
+        assert_eq!(
+            kits.kit(true).map(|kit| kit.body.as_str()),
+            Some("body_us_army_assault_a")
+        );
+    }
 }

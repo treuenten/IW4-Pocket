@@ -19,8 +19,8 @@ use asset_material::decode_material_color_maps;
 use asset_transport::{LoadProgress, StageId, ZoneImage, ZoneMemory};
 use asset_world::{
     WorldDrawPolicy, build_clip_collision, build_world_draw, census_entity_string_keys,
-    dm_spawn_points, intermission_view, map_ents_entity_string, minimap_corners,
-    worldspawn_north_yaw,
+    dm_spawn_points, dm_spawn_points_in, intermission_view, map_ents_entity_string,
+    minimap_corners, parse_intermission_view, sp_entities_for_iw4_rules, worldspawn_north_yaw,
 };
 
 pub struct Iw4Lane;
@@ -158,8 +158,20 @@ impl ZoneLane for Iw4Lane {
 
         let compass = std::mem::take(&mut sink.compass).resolve(&materials);
         let mut scripts = std::mem::take(&mut sink.scripts);
-        if let Some(entities) = map_ents_entity_string(&stream) {
+        let campaign = sink.campaign;
+        let campaign_entities = campaign
+            .then(|| map_ents_entity_string(&stream).map(sp_entities_for_iw4_rules))
+            .flatten();
+        if let Some(entities) = campaign_entities
+            .as_deref()
+            .or_else(|| map_ents_entity_string(&stream))
+        {
             scripts.set_entities(entities.to_owned());
+        }
+        if campaign {
+            report.push(
+                "campaign map: single-player world walked; entities rewritten for IW4 rules".into(),
+            );
         }
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let exp_fog = sink.exp_fog.take();
@@ -398,7 +410,7 @@ impl ZoneLane for Iw4Lane {
             stage.fail();
             report.push("no GfxWorld reached — nothing to draw".into());
             push_mapents_key_census(&mut report, &stream);
-            let dm_spawns = dm_spawn_points(&stream);
+            let dm_spawns = spawn_points(&stream, campaign_entities.as_deref());
             drop(stream);
             let arena_bytes = memory.total_bytes();
             drop(memory);
@@ -431,6 +443,7 @@ impl ZoneLane for Iw4Lane {
                 facts: crate::MapFacts {
                     compass,
                     script_sound,
+                    campaign,
                     ..Default::default()
                 },
                 arena_bytes,
@@ -521,11 +534,11 @@ impl ZoneLane for Iw4Lane {
                 };
                 stage.done();
                 let handoff = progress.begin_scoped(StageId::MapAssets, "handoff", None);
-                let intermission_view = intermission_view(&stream);
+                let intermission_view = intermission_camera(&stream, campaign_entities.as_deref());
                 let minimap_corners = minimap_corners(&stream);
                 let north_yaw = worldspawn_north_yaw(&stream);
                 let airstrike_height = asset_world::airstrike_height(&stream);
-                let dm_spawns = dm_spawn_points(&stream);
+                let dm_spawns = spawn_points(&stream, campaign_entities.as_deref());
                 push_mapents_key_census(&mut report, &stream);
                 drop(stream);
                 let arena_bytes = memory.total_bytes();
@@ -676,6 +689,7 @@ impl ZoneLane for Iw4Lane {
                         airstrike_height,
                         compass,
                         script_sound,
+                        campaign,
                         ..Default::default()
                     },
                     arena_bytes,
@@ -685,7 +699,7 @@ impl ZoneLane for Iw4Lane {
             }
             Err(e) => {
                 report.push(format!("world mesh: {e}"));
-                let dm_spawns = dm_spawn_points(&stream);
+                let dm_spawns = spawn_points(&stream, campaign_entities.as_deref());
                 push_mapents_key_census(&mut report, &stream);
                 drop(stream);
                 let arena_bytes = memory.total_bytes();
@@ -715,6 +729,7 @@ impl ZoneLane for Iw4Lane {
                     facts: crate::MapFacts {
                         compass,
                         script_sound,
+                        campaign,
                         ..Default::default()
                     },
                     arena_bytes,
@@ -1219,6 +1234,27 @@ impl ZoneLane for Iw4Lane {
             cac_tables: sink.stats_tables.into_values().collect(),
             scripts: sink.scripts,
         }
+    }
+}
+
+/// A campaign map is read from its rewritten entity string, the one the scripts will see.
+fn spawn_points(
+    stream: &fastfile_iw4::ZoneStream<'_>,
+    campaign_entities: Option<&str>,
+) -> Vec<asset_world::SpawnPoint> {
+    match campaign_entities {
+        Some(text) => dm_spawn_points_in(text),
+        None => dm_spawn_points(stream),
+    }
+}
+
+fn intermission_camera(
+    stream: &fastfile_iw4::ZoneStream<'_>,
+    campaign_entities: Option<&str>,
+) -> Option<asset_world::IntermissionView> {
+    match campaign_entities {
+        Some(text) => parse_intermission_view(text),
+        None => intermission_view(stream),
     }
 }
 

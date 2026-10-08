@@ -192,6 +192,9 @@ pub(crate) struct ZoneWalkSink {
 
     pub light_def_table: usize,
     pub light_def_bodies: usize,
+
+    /// The zone carries a single-player world (`ClipMapSp` or `GameWorldSp`): a campaign map.
+    pub campaign: bool,
     strings_t5: fastfile_t5::ScriptStrings,
     strings_iw5: fastfile_iw5::ScriptStrings,
     iw5_surfaces:
@@ -1170,6 +1173,7 @@ impl AssetSink for ZoneWalkSink {
                 self.light_def_bodies += 1;
             }
         }
+        self.campaign |= matches!(ty, AssetType::ClipMapSp | AssetType::GameWorldSp);
         self.asset_walked();
         Ok(())
     }

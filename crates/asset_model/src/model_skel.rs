@@ -3,8 +3,8 @@ use bevy::prelude::{Quat, Vec3};
 use fastfile_iw4::{Ptr, ScriptStrings, XModelGeometry, ZonePtr, ZoneStream};
 
 use crate::{
-    ModelKind, dobj::ModelPoseSrc, fpv_catalog::TagViewBind, model_kind, normalize_or_up,
-    unpack_color, unpack_packed_tex_coords, unpack_unit_vec,
+    ModelKind, dobj::ModelPoseSrc, fpv_catalog::TagViewBind, is_campaign_body_model, model_kind,
+    normalize_or_up, unpack_color, unpack_packed_tex_coords, unpack_unit_vec,
 };
 use asset_material::MaterialCatalog;
 pub use xmodel_runtime::BoneCollision;
@@ -269,7 +269,7 @@ pub fn capture_body_skel(
     materials: Option<&MaterialCatalog>,
 ) -> Option<ModelSkel> {
     let name = geometry.name.and_then(|p| stream.cstr(p).ok())?.to_owned();
-    if model_kind(&name) != Some(ModelKind::Soldier) {
+    if model_kind(&name) != Some(ModelKind::Soldier) && !is_campaign_body_model(&name) {
         return None;
     }
     capture_model_skel_iw4(stream, strings, geometry, name, materials, None)

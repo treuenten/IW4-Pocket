@@ -44,6 +44,17 @@ impl ScriptSources {
         self.sources.get(module).map(|source| source.origin)
     }
 
+    pub(crate) fn modules(&self) -> impl Iterator<Item = &str> {
+        self.sources.keys().map(String::as_str)
+    }
+
+    /// Carry one of `from`'s modules over as it is.
+    pub(crate) fn copy_module(&mut self, from: &Self, module: &str) {
+        if let Some(source) = from.sources.get(module) {
+            self.sources.insert(module.to_owned(), source.clone());
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.sources.len()
     }

@@ -1,3 +1,4 @@
+mod campaign_entities;
 pub mod capture;
 pub mod caster;
 mod clip_collision;
@@ -18,6 +19,7 @@ pub mod world_t6;
 
 pub use asset_core::*;
 pub use asset_transport::{Iw5ZoneMemory, T5ZoneMemory, ZoneMemory};
+pub use campaign_entities::sp_entities_for_iw4_rules;
 pub use capture::{
     MaterialSortTrigger, SurfaceMaterialStampError, WorldCapture, stamp_packed_surface_materials,
     world_capture_from_casters,

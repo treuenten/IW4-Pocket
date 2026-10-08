@@ -1,5 +1,32 @@
 pub(crate) const T6_EQUIPMENT: &str = include_str!("t6_equipment.gsc.txt");
 
+/// `maps/mp/<zone>` of a campaign map, in place of the campaign's own `maps/<zone>.gsc`: the
+/// animation tables the zone ships for its destructibles (multiplayer maps call the same scripts
+/// from their precache script), the multiplayer loader, and the two sides the gametypes expect.
+pub(crate) fn campaign_map(props: &[String]) -> String {
+    let mut main = String::from("main()\n{\n");
+    for module in props {
+        main.push_str(&format!("    {}::main();\n", module.replace('/', "\\")));
+    }
+    main.push_str(
+        r#"    maps\mp\_load::main();
+
+    game[ "attackers" ] = "allies";
+    game[ "defenders" ] = "axis";
+}
+"#,
+    );
+    main
+}
+
+/// Started before the gametype. `isSP()` in `common_scripts\utility` answers from the map's name,
+/// "mp_" or not, and a campaign map is named for its mission; it plays by multiplayer rules.
+pub(crate) const CAMPAIGN_RULES: &str = r#"main()
+{
+    level.isSP = false;
+}
+"#;
+
 pub(crate) const RADIATION: &str = r#"main()
 {
     waittillframeend;

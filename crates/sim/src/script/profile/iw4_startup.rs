@@ -17,6 +17,12 @@ impl Iw4Startup {
             gametype.clone(),
         ];
         let mut entries = vec![format!("{gametype}::main")];
+        // A campaign map sets the rules the gametype's own main will already ask about.
+        let campaign = "iw4l_maps/campaign";
+        if resolver.read_bytes(campaign).is_ok() {
+            roots.push(campaign.to_owned());
+            entries.insert(0, format!("{campaign}::main"));
+        }
         if resolver.read_bytes(&map).is_ok() {
             entries.push(format!("{map}::main"));
             roots.push(map);

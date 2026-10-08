@@ -68,6 +68,32 @@ Remote kits and dropped-item compositions are built at install.
 `load ledger:` in the log is one line per load of
 what was handed over or compiled new against what an earlier load left behind.
 
+## Campaign maps
+
+A zone that walks a `ClipMapSp` or `GameWorldSp` (`trainer`, `roadkill`) is a campaign map. It
+plays free-roam under the multiplayer rules, `dm` and `war` only: its world, props and entities,
+none of its scripts. `MapFacts::campaign` carries the fact from the lane to the walk.
+
+* **Entities.** `asset_world::sp_entities_for_iw4_rules` rewrites the string in the lane, and the
+  scripts, the spawn list and the intermission camera all read the rewrite. `info_player_start`
+  becomes `mp_dm_spawn`; up to 23 pathnodes nearest it, at least 192 units apart, join it as dm
+  and tdm spawns (a ring when a map has none), with `_start` points, an `mp_global_intermission`
+  and the `care_package` that `_airdrop` wants. Actors, vehicles and animated models are renamed, never
+  removed: a script model's identity is its ordinal in the string.
+* **Scripts.** The match walk drops the zone's `.gsc` for `maps/mp/<zone>` (the loader, the two
+  sides, the zone's destructible animation tables) and `iw4l_maps/campaign`, which starts before
+  the gametype and sets `level.isSP = false`; `isSP()` otherwise answers from the `mp_` prefix.
+* **Soldiers.** With no `mp_body_*` in the zone, `BodyMeshCatalog::kits` takes the campaign's
+  `body_*` and `head_*` (Rangers against OpFor where the zone has both).
+* **Weapons.** The zone's FPV models are left out, hands included, and a clip that shares a name
+  with common_mp's loses to common_mp's (`XAnimBuild::absorb_missing`): the multiplayer weapons
+  are built on common_mp's, and the campaign's `viewmodel_m4` is another model.
+
+Not there yet: the film vision when the zone carries none (`roadkill` does; `trainer`'s lives in
+the campaign `common.ff`, which no walk opens), ambient effects and sound, the static models a zone does not carry
+(probably in `common.ff`: `trainer` leaves 1,421 of 6,772 slots unresolved, `roadkill` 59 of
+17,422), and a place in the map list (`discover::list_mp_map_packs` and the UI keep to `mp_*`).
+
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<prefix>/<key>`
 
 Content-addressed leaf in `asset_transport::artifact_cache` (`cache_get` /

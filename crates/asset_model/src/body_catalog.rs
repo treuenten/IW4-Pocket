@@ -8,7 +8,10 @@ use crate::asset_graph::{
 use crate::model_skel::{
     ModelSkel, capture_body_skel, capture_body_skel_iw5, capture_body_skel_t5,
 };
-use crate::soldiers::{SoldierKits, body_has_tp_attach_bones, is_body_model, soldier_kits};
+use crate::soldiers::{
+    SoldierKits, body_has_tp_attach_bones, campaign_soldier_kits, is_body_model,
+    is_campaign_body_model, soldier_kits,
+};
 use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 pub const BODY_SPINE_BONES: &[&str] = &[
@@ -215,11 +218,16 @@ impl BodyMeshCatalog {
                 .entries
                 .iter()
                 .filter(|(name, entry)| {
-                    !is_body_model(name) || body_has_tp_attach_bones(&entry.skel.bone_names)
+                    !(is_body_model(name) || is_campaign_body_model(name))
+                        || body_has_tp_attach_bones(&entry.skel.bone_names)
                 })
                 .map(|(name, _)| name.clone())
                 .collect();
-            soldier_kits(&names)
+            let kits = soldier_kits(&names);
+            if kits.allies.is_none() && kits.axis.is_none() {
+                return campaign_soldier_kits(&names);
+            }
+            kits
         })
     }
 
