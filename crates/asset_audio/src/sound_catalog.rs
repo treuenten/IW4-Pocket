@@ -573,6 +573,19 @@ impl SoundCatalog {
         self.sound_in(AssetNamespace::Iw4, alias)
     }
 
+    /// Every variant of the alias plays `null.wav`. MW2 ships such aliases on
+    /// purpose (footsteps on bodies, weapons with no putaway sound), so they
+    /// are silent rather than missing.
+    pub fn alias_is_null(&self, ns: AssetNamespace, alias: &str) -> bool {
+        self.sound_in(ns, alias).is_some_and(|sound| {
+            !sound.aliases.is_empty()
+                && sound
+                    .aliases
+                    .iter()
+                    .all(|row| is_null_sound_name(row.loaded_name.as_deref()))
+        })
+    }
+
     pub fn loaded_index_in(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
         let bare = crate::AssetRef::bare_name(name);
         self.by_loaded.get(&(ns, bare.to_owned())).copied()

@@ -205,6 +205,11 @@ impl AssetLinkSink for SoundCatalog {
                 let Some(name) = self.last_loaded_name.clone() else {
                     return Ok(());
                 };
+                // A later sound file can name this sound by an offset to the
+                // slot it was loaded into, not only to an insert slot: in
+                // localized_common_mp the grenade and flashbang blasts, the
+                // flesh footsteps and the pickup sounds all do.
+                self.loaded_by_insert.insert(file_key(slot), name.clone());
                 if let Some(ins) = insert_slot {
                     self.loaded_by_insert.insert(file_key(ins), name);
                 }
