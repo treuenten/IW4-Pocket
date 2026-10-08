@@ -24,6 +24,7 @@ pub(crate) fn reset_anim_for_match(
     mut settled: ResMut<FpvHeldSettled>,
     mut held_life: ResMut<FpvHeldLife>,
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
+    mut remote_trees: ResMut<crate::anim::remote_body::RemoteBodyTrees>,
     existing: Query<Entity, With<FpvPlacementRoot>>,
 ) {
     let installs = installed.read().count();
@@ -42,6 +43,11 @@ pub(crate) fn reset_anim_for_match(
     settled.0 = None;
     held_life.0 = None;
     *scene_skels = AnimDObjSceneSkels::default();
+    // Each remote body's tree holds the match's SoldierBodyAnimation (its
+    // XAnimCatalog with every decoded clip, and the BodyMeshCatalog). Left in
+    // place they pin the old match's clips through the next map's load, the
+    // peak that matters on iOS; the trees are rebuilt when remotes are posed.
+    *remote_trees = Default::default();
 
     for entity in &existing {
         commands.entity(entity).try_despawn();
