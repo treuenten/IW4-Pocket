@@ -145,11 +145,12 @@ fn compile_jobs_parallel(
 
 fn log_catalog_generation(catalog: &RuntimeMaterialCatalog) {
     let baked_materials = catalog
+        .parts()
         .materials
         .iter()
         .filter(|material| material.baked_draw_surf.is_some())
         .count();
-    match &catalog.sorted_materials {
+    match &catalog.parts().sorted_materials {
         super::RuntimeSortedMaterialTable::Ready {
             asset_ids_by_ordinal,
             skipped_n,
@@ -174,11 +175,12 @@ fn log_catalog_generation(catalog: &RuntimeMaterialCatalog) {
         }
     }
     let state_entry_n = catalog
+        .parts()
         .materials
         .iter()
         .filter(|material| material.state_bits_entry.is_some())
         .count();
-    match catalog.iw5_remap.as_deref() {
+    match catalog.parts().iw5_remap.as_deref() {
         Some(leftover) => diag::info!(
             World,
             "iw5 stateBitsEntry remap: state_entry_n={state_entry_n} {leftover}"
@@ -188,7 +190,7 @@ fn log_catalog_generation(catalog: &RuntimeMaterialCatalog) {
             "iw5 stateBitsEntry remap: none (IW4/T5) state_entry_n={state_entry_n}"
         ),
     }
-    match catalog.t5_remap.as_deref() {
+    match catalog.parts().t5_remap.as_deref() {
         Some(leftover) => diag::info!(
             World,
             "t5 stateBitsEntry remap: state_entry_n={state_entry_n} {leftover}"
@@ -204,7 +206,7 @@ fn log_catalog_generation(catalog: &RuntimeMaterialCatalog) {
         let mut sets = 0u32;
         let mut with_tex_d = 0u32;
         let mut hist = std::collections::BTreeMap::<u32, u32>::new();
-        for set in &catalog.technique_sets {
+        for set in &catalog.parts().technique_sets {
             let Some(technique) = set.technique(TechType(0x0F)) else {
                 continue;
             };
@@ -558,6 +560,7 @@ impl MaterialProgramCompile {
         techs.push(SUN_SHADOW_CASTER_TECH);
         techs.push(EMISSIVE_TECH_TYPE);
         let reachable: HashSet<usize> = catalog
+            .parts()
             .materials
             .iter()
             .filter(|material| material.baked_draw_surf.is_some())
@@ -572,7 +575,7 @@ impl MaterialProgramCompile {
                 catalog, tech_type, only_sets,
             );
             for &(set_i, pass_i) in &variants {
-                let Some(set) = catalog.technique_sets.get(set_i) else {
+                let Some(set) = catalog.parts().technique_sets.get(set_i) else {
                     continue;
                 };
                 let Some(technique) = set.technique(tech_type) else {

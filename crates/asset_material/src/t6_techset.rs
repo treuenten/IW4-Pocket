@@ -1,3 +1,5 @@
+mod material;
+pub use material::T6MaterialRefusal;
 use std::collections::BTreeSet;
 
 use dxbc_sm5::wgsl::{ConstantRow, Shader, TextureDimension, TextureSlot};
@@ -304,7 +306,7 @@ const T6_FOG_NAMES: [&str; 6] = [
     "sunFogColor",
     "sunFog",
 ];
-pub use render_material::CODE_T6_REFLECTION_SH;
+pub use render_material::{CODE_T6_GRID_SH, CODE_T6_REFLECTION_SH, CODE_T6_SAMPLE_DECODE};
 
 enum EngineValue {
     Code(&'static str),
@@ -356,12 +358,15 @@ fn engine_value(name: &str) -> EngineValue {
         "heroLightingG" => Literal([0.0, 1.0, 0.0, 0.0]),
         "heroLightingB" => Literal([0.0, 0.0, 1.0, 0.0]),
         "weaponParam0" => Literal([0.0, 0.0, 0.0, 1.0]),
+        "windDirection" => Literal([1.0, 0.0, 0.0, 0.0]),
         "gridLightingCoordsAndVis" => Code("BASE_LIGHTING_COORDS"),
         "lightingLookupScale" => Code("LIGHTING_LOOKUP_SCALE"),
         "reflectionLightingSH0" => Code("T6_REFLECTION_SH0"),
         "reflectionLightingSH1" => Code("T6_REFLECTION_SH1"),
         "reflectionLightingSH2" => Code("T6_REFLECTION_SH2"),
-        "gridLightingSH0" | "gridLightingSH1" | "gridLightingSH2" => Literal([0.25; 4]),
+        "gridLightingSH0" => Code("T6_GRID_SH0"),
+        "gridLightingSH1" => Code("T6_GRID_SH1"),
+        "gridLightingSH2" => Code("T6_GRID_SH2"),
         _ => Literal([0.0; 4]),
     }
 }
@@ -431,9 +436,10 @@ fn material_arguments_in_row(
         .collect()
 }
 
+const FNV_OFFSET: u32 = 0x811c_9dc5;
+const FNV_PRIME: u32 = 0x0100_0193;
+
 fn packed_row_hash(arguments: &[&T6Argument]) -> Option<u32> {
-    const FNV_OFFSET: u32 = 0x811c_9dc5;
-    const FNV_PRIME: u32 = 0x0100_0193;
     let packed = arguments.len() > 1 || arguments.iter().any(|a| a.offset % 16 != 0 || a.size < 16);
     packed.then(|| {
         arguments.iter().fold(FNV_OFFSET, |hash, a| {
@@ -445,6 +451,16 @@ fn packed_row_hash(arguments: &[&T6Argument]) -> Option<u32> {
                 })
         })
     })
+}
+
+pub fn weapon_parameter_hash(index: u8) -> u32 {
+    b"$t6_weapon_param"
+        .iter()
+        .copied()
+        .chain([index])
+        .fold(FNV_OFFSET, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(FNV_PRIME)
+        })
 }
 
 fn constant_argument(
@@ -505,6 +521,26 @@ fn constant_argument(
             literal_argument(stage, destination, Some([0; 4])),
         );
     };
+    if let Some(index) = name
+        .strip_prefix("weaponParam")
+        .and_then(|index| index.parse::<u8>().ok())
+        .filter(|index| *index < 10)
+    {
+        let name_hash = weapon_parameter_hash(index);
+        return (
+            Tier::Stable,
+            match stage {
+                Stage::Vertex => OwnedShaderArgument::MaterialVertexConstant {
+                    destination,
+                    name_hash,
+                },
+                Stage::Pixel => OwnedShaderArgument::MaterialPixelConstant {
+                    destination,
+                    name_hash,
+                },
+            },
+        );
+    }
     match engine_value(name) {
         EngineValue::Code(code) => {
             let index = match code {
@@ -514,6 +550,9 @@ fn constant_argument(
                 "T6_REFLECTION_SH0" => Some(CODE_T6_REFLECTION_SH[0]),
                 "T6_REFLECTION_SH1" => Some(CODE_T6_REFLECTION_SH[1]),
                 "T6_REFLECTION_SH2" => Some(CODE_T6_REFLECTION_SH[2]),
+                "T6_GRID_SH0" => Some(CODE_T6_GRID_SH[0]),
+                "T6_GRID_SH1" => Some(CODE_T6_GRID_SH[1]),
+                "T6_GRID_SH2" => Some(CODE_T6_GRID_SH[2]),
                 "T6_FOG" => T6_FOG_NAMES
                     .iter()
                     .position(|fog| *fog == name)
@@ -645,7 +684,14 @@ fn iw4_layer_source(t6: u8) -> Option<u8> {
 
 fn t6_vertex_decl(layer_routing: &[[u8; 2]]) -> AuthoredVertexDecl {
     let mut routing = [[0u8; 2]; asset_iw4::vertex_decl::ROUTING_COUNT];
-    let base = [[0, 0], [1, 2], [2, 5], [3, 1], [4, 7], [2, 6]];
+    let base = [
+        [0, 0],
+        [1, 2],
+        [2, 5],
+        [3, 1],
+        [4, 7],
+        [crate::T6_VERTEX_LIGHTING_SOURCE, 6],
+    ];
     let layer = layer_routing
         .iter()
         .filter_map(|&[source, dest]| Some([iw4_layer_source(source)?, dest]));
@@ -655,7 +701,7 @@ fn t6_vertex_decl(layer_routing: &[[u8; 2]]) -> AuthoredVertexDecl {
         stream_count += 1;
     }
     AuthoredVertexDecl {
-        family: crate::VertexLayoutFamily::Iw4,
+        family: crate::VertexLayoutFamily::T6,
         name: AssetRef::Real(if layer_routing.is_empty() {
             "$t6_packed_vertex".to_owned()
         } else {
@@ -698,6 +744,27 @@ impl MaterialCatalog {
                     gaps,
                 ));
             }
+        }
+        let samples_decoded_texture = pixel
+            .texture_slots()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|slot| {
+                texture_name(&pixel.reflection, slot.texture).is_some_and(|name| {
+                    let name = name.to_ascii_lowercase();
+                    name.contains("modellighting") || name.contains("reflectionprobe")
+                })
+            });
+        if samples_decoded_texture {
+            arguments.push((
+                Tier::Object,
+                OwnedShaderArgument::CodePixelConstant {
+                    destination: rows(&pixel)?.len() as u16,
+                    index: CODE_T6_SAMPLE_DECODE,
+                    first_row: 0,
+                    row_count: 1,
+                },
+            ));
         }
         let mut slots = vertex.texture_slots().map_err(|e| e.to_string())?;
         slots.extend(pixel.texture_slots().map_err(|e| e.to_string())?);
@@ -847,7 +914,10 @@ impl MaterialCatalog {
             } else {
                 0
             },
-            ..Default::default()
+            zone: Default::default(),
+            t5_occupancy: None,
+            iw5_fallback_table: None,
+            t5_fallback_table: None,
         })
     }
 }
@@ -878,190 +948,4 @@ pub struct T6Texture {
     pub semantic: u8,
     pub image: String,
     pub texels: std::sync::Arc<bevy::prelude::Image>,
-}
-
-impl MaterialCatalog {
-    #[allow(clippy::too_many_arguments)]
-    pub fn t6_material(
-        &mut self,
-        donor: usize,
-        name: &str,
-        set: &T6TechniqueSet,
-        textures: &[T6Texture],
-        constants: Vec<crate::MaterialConstant>,
-        state: &T6MaterialState,
-        draw: T6Draw,
-        report: &mut Vec<String>,
-    ) -> Option<usize> {
-        let technique_set = draw.technique_set_name(&set.name);
-        let technique_set = technique_set.as_str();
-        let graph = self
-            .technique_set_facts()
-            .iter()
-            .find(|facts| {
-                facts.namespace == crate::AssetNamespace::T6 && facts.name.as_str() == technique_set
-            })?
-            .table
-            .as_ref()?
-            .graph
-            .as_ref()?;
-        let bindings = state.bind_techniques(graph);
-        let selected_sources: BTreeSet<_> = graph
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, technique)| {
-                (bindings.entries[slot] != u8::MAX)
-                    .then_some(technique.as_ref()?.source_selection?.slot)
-            })
-            .collect();
-        let selected_techniques: Vec<_> = selected_sources
-            .into_iter()
-            .filter_map(|slot| set.techniques.get(usize::from(slot))?.as_ref())
-            .collect();
-        for refusal in bindings.refusals {
-            report.push(format!("t6 material {name}: {refusal:?}"));
-        }
-        let sampled: BTreeSet<u32> = selected_techniques
-            .iter()
-            .flat_map(|technique| &technique.passes)
-            .flat_map(|pass| &pass.arguments)
-            .filter(|a| a.kind == argument_type::MATERIAL_PIXEL_SAMPLER)
-            .map(|a| a.def)
-            .chain(
-                selected_techniques
-                    .iter()
-                    .flat_map(|technique| &technique.passes)
-                    .any(reads_float_z)
-                    .then_some(FLOAT_Z_HASH),
-            )
-            .collect();
-        let defaults: Vec<T6Texture> = sampled
-            .into_iter()
-            .filter(|hash| !textures.iter().any(|t| t.name_hash == *hash))
-            .map(|hash| {
-                if let Some(texture) = sampler_aliases(hash)
-                    .iter()
-                    .find_map(|alias| textures.iter().find(|t| t.name_hash == *alias))
-                {
-                    return T6Texture {
-                        name_hash: hash,
-                        ..texture.clone()
-                    };
-                }
-                let (image, rgba) = match hash {
-                    NORMAL_MAP_HASH | ARM_NORMAL_MAP_HASH => {
-                        ("$t6_flat_normal", [128, 128, 255, 255])
-                    }
-                    SPECULAR_MAP_HASH | ARM_SPECULAR_MAP_HASH | FLOAT_Z_HASH => {
-                        ("$t6_black", [0, 0, 0, 0])
-                    }
-                    _ => ("$t6_white", [255; 4]),
-                };
-                T6Texture {
-                    name_hash: hash,
-                    sampler_state: 0x12,
-                    semantic: crate::TS_2D,
-                    image: image.to_owned(),
-                    texels: std::sync::Arc::new(crate::solid_texture(rgba, false)),
-                }
-            })
-            .collect();
-        let textures: Vec<&T6Texture> = textures.iter().chain(&defaults).collect();
-        let mut constants = constants;
-        for constant in &mut constants {
-            if constant.name_hash == OCCLUSION_AMOUNT_HASH {
-                constant.literal[0] *= T6_SPECULAR_SCALE;
-                constant.literal[1] *= T6_SPECULAR_SCALE;
-            }
-        }
-        for pass in selected_techniques
-            .iter()
-            .flat_map(|technique| &technique.passes)
-        {
-            for kind in [
-                argument_type::MATERIAL_VERTEX_CONST,
-                argument_type::MATERIAL_PIXEL_CONST,
-            ] {
-                let rows: BTreeSet<(u32, u32)> = pass
-                    .arguments
-                    .iter()
-                    .filter(|a| a.kind == kind)
-                    .map(|a| (u32::from(a.buffer), u32::from(a.offset) / 16))
-                    .collect();
-                for (buffer, row) in rows {
-                    let in_row = material_arguments_in_row(&pass.arguments, kind, buffer, row);
-                    let Some(hash) = packed_row_hash(&in_row) else {
-                        continue;
-                    };
-                    if constants.iter().any(|c| c.name_hash == hash) {
-                        continue;
-                    }
-                    let mut literal = [0.0f32; 4];
-                    for a in &in_row {
-                        let Some(source) = constants.iter().find(|c| c.name_hash == a.def) else {
-                            continue;
-                        };
-                        let first = (usize::from(a.offset) % 16) / 4;
-                        let count = usize::from(a.size).div_ceil(4).clamp(1, 4 - first);
-                        literal[first..first + count].copy_from_slice(&source.literal[..count]);
-                    }
-                    constants.push(crate::MaterialConstant {
-                        name_hash: hash,
-                        name: *b"t6_packed\0\0\0",
-                        literal,
-                    });
-                }
-            }
-        }
-        let mut material = self.materials.get(donor)?.clone();
-        material.name = AssetRef::Real(name.to_owned());
-        material.namespace = crate::AssetNamespace::T6;
-        material.technique_set = AssetRef::Real(technique_set.to_owned());
-        material.technique_set_edge = Default::default();
-        material.technique_table = None;
-        material.constants = constants;
-        if draw == T6Draw::Emissive {
-            material.sort_key = material.sort_key.saturating_add(1);
-        }
-        material.state_bits = bindings.rows;
-        material.state_bits_entry = Some(bindings.entries);
-        material.t5_state_bits_entry = None;
-        material.iw5_state_bits_entry = None;
-        let namespace = material.namespace;
-        material.textures = textures
-            .into_iter()
-            .map(|texture| {
-                let texels = &texture.texels;
-                let image = self.link_image(crate::AuthoredImage {
-                    namespace,
-                    name: AssetRef::Real(texture.image.clone()),
-                    map_type: 3,
-                    semantic: texture.semantic,
-                    category: 0,
-                    use_srgb_reads: false,
-                    width: texels.width() as u16,
-                    height: texels.height() as u16,
-                    depth: 1,
-                    level_count: texels.texture_descriptor.mip_level_count as u8,
-                    format: 0,
-                    payload: std::sync::Arc::new(Vec::new()),
-                    decoded: Some(texels.clone()),
-                    common_owned: false,
-                    decoded_variant: None,
-                    decoded_by: None,
-                    pending_decode: None,
-                });
-                crate::MaterialTextureBinding {
-                    name_hash: texture.name_hash,
-                    name_start: 0,
-                    name_end: 0,
-                    sampler_state: texture.sampler_state,
-                    semantic: texture.semantic,
-                    image: Some(image),
-                }
-            })
-            .collect();
-        Some(self.link_material(material))
-    }
 }

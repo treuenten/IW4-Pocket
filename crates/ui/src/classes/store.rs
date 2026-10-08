@@ -14,13 +14,10 @@ pub struct SessionClassStore {
 
 impl SessionClassStore {
     pub fn from_showcase(seed: u64, registry: &asset_game::WeaponRegistry) -> Self {
-        let combat = session::combat_table::from_registry(registry, None);
-        let equipment = session::combat_table::equipment_from_registry(registry);
+        let admission = session::ClassWeaponAdmission::prepare(registry);
         let available = |slot: &HostClassSlot| {
             let row = session::ClassRow::from(slot);
-            !session::project_class(0, &row, registry, &combat, &equipment)
-                .def
-                .locked
+            admission.allows(&row)
         };
         let mut slots: Vec<HostClassSlot> =
             frame::pick_showcase(seed, frame::showcase_classes().len())
@@ -30,10 +27,16 @@ impl SessionClassStore {
                 .take(PERSONAL_CLASS_SLOTS)
                 .collect();
         if slots.len() < PERSONAL_CLASS_SLOTS {
-            for primary in ["m4", "mp5k", "m16", "ak47", "rpd"] {
+            for primary in [
+                "iw4:weapon/m4_mp",
+                "iw4:weapon/mp5k_mp",
+                "iw4:weapon/m16_mp",
+                "iw4:weapon/ak47_mp",
+                "iw4:weapon/rpd_mp",
+            ] {
                 let slot = HostClassSlot {
                     name: format!("custom_{}", slots.len() + 1),
-                    primary: format!("iw4:weapon/{primary}_mp"),
+                    primary: primary.into(),
                     primary_attachments: Vec::new(),
                     secondary: "iw4:weapon/usp_mp".into(),
                     secondary_attachments: Vec::new(),
@@ -313,7 +316,12 @@ pub(crate) fn load_class_store(
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            *store = generate();
+            let generated = generate();
+            if generated.slots.is_empty() {
+                file.loaded = false;
+                return;
+            }
+            *store = generated;
         }
         Err(error) => {
             *store = generate();

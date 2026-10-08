@@ -22,12 +22,9 @@ pub(crate) struct Settings {
     pub(crate) landing_normal_z: f32,
 }
 const BUDGET: usize = 12;
-/// How far a sub-move steps off a face it is resting on before retrying.
-/// Resting at the trace's 0.125 gap, f32 rounding of a tangent move along a
-/// face that is not axis-aligned can read as entering the face again (a
-/// fraction-0 hit on a plane already clipped to), which stopped the move dead.
-/// Far above f32 resolution at map coordinates, far below the 0.125 gap.
-const CONTACT_OFFSET: f64 = 1.0 / 32.0;
+// A projected target can round inside a contact plane and stop the trace.
+// Keep the retry just outside that plane.
+const SKIN: f64 = 1. / 32.;
 fn finite(v: Vector) -> bool {
     v.iter().all(|x| x.is_finite())
 }
@@ -228,7 +225,7 @@ pub(crate) fn slide(
     let mut elapsed = 0f64;
     let total = s.dt as f64;
     let mut obstructed = false;
-    let mut nudge: Option<Vector> = None;
+    let mut lifted = false;
     for _ in 0..BUDGET {
         let remaining = total - elapsed;
         if remaining <= 0. {
@@ -241,12 +238,16 @@ pub(crate) fn slide(
                 (initial[2] as f64 - g as f64 * t) as f32,
             ]
         };
-        let average = project(desired(elapsed + remaining * 0.5), &ns[..count]);
-        let push = nudge.take().unwrap_or([0.; 3]);
-        let target = core::array::from_fn(|i| {
-            (m.origin[i] as f64 + average[i] as f64 * remaining + push[i] as f64 * CONTACT_OFFSET)
-                as f32
-        });
+        let wanted = desired(elapsed + remaining * 0.5);
+        let average = project(wanted, &ns[..count]);
+        let mut target: [f64; 3] =
+            core::array::from_fn(|i| m.origin[i] as f64 + average[i] as f64 * remaining);
+        if lifted {
+            for n in ns[..count].iter().filter(|n| dot(wanted, **n) < 0.) {
+                (0..3).for_each(|i| target[i] += n[i] as f64 * SKIN);
+            }
+        }
+        let target = target.map(|x| x as f32);
         let Some((hit, p)) = sweep(m.origin, target, trace) else {
             m.velocity = [0.; 3];
             return (m, true);
@@ -270,12 +271,11 @@ pub(crate) fn slide(
         }
         m.velocity = project(desired(elapsed), &ns[..count]);
         if hit.fraction == 0. && duplicate {
-            // Step off the face once and retry; still stuck after that is a
-            // real wedge.
-            if push != [0.; 3] {
-                return (m, true);
+            if !lifted {
+                lifted = true;
+                continue;
             }
-            nudge = Some(n);
+            return (m, true);
         }
     }
     (m, obstructed)

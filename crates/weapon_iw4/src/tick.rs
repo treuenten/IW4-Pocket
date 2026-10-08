@@ -3,6 +3,19 @@ use crate::weaponstate::{FireType, WeaponDecodeError, WeaponState};
 
 pub const BURST_COOLDOWN_DEFAULT_MS: i32 = 200;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeaponHostRules {
+    pub burst_cooldown_ms: i32,
+}
+
+impl Default for WeaponHostRules {
+    fn default() -> Self {
+        Self {
+            burst_cooldown_ms: BURST_COOLDOWN_DEFAULT_MS,
+        }
+    }
+}
+
 pub const PERK_FASTRELOAD: u32 = 4;
 
 pub const PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT: f32 = 0.5;
@@ -1207,8 +1220,12 @@ fn finish_weapon_tick(
                 hand.weaponstate = WeaponState::Firing as i32;
                 hand.weapon_time = facts.fire_time_ms.max(1);
                 if facts.ads_fire_only {
-                    hand.weapon_delay =
-                        ads_fire_only_delay_ms(cmd.f_weapon_pos_frac, facts.ads_in_rate);
+                    let ads_in_rate = if cmd.perks0 & playerstate_iw4::PERK_QUICKDRAW != 0 {
+                        facts.ads_in_rate * playerstate_iw4::PERK_QUICKDRAW_SPEED_SCALE
+                    } else {
+                        facts.ads_in_rate
+                    };
+                    hand.weapon_delay = ads_fire_only_delay_ms(cmd.f_weapon_pos_frac, ads_in_rate);
                 } else if facts.fire_delay_ms > 0 {
                     hand.weapon_delay = facts.fire_delay_ms;
                 }

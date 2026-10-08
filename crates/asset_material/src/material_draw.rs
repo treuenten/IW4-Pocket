@@ -13,8 +13,6 @@ pub enum MaterialDrawMode {
 impl MaterialDrawMode {
     pub fn from_state_bits(load_bits: [u32; 2]) -> Self {
         let word0 = load_bits[0];
-        let alpha_test_disabled = (word0 >> 11) & 1 != 0;
-        let alpha_test = (word0 >> 12) & 0b11;
         let blend_op = (word0 >> 8) & 0b111;
         let src_blend = word0 & 0xf;
         let dst_blend = (word0 >> 4) & 0xf;
@@ -31,9 +29,9 @@ impl MaterialDrawMode {
             }
             return Self::Blend;
         }
-        if !alpha_test_disabled {
+        if let Some(test) = asset_iw4::alpha_test_from_state_bits(load_bits) {
             return Self::AlphaTest {
-                ge_half: alpha_test == 3,
+                ge_half: matches!(test, asset_iw4::Gfxs0AlphaTest::GreaterEqual128),
             };
         }
         Self::Opaque
@@ -49,13 +47,10 @@ impl MaterialDrawMode {
 }
 
 pub fn alpha_test_cutoff_from_state_bits(load_bits: [u32; 2]) -> Option<f32> {
-    let word0 = load_bits[0];
-    let alpha_test_disabled = (word0 >> 11) & 1 != 0;
-    if alpha_test_disabled {
-        return None;
-    }
-    let alpha_test = (word0 >> 12) & 0b11;
-    Some(if alpha_test == 3 { 0.5 } else { 0.01 })
+    asset_iw4::alpha_test_from_state_bits(load_bits).map(|test| match test {
+        asset_iw4::Gfxs0AlphaTest::GreaterEqual128 => 0.5,
+        asset_iw4::Gfxs0AlphaTest::GreaterThanZero | asset_iw4::Gfxs0AlphaTest::LessThan128 => 0.01,
+    })
 }
 
 pub const GFXS0_SRGBWRITEENABLE: u32 = 0x4000_0000;
@@ -84,16 +79,3 @@ pub fn material_constant_name(name: &[u8; 12]) -> &str {
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
     std::str::from_utf8(&name[..end]).unwrap_or("")
 }
-
-pub fn material_alpha_test(namespace: crate::AssetNamespace, bits: [u32; 2]) -> Option<AlphaTest> {
-    match namespace {
-        crate::AssetNamespace::T5 => fastfile_t5::state_bits::alpha_test(bits[0])
-            .map(|(func, reference)| AlphaTest::from_raw(func, reference)),
-        crate::AssetNamespace::Iw4 | crate::AssetNamespace::Iw5 => {
-            alpha_test_from_state_bits(bits).map(Gfxs0AlphaTest::d3d)
-        }
-        crate::AssetNamespace::T6 => None,
-    }
-}
-
-pub use fastfile_t5::state_bits::smodel_camera_emits as t5_smodel_camera_emits;

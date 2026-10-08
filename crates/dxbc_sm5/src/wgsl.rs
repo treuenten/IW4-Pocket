@@ -6,7 +6,7 @@ use core::fmt::{self, Write};
 
 use crate::ir::{Components, DecodedInstruction, Index, Operand, RegisterType};
 use crate::program::{Program, ProgramKind};
-use crate::reflection::Reflection;
+use crate::reflection::{BindingKind, Reflection};
 use crate::signature::Signature;
 use crate::{Container, decode_instruction};
 
@@ -100,6 +100,8 @@ pub struct SampleAdapter {
     pub opaque_alpha: bool,
     pub square_rgb: bool,
     pub rgb_scale: f32,
+    pub scale_row: Option<ConstantRow>,
+    pub alpha_row: Option<ConstantRow>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -196,10 +198,65 @@ impl Shader {
             .filter(|i| !is_declaration(i.opcode.0))
         {
             for operand in &instruction.operands {
-                collect_rows(operand, &mut rows)?;
+                self.collect_rows(operand, &mut rows)?;
             }
         }
         Ok(rows)
+    }
+
+    fn collect_rows(
+        &self,
+        operand: &Operand,
+        rows: &mut BTreeSet<ConstantRow>,
+    ) -> Result<(), WgslError> {
+        for index in &operand.indices {
+            if let Index::Relative(inner) | Index::ImmediatePlusRelative(_, inner) = index {
+                self.collect_rows(inner, rows)?;
+            }
+        }
+        if operand.register == RegisterType::ConstantBuffer {
+            match operand.indices.as_slice() {
+                [Index::Immediate(buffer), Index::Immediate(row)] => {
+                    rows.insert(ConstantRow {
+                        buffer: *buffer,
+                        row: *row,
+                    });
+                }
+                [Index::Immediate(buffer), row] => {
+                    let base = match row {
+                        Index::ImmediatePlusRelative(base, _) => *base,
+                        _ => 0,
+                    };
+                    let array = self.indexed_array(*buffer, base).ok_or_else(|| {
+                        WgslError::UnsupportedOperand(format!("relative {operand}"))
+                    })?;
+                    rows.extend(array.map(|row| ConstantRow {
+                        buffer: *buffer,
+                        row,
+                    }));
+                }
+                _ => return Err(WgslError::UnsupportedOperand(format!("relative {operand}"))),
+            }
+        }
+        Ok(())
+    }
+
+    fn indexed_array(&self, buffer: u32, base: u32) -> Option<core::ops::Range<u32>> {
+        let binding = self
+            .reflection
+            .bindings
+            .iter()
+            .find(|b| b.kind == BindingKind::ConstantBuffer && b.bind_point == buffer)?;
+        let variable = self
+            .reflection
+            .constant_buffers
+            .iter()
+            .find(|cb| cb.name == binding.name)?
+            .variables
+            .iter()
+            .find(|v| v.start_offset <= base * 16 && base * 16 < v.start_offset + v.size)?;
+        let first = variable.start_offset / 16;
+        Some(first..(variable.start_offset + variable.size).div_ceil(16))
     }
 
     pub fn texture_slots(&self) -> Result<BTreeSet<TextureSlot>, WgslError> {
@@ -219,26 +276,6 @@ impl Shader {
         }
         Ok(slots)
     }
-}
-
-fn collect_rows(operand: &Operand, rows: &mut BTreeSet<ConstantRow>) -> Result<(), WgslError> {
-    for index in &operand.indices {
-        if let Index::Relative(inner) | Index::ImmediatePlusRelative(_, inner) = index {
-            collect_rows(inner, rows)?;
-        }
-    }
-    if operand.register == RegisterType::ConstantBuffer {
-        match operand.indices.as_slice() {
-            [Index::Immediate(buffer), Index::Immediate(row)] => {
-                rows.insert(ConstantRow {
-                    buffer: *buffer,
-                    row: *row,
-                });
-            }
-            _ => return Err(WgslError::UnsupportedOperand(format!("relative {operand}"))),
-        }
-    }
-    Ok(())
 }
 
 fn sample_registers(instruction: &DecodedInstruction) -> Option<(u32, u32)> {
@@ -308,6 +345,38 @@ impl Lowering<'_> {
                         });
                     }
                     format!("cb{}_{}", row.buffer, row.row)
+                }
+                [Index::Immediate(buffer), row] => {
+                    let (base, inner) = match row {
+                        Index::ImmediatePlusRelative(base, inner) => (*base, inner),
+                        Index::Relative(inner) => (0, inner),
+                        Index::Immediate(_) => unreachable!(),
+                    };
+                    let array = self
+                        .shader
+                        .indexed_array(*buffer, base)
+                        .ok_or_else(|| WgslError::UnsupportedOperand(operand.to_string()))?;
+                    let first = ConstantRow {
+                        buffer: *buffer,
+                        row: array.start,
+                    };
+                    let arena =
+                        *self
+                            .constants
+                            .get(&first)
+                            .ok_or(WgslError::UnassignedConstant {
+                                buffer: first.buffer,
+                                row: first.row,
+                            })?;
+                    let index = format!(
+                        "clamp(bitcast<i32>(({}).x) + {}, 0, {})",
+                        self.bits(inner)?,
+                        i64::from(base) - i64::from(array.start),
+                        array.len() - 1
+                    );
+                    format!(
+                        "bitcast<vec4<u32>>(sm3_constants.c[sm3_constant_base + {arena}u + u32({index})])"
+                    )
                 }
                 _ => return Err(WgslError::UnsupportedOperand(operand.to_string())),
             },
@@ -719,10 +788,32 @@ impl Lowering<'_> {
             _ => unreachable!(),
         };
         let sampled = match self.sample_adapters.iter().find(|a| a.slot == slot) {
-            Some(adapter) => format!(
-                "dx_adapt({sampled}, {}, {}, {:?})",
-                adapter.opaque_alpha, adapter.square_rgb, adapter.rgb_scale
-            ),
+            Some(adapter) => {
+                let row_lane = |row: Option<ConstantRow>, lane: &str| match row {
+                    Some(row) if !self.constants.contains_key(&row) => {
+                        Err(WgslError::UnassignedConstant {
+                            buffer: row.buffer,
+                            row: row.row,
+                        })
+                    }
+                    Some(row) => Ok(Some(format!(
+                        "bitcast<f32>(cb{}_{}.{lane})",
+                        row.buffer, row.row
+                    ))),
+                    None => Ok(None),
+                };
+                let scale = match row_lane(adapter.scale_row, "x")? {
+                    Some(lane) => format!("{:?} * {lane}", adapter.rgb_scale),
+                    None => format!("{:?}", adapter.rgb_scale),
+                };
+                let alpha_weight = row_lane(adapter.alpha_row, "y")?.unwrap_or_else(|| {
+                    String::from(if adapter.opaque_alpha { "0.0" } else { "1.0" })
+                });
+                format!(
+                    "dx_adapt({sampled}, {alpha_weight}, {}, {scale})",
+                    adapter.square_rgb
+                )
+            }
             None => sampled,
         };
         let swizzled = match resource.components {
@@ -823,7 +914,15 @@ fn stage_body(
         epilogue,
     };
     lowering.out.push_str(prologue);
-    for row in shader.constant_rows()? {
+    let mut declared = shader.constant_rows()?;
+    declared.extend(
+        abi.sample_adapters
+            .iter()
+            .flat_map(|adapter| [adapter.scale_row, adapter.alpha_row])
+            .flatten()
+            .filter(|row| lowering.constants.contains_key(row)),
+    );
+    for row in declared {
         let arena = *lowering
             .constants
             .get(&row)
@@ -906,9 +1005,9 @@ pub fn lower_pass(abi: &PassAbi, vertex: &Shader, pixel: &Shader) -> Result<Stri
     texture_tables(&mut out, &abi.textures);
     if !abi.sample_adapters.is_empty() {
         out.push_str(
-            "\nfn dx_adapt(s: vec4<f32>, opaque_alpha: bool, square_rgb: bool, scale: f32) -> vec4<f32> {\n    \
+            "\nfn dx_adapt(s: vec4<f32>, alpha_weight: f32, square_rgb: bool, scale: f32) -> vec4<f32> {\n    \
              let rgb = select(s.xyz, s.xyz * s.xyz, square_rgb) * scale;\n    \
-             return vec4<f32>(rgb, select(s.w, 1.0, opaque_alpha));\n}\n",
+             return vec4<f32>(rgb, mix(1.0, s.w, alpha_weight));\n}\n",
         );
     }
     out.push_str("\nstruct DxVaryings {\n    @builtin(position) @invariant position: vec4<f32>,\n");

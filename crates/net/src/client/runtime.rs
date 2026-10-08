@@ -41,7 +41,31 @@ pub struct PendingPresentedEntityEvents {
 }
 
 #[derive(Resource, Default)]
-pub struct PendingPelletFx(pub Vec<sim::PelletFxRecord>);
+pub struct PendingPelletFx(
+    pub(crate)  Vec<(
+        frame::WorldGeneration,
+        crate::EntityEventDomain,
+        sim::PelletFxRecord,
+    )>,
+);
+
+impl PendingPelletFx {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn take(
+        &mut self,
+    ) -> Vec<(
+        frame::WorldGeneration,
+        crate::EntityEventDomain,
+        sim::PelletFxRecord,
+    )> {
+        core::mem::take(&mut self.0)
+    }
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
 
 fn collect_received_entity_events(
     last_tick: Option<sim::Tick>,
@@ -533,7 +557,20 @@ pub fn reconcile_prediction(
             continue;
         }
         perf::net_leg("snap_adopt", tick.snapshot.tick.0, 0);
-        pellet_fx.0.append(&mut tick.snapshot.meta.pellet_fx);
+        let match_key = crate::signon::live_match_key(reliable.bridge.as_deref());
+        if !match_key.is_none()
+            && tick.snapshot.meta.world_objects.map_round_epoch == match_key.match_epoch
+        {
+            pellet_fx
+                .0
+                .extend(tick.snapshot.meta.pellet_fx.drain(..).map(|record| {
+                    (
+                        *reliable.generation,
+                        crate::EntityEventDomain::Snapshot,
+                        record,
+                    )
+                }));
+        }
         reliable.apply(local.0, &tick.frame.reliable);
         let ack = tick.ack_for(local.0);
         if let Some(acked) = ack {
@@ -747,6 +784,33 @@ fn apply_weapon_switch_requests(
             select.time = clock.time();
         }
     }
+}
+
+fn use_reload_as_reload(
+    actions: &mut ClientActionInput,
+    cmd: &mut playerstate_iw4::UserCmd,
+    ps: Option<&playerstate_iw4::PlayerState>,
+) {
+    use playerstate_iw4::buttons::{RELOAD, USE_RELOAD};
+    let down = cmd.buttons & USE_RELOAD != 0;
+    let now = actions.now_msec;
+    let item = ps
+        .filter(|ps| ps.cursor_hint != 0)
+        .map(|ps| ps.cursor_hint_ent_index);
+    if down {
+        if !actions.use_reload_down {
+            actions.use_reload_over_item = item.map(|ent| (now, ent));
+        }
+        if actions.use_reload_over_item.is_none() && item.is_none() {
+            cmd.buttons |= RELOAD;
+        }
+    } else if let Some((since, ent)) = actions.use_reload_over_item.take()
+        && now.wrapping_sub(since) < sim::ITEM_USE_HOLD_MS
+        && item == Some(ent)
+    {
+        cmd.buttons |= RELOAD;
+    }
+    actions.use_reload_down = down;
 }
 
 pub fn sample_client_input(
@@ -1063,12 +1127,10 @@ pub fn sample_client_input(
             );
         }
     }
+    actions.client.airborne =
+        ps.is_some_and(|ps| ps.ground_entity_num == playerstate_iw4::ENTITYNUM_NONE);
     let mut cmd = build_usercmd(&mut actions, &look, 0);
-    if cmd.buttons & playerstate_iw4::buttons::USE_RELOAD != 0
-        && ps.is_some_and(|ps| ps.cursor_hint == 0)
-    {
-        cmd.buttons |= playerstate_iw4::buttons::RELOAD;
-    }
+    use_reload_as_reload(&mut actions, &mut cmd, ps);
     look.angles = cmd.angles;
     if !frozen
         && aim.live
@@ -1860,7 +1922,7 @@ pub fn reset_cgame_on_match_torn_down(
     *select = WeaponSelect::default();
 
     *entity_events = PendingPresentedEntityEvents::default();
-    pellet_fx.0.clear();
+    pellet_fx.clear();
     *entity_event_cursor = crate::EntityEventCursor::default();
     fire_verdicts.clear();
     fire_state.clear();

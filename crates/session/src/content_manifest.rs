@@ -63,6 +63,7 @@ pub struct SessionContentManifest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionManifestError {
+    ForeignWeaponOwner,
     MissingWeaponKey(SessionWeaponId),
     DuplicateWeaponKey(AssetKey, Vec<String>, bool),
 }
@@ -70,6 +71,9 @@ pub enum SessionManifestError {
 impl core::fmt::Display for SessionManifestError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ForeignWeaponOwner => {
+                write!(f, "simulation weapon content belongs to another registry")
+            }
             Self::MissingWeaponKey(id) => write!(f, "session weapon {} has no durable key", id.0),
             Self::DuplicateWeaponKey(key, attachments, alternate) => {
                 write!(
@@ -88,10 +92,13 @@ impl SessionContentManifest {
     pub fn build(
         map: &assets::PreparedMap,
         registry: &WeaponRegistry,
-        combat: &[weapon_iw4::WeaponCombatFacts],
-        equipment: &[sim::EquipmentRuntimeFacts],
+        compiled: &crate::PreparedSimWeapons,
         gameplay_digest: u64,
     ) -> Result<Self, SessionManifestError> {
+        if !compiled.owned_by(registry) {
+            return Err(SessionManifestError::ForeignWeaponOwner);
+        }
+        let content = compiled.content();
         let map = match map.namespace {
             Some(namespace) => match AssetKey::new(namespace, AssetKind::Map, map.zone.clone()) {
                 Ok(key) => ManifestFact::Known(key),
@@ -109,8 +116,10 @@ impl SessionContentManifest {
                 .ok_or(SessionManifestError::MissingWeaponKey(id))?;
             let attachments = registry.prepared_attachments_of(raw_id).to_vec();
             let alternate = registry
-                .facts_of(raw_id)
-                .is_some_and(|facts| facts.inventory_type == 3);
+                .bind_published_row(raw_id)
+                .ok()
+                .and_then(|weapon| weapon.hud_facts())
+                .is_some_and(|facts| facts.is_alternate());
             if !keys.insert((key.clone(), attachments.clone(), alternate)) {
                 return Err(SessionManifestError::DuplicateWeaponKey(
                     key,
@@ -118,13 +127,17 @@ impl SessionContentManifest {
                     alternate,
                 ));
             }
-            let authority = if combat
+            let authority = if !content.is_runnable(raw_id) {
+                ManifestFact::Unavailable(ManifestGap::ValidatedIw4WeaponProfileMissing)
+            } else if content
+                .combat()
                 .get(raw_id as usize)
                 .copied()
                 .is_some_and(weapon_iw4::WeaponCombatFacts::is_usable)
             {
                 ManifestFact::Known(AuthorityWeaponProfile::Combat)
-            } else if equipment
+            } else if content
+                .equipment()
                 .get(raw_id as usize)
                 .copied()
                 .is_some_and(sim::EquipmentRuntimeFacts::is_offhand)

@@ -357,9 +357,27 @@ pub const PERK_FASTMANTLE: u32 = 1 << 19;
 
 pub const PERK_SCAVENGER: u32 = 1 << 22;
 
+pub const PERK_HOLDBREATH: u32 = 1 << 4;
+
+pub const PERK_EXTRA_BREATH_MS: i32 = 5000;
+
+pub const PERK_QUICKDRAW: u32 = 1 << 26;
+
+pub const PERK_QUICKDRAW_SPEED_SCALE: f32 = 1.5;
+
 pub const PERK_COLDBLOODED: u32 = 1 << 27;
 
 pub const PERK_HEARTBREAKER: u32 = 1 << 28;
+
+pub const PERK1_SPYGAME: u32 = 1;
+
+pub fn breath_hold_time_ms(ps: &PlayerState) -> i32 {
+    if ps.perks[0] & PERK_HOLDBREATH != 0 {
+        BREATH_HOLD_TIME_MS + PERK_EXTRA_BREATH_MS
+    } else {
+        BREATH_HOLD_TIME_MS
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnimPair {

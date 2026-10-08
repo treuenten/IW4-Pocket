@@ -1,7 +1,7 @@
 use asset_core::AssetNamespace;
 use bevy::prelude::*;
 use net::{LocalPresentClient, PresentedSnapshot};
-use playerstate_iw4::{BREATH_HOLD_TIME_MS, weap_flags};
+use playerstate_iw4::{breath_hold_time_ms, weap_flags};
 
 use crate::sources::{DesiredSource, SourceCueRequest, SourceKey};
 use crate::{AliasCommand, PlayAlias};
@@ -85,7 +85,7 @@ pub(crate) fn update(
     let selection = ps.and_then(|ps| {
         let policy = weapons
             .as_ref()?
-            .0
+            .registry()
             .semantic_policy_of(playerstate_iw4::get_viewmodel_weapon_index(ps))?;
         Some((policy.cue_namespace.namespace(), policy.breath_cues))
     });
@@ -112,7 +112,7 @@ pub(crate) fn update(
             });
         }
         if let Some(ps) = ps {
-            let alias = if ps.hold_breath_timer > BREATH_HOLD_TIME_MS {
+            let alias = if ps.hold_breath_timer > breath_hold_time_ms(ps) {
                 cues.gasp
             } else {
                 cues.exhale
@@ -135,7 +135,7 @@ pub(crate) fn update(
                     (0..sound.aliases.len()).any(|variant| {
                         bank.0
                             .playback_policy(index, variant)
-                            .is_some_and(|policy| policy.authored_looping == Some(true))
+                            .is_some_and(|policy| policy.looping().is_looping())
                     })
                 })
             })

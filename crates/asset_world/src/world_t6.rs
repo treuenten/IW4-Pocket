@@ -442,7 +442,7 @@ fn read_dpvs(load: &ZoneLoad, asset: &LoadedAsset) -> Result<DpvsWorldData, Stri
                 neighbor: neighbor as u16,
                 vert_start: start,
                 vert_count: vc,
-                hull_axis: None,
+                hull_axis: Some([r.xyz(q.at(44))?, r.xyz(q.at(56))?]),
             });
         }
         out.portals_per_cell.push(owned);
@@ -786,7 +786,11 @@ fn primary_lights(
         let is_sun = i != 0 && i <= sun_count;
         lights.push(crate::WorldPrimaryLight {
             is_sun,
-            light_type: h[0],
+            light_type: match h[0] {
+                3 | 4 => lighting_iw4::GFX_LIGHT_TYPE_SPOT,
+                5 => lighting_iw4::GFX_LIGHT_TYPE_OMNI,
+                t => t,
+            },
             can_cast_shadow: h[1] != 0,
             exponent: h[2],
             color: r.xyz(p.at(8))?,
@@ -939,6 +943,35 @@ pub fn static_model_placements(
         }));
     }
     Ok(out)
+}
+
+pub fn static_model_vertex_lighting(
+    load: &ZoneLoad,
+    world: &LoadedAsset,
+) -> Result<Vec<Option<[Vec<[u8; 4]>; 4]>>, String> {
+    let r = Reader(load);
+    let count = Reader::word(&world.header, 784)?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let rows = Reader::ptr(&world.header, 876)?;
+    (0..count)
+        .map(|i| {
+            let mut lods: [Vec<[u8; 4]>; 4] = Default::default();
+            for (lod, colors) in lods.iter_mut().enumerate() {
+                let info = r.bytes(rows.at(i * 152 + 104 + lod as u32 * 12), 12)?;
+                let n = usize::from(u16::from_le_bytes([info[8], info[9]]));
+                if let (Ok(p), true) = (Reader::ptr(info, 0), n > 0) {
+                    *colors = r
+                        .bytes(p, n * 4)?
+                        .chunks_exact(4)
+                        .map(|c| [c[0], c[1], c[2], c[3]])
+                        .collect();
+                }
+            }
+            Ok(lods.iter().any(|lod| !lod.is_empty()).then_some(lods))
+        })
+        .collect()
 }
 
 pub fn static_model_lighting_origins(

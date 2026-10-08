@@ -808,7 +808,7 @@ fn commit_script_model_draw_plan(
         return;
     };
 
-    let material_generation = tess.catalog.generation_id;
+    let material_generation = tess.catalog().generation_id();
 
     let catalog_reset = assets.is_changed()
         || atlas.is_changed()
@@ -838,7 +838,9 @@ fn commit_script_model_draw_plan(
                 .iter()
                 .zip(posed.authored.iter().copied())
                 .map(|(_surface, authored)| {
-                    model_materials.authored(&tess.catalog, authored?).cloned()
+                    model_materials
+                        .authored(&tess.catalog(), authored?)
+                        .cloned()
                 })
                 .collect::<Vec<_>>();
             append_or_overwrite_script_model(
@@ -1057,6 +1059,7 @@ pub(crate) fn presented_skel_arcs(
         let skel = match catalog.get_name(&descriptor.model)? {
             asset_world::MapXModelSceneAsset::Iw4(skel)
             | asset_world::MapXModelSceneAsset::Iw5(skel)
+            | asset_world::MapXModelSceneAsset::T6(skel)
             | asset_world::MapXModelSceneAsset::T5(skel) => std::sync::Arc::clone(skel),
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };
@@ -1077,6 +1080,7 @@ pub(crate) fn presented_skels<'a>(
         let skel = match catalog.get_name(&descriptor.model)? {
             asset_world::MapXModelSceneAsset::Iw4(skel)
             | asset_world::MapXModelSceneAsset::Iw5(skel)
+            | asset_world::MapXModelSceneAsset::T6(skel)
             | asset_world::MapXModelSceneAsset::T5(skel) => skel.as_ref(),
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };
@@ -1104,6 +1108,7 @@ pub fn collect_presented_models<'a>(
         let skel = match catalog.get_name(&descriptor.model)? {
             asset_world::MapXModelSceneAsset::Iw4(skel)
             | asset_world::MapXModelSceneAsset::Iw5(skel)
+            | asset_world::MapXModelSceneAsset::T6(skel)
             | asset_world::MapXModelSceneAsset::T5(skel) => skel,
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };

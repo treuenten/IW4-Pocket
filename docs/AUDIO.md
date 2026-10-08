@@ -11,14 +11,13 @@ and 64 pending steps per pass, virtualizes saturated loops and rejects excess
 one-shots. Cancellation and epoch invalidation bypass queues. Weapon attacks
 preserve their first 20 ms during replacement; explicit Stop cancels them.
 
-Catalog publication compiles each variant's looping, spatial, channel, voice
-limits, gain, pitch, composition and loaded-media policy. Namespaces survive
-admission and mixing. Missing policies, ambiguous media bindings, unsupported
-features and invalid mixer graphs produce typed refusals. Compatibility rules
-retain named sources; unknown looping stays unknown. T5 layers activate on
-resolution; other families wait for primary preparation. Layers share deadline,
-cancellation and lifetime, with independent pitch and failure. Killcam worlds
-retain the live sound registry for round-result commands.
+Family compilers publish per-variant looping, spatial, voice, gain, pitch, layer
+and media policies in their catalog context. Bound sound handles and clip keys
+retain its revision; foreign owners and media/source mismatches refuse before playback.
+T5 layers activate at resolution; others wait for primary preparation. Layers share
+deadlines, cancellation and lifetime, with independent pitch/failure. Unknown looping
+uses named one-shot compatibility. [CUES.md](CUES.md) details binding and decode contracts.
+Killcam worlds retain the live sound registry for round-result commands.
 
 Weapon publication compiles thermal scopes, cue namespaces, melee precedence,
 knife substitution and breath aliases. Prediction identifies fire occurrences;
@@ -33,9 +32,13 @@ decode scratch reserves 64 MiB. Geometry and partial frames are validated.
 Native T5 WMA2 emits budget-owned cached s16 chunks for mono 44.1 kHz and
 stereo 48 kHz profiles. T6 capture retains SAB locators; workers reserve output,
 input and FLAC scratch before reading and validate channel/rate/frame metadata.
-Descriptor-only SAB entries bypass cross-bank caching. T6 world spatial policy,
-IW5 pointer-based speaker maps, cross-channel routes and multichannel output
-remain unsupported; WMA seek/tail semantics need corpus validation.
+Descriptor-only SAB entries bypass cross-bank caching. T6 captures native 2D/3D
+flags, dry/near distance curves, MP mixer-group hierarchy, priorities and voice
+limits from the alias banks and sound-driver globals. Authored start delays
+schedule on the audio clock. Six native pan weights use a named stereo fold:
+rear/center at -3 dB and LFE at -6 dB. IW5 pointer-based speaker maps,
+cross-channel routes and multichannel output remain unsupported; WMA seek/tail
+semantics need corpus validation.
 
 Desired loops use scope/epoch/object/slot versions and retain virtual cursors.
 Control ranks eight map voices with a 0.002 gain floor. Device recovery uses
@@ -48,3 +51,11 @@ slow control stages, affinity and device/null frame counts. Set
 `IW4L_AUDIO_DIAG_PATH` for a buffered file; the bounded queue counts dropped
 records. `dump` and `clip` include readiness and recent decisions. Device frames
 measure mixing into callbacks, before device latency or hardware playback.
+
+BO2 faction music uses native spawn/victory tracks, shared defeat music and the
+shared time-running-out cue for both host late-match states. Announcer routes
+translate host objective, flag, round and supported reward events into native
+faction aliases; mode variants share their base introduction. Routes require
+native catalog entries. Shared HUD text pulses use BO2 notification sounds.
+References absent from the installed native banks remain reported as missing;
+no replacement alias or media is synthesized for them.

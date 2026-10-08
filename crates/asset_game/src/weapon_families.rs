@@ -183,15 +183,29 @@ impl std::error::Error for ConfigurationRefusal {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedConfiguration {
-    pub id: u32,
-    pub selection: WeaponSelection,
+    handle: crate::WeaponHandle,
+    selection: WeaponSelection,
+}
+
+impl ResolvedConfiguration {
+    pub(crate) fn new(handle: crate::WeaponHandle, selection: WeaponSelection) -> Self {
+        Self { handle, selection }
+    }
+
+    pub fn handle(&self) -> crate::WeaponHandle {
+        self.handle
+    }
+
+    pub fn selection(&self) -> &WeaponSelection {
+        &self.selection
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachmentOption {
     pub choice: AttachmentChoice,
     pub selected: bool,
-    pub toggle: Result<u32, ConfigurationRefusal>,
+    pub toggle: Result<ResolvedConfiguration, ConfigurationRefusal>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -345,15 +359,14 @@ fn offhand_slot(offhand: Option<crate::CacOffhandBucket>) -> FamilySlot {
     }
 }
 
-pub(crate) trait FamilyContent {
+pub(crate) trait FamilyContent:
+    crate::weapon_catalog::configuration::WeaponConfigurationCompiler
+{
+    fn published_handle(&self, id: u32) -> Option<crate::WeaponHandle>;
     fn lookup(&self, namespace: AssetNamespace, name: &str) -> Option<u32>;
     fn offhand_class(&self, id: u32) -> i32;
     fn admission(&self, id: u32) -> Result<(), ConfigurationRefusal>;
     fn names_in(&self, namespace: AssetNamespace) -> Vec<(u32, String)>;
-    fn iw5_bind(&self, base_id: u32, attachments: &[String]) -> Result<(), ConfigurationRefusal>;
-    fn prepared(&self, _selection: &WeaponSelection) -> Option<u32> {
-        None
-    }
     fn prepared_all(&self) -> Vec<(u32, WeaponSelection)> {
         Vec::new()
     }
@@ -501,13 +514,16 @@ impl WeaponFamilies {
                     }
                 }
             }
-            if namespace == AssetNamespace::Iw5 {
-                described.extend(content.prepared_all());
-            }
+            described.extend(content.prepared_all().into_iter().filter(|(_, selection)| {
+                selection
+                    .family
+                    .as_ref()
+                    .is_some_and(|key| key.namespace == namespace)
+            }));
             for (id, selection) in described {
                 if self
                     .resolve(&selection, LoadoutRules::default(), content)
-                    .is_ok_and(|resolved| resolved.id == id)
+                    .is_ok_and(|resolved| Some(resolved.handle()) == content.published_handle(id))
                 {
                     self.described.insert(id, selection);
                 }
@@ -516,16 +532,11 @@ impl WeaponFamilies {
     }
 
     fn parse_configuration(&self, family: &WeaponFamily, name: &str) -> Option<Vec<String>> {
-        let name = name.strip_suffix("_mp").unwrap_or(name);
-        if name == family.key.base {
-            return Some(Vec::new());
+        let parts = crate::weapon_catalog::configuration::authored_attachments(&family.key, name)?;
+        if parts.is_empty() {
+            return Some(parts);
         }
         let tables = self.tables.get(&family.key.namespace)?;
-        if family.key.namespace == AssetNamespace::T5 && name == format!("{}dw", family.key.base) {
-            return Some(vec!["dw".to_owned()]);
-        }
-        let rest = name.strip_prefix(&family.key.base)?.strip_prefix('_')?;
-        let parts: Vec<String> = rest.split('_').map(str::to_owned).collect();
         if parts.is_empty()
             || !parts
                 .iter()
@@ -559,20 +570,6 @@ impl WeaponFamilies {
             });
         }
         out
-    }
-
-    pub(crate) fn configuration_name(
-        &self,
-        family: &WeaponFamily,
-        attachments: &[String],
-    ) -> String {
-        if attachments.is_empty() {
-            return family.key.base.clone();
-        }
-        if family.key.namespace == AssetNamespace::T5 && attachments == ["dw"] {
-            return format!("{}dw", family.key.base);
-        }
-        format!("{}_{}", family.key.base, attachments.join("_"))
     }
 
     fn compatible(&self, namespace: AssetNamespace, a: &str, b: &str) -> bool {
@@ -721,27 +718,14 @@ impl WeaponFamilies {
                 }
             }
         }
-        if namespace == AssetNamespace::Iw5 && !attachments.is_empty() {
-            let base = family.base.ok_or_else(|| {
-                ConfigurationRefusal::MissingContent(format!("{}_mp", family.key.base))
-            })?;
-            content.iw5_bind(base, &attachments)?;
-            let selection = WeaponSelection::with(key.clone(), &attachments);
-            let id = content.prepared(&selection).ok_or_else(|| {
-                ConfigurationRefusal::MissingContent(format!("{key} {}", attachments.join(" ")))
-            })?;
-            content.admission(id)?;
-            return Ok(ResolvedConfiguration { id, selection });
-        }
-        let name = self.configuration_name(family, &attachments);
-        let id = content
-            .lookup(namespace, &name)
-            .ok_or_else(|| ConfigurationRefusal::MissingContent(format!("{name}_mp")))?;
-        content.admission(id)?;
-        Ok(ResolvedConfiguration {
-            id,
-            selection: WeaponSelection::with(key.clone(), &attachments),
-        })
+        let selection = WeaponSelection::with(key.clone(), &attachments);
+        let id = content.compile(family, &selection)?;
+        Ok(ResolvedConfiguration::new(
+            content
+                .published_handle(id)
+                .ok_or_else(|| ConfigurationRefusal::MissingContent(id.to_string()))?,
+            selection,
+        ))
     }
 
     pub(crate) fn attachment_options(
@@ -769,9 +753,8 @@ impl WeaponFamilies {
                 } else {
                     next.push(choice.name.clone());
                 }
-                let toggle = self
-                    .resolve(&WeaponSelection::with(key.clone(), &next), rules, content)
-                    .map(|resolved| resolved.id);
+                let toggle =
+                    self.resolve(&WeaponSelection::with(key.clone(), &next), rules, content);
                 AttachmentOption {
                     choice: choice.clone(),
                     selected,

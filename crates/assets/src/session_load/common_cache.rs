@@ -236,7 +236,15 @@ pub async fn load_shell_common(games: asset_transport::GamesRoot) -> ShellCommon
     let mut report = Vec::new();
     let key = CommonKey::shell(&games, &mut report);
     let (common, reach) = ensure_common(key).await;
-    let weapons = common.products.weapons.clone().publish();
+    let weapons = common.products.weapons.clone().publish_for_loadout();
+    for family in weapons.weapon_families().families() {
+        if let Some(id) = family.base
+            && let Some(image) = weapons.hud_icon_image_of(id)
+            && !family.image.is_empty()
+        {
+            asset_material::retain_ui_preview_fallback(family.key.namespace, &family.image, image);
+        }
+    }
     report.push(format!(
         "CAC: {reach} common set {}; weapons={} (iw4={} iw5={} t5={} t6={}) tables={}",
         common.key,
@@ -462,12 +470,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
     let runtime_namespace = common_opened
         .as_ref()
         .and_then(|(_, image)| image.as_ref().ok())
-        .map(|image| match image.game {
-            asset_core::ZoneGame::T5 => asset_core::AssetNamespace::T5,
-            asset_core::ZoneGame::Iw5 => asset_core::AssetNamespace::Iw5,
-            _ => asset_core::AssetNamespace::Iw4,
-        })
-        .unwrap_or(asset_core::AssetNamespace::Iw4);
+        .map(|image| image.game);
 
     let (
         mut weapons,
@@ -603,31 +606,6 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         world_weapons.len(),
         xanims.len(),
     ));
-    match weapons.resolve_index("iw5_msr") {
-        Ok(Some(id)) => {
-            let facts = weapons.facts_of(id);
-            common_report.push(format!(
-                "iw5_msr: id={id} gun={} world={} fire={:?} clip={:?} class={:?} type={:?} ftype={:?} bolt={:?} raise={:?} start={:?} dmg={:?} overlay={:?} overlay_img={:?} ov_w={:?} ov_h={:?}",
-                weapons.gun_xmodel_of(id).unwrap_or("<none>"),
-                weapons.world_model_of(id).unwrap_or("<none>"),
-                facts.map(|f| f.fire_time_ms),
-                facts.map(|f| f.clip_size),
-                facts.map(|f| f.weap_class),
-                facts.map(|f| f.weap_type),
-                facts.map(|f| f.fire_type),
-                facts.map(|f| f.bolt_action),
-                facts.map(|f| f.raise_time_ms),
-                facts.map(|f| f.start_ammo),
-                facts.map(|f| f.damage),
-                weapons.overlay_material_of(id),
-                weapons.overlay_image_of(id),
-                facts.map(|f| f.ads_overlay_width),
-                facts.map(|f| f.ads_overlay_height),
-            ));
-        }
-        Ok(None) | Err(_) => common_report.push("iw5_msr: not in merged catalog".into()),
-    }
-
     let mut t5_weapons = t5_weapons;
     let (t5_code_stats, t5_census_stats) = t5_stats;
     t5_weapons.apply_stats_tables(&t5_code_stats);
@@ -641,94 +619,46 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         weapons.len(),
         weapons.namespace_count(asset_core::AssetNamespace::T5)
     ));
-    let (t6_weapons, mut t6_content, t6_tables, t6_report) = t6_weapon_walk.await;
+    let (t6_weapons, preparation, t6_tables, t6_report) = t6_weapon_walk.await;
     common_report.extend(t6_report);
-    let t6_captured = t6_weapons.len();
     weapons.absorb(t6_weapons);
-    let t6_sound_names = t6_content
-        .as_ref()
-        .map_or_else(std::collections::BTreeSet::new, |content| {
-            content.sound_names.clone()
+    if let Some(compiler) = preparation {
+        let prepared = compiler.compile(crate::lane::CommonPreparationProducts {
+            weapons,
+            materials: material_seed,
+            fpv: fpv_meshes,
+            world: world_weapons,
+            projectiles: projectile_meshes,
+            xanims,
+            fx: common_fx,
+            report: Vec::new(),
         });
-    let t6_hands = t6_content
-        .as_ref()
-        .and_then(|content| content.hands.clone());
-    let t6_melee = t6_content
-        .as_ref()
-        .and_then(|content| content.melee.clone());
-    let mut t6_anim_names = std::collections::BTreeSet::new();
-    if let Some(content) = &mut t6_content {
-        let (added, kept) = xanims.absorb_vacant(std::mem::take(&mut content.xanims));
-        common_report.push(format!(
-            "t6 xanims absorbed: +{}, {kept} names already taken",
-            added.len()
-        ));
-        t6_anim_names.extend(added);
+        common_report.extend(
+            prepared
+                .refusals
+                .iter()
+                .map(|cause| format!("common family preparation refused: {cause:?}")),
+        );
+        let products = prepared.products;
+        common_report.extend(products.report);
+        (
+            weapons,
+            material_seed,
+            fpv_meshes,
+            world_weapons,
+            projectile_meshes,
+            xanims,
+            common_fx,
+        ) = (
+            products.weapons,
+            products.materials,
+            products.fpv,
+            products.world,
+            products.projectiles,
+            products.xanims,
+            products.fx,
+        );
     }
-    if let Some(mut content) = t6_content {
-        common_report.push(bind_t6_fx(
-            std::mem::take(&mut content.fx),
-            std::mem::take(&mut content.fx_materials),
-            &mut material_seed,
-            &mut common_fx,
-        ));
-        common_report.push(bind_t6_content(
-            content,
-            &weapons,
-            &mut material_seed,
-            &mut fpv_meshes,
-            &mut world_weapons,
-        ));
-    }
-    let t6_dressed = weapons.dress_t6_stand_ins(
-        |name| {
-            fpv_meshes
-                .get(asset_core::AssetNamespace::Iw4, name)
-                .is_some()
-        },
-        |name| {
-            world_weapons
-                .get(asset_core::AssetNamespace::Iw4, name)
-                .is_some()
-        },
-        |name| t6_sound_names.contains(name),
-        |name| t6_anim_names.contains(name),
-        t6_hands.as_deref().filter(|name| {
-            fpv_meshes
-                .get(asset_core::AssetNamespace::Iw4, name)
-                .is_some()
-        }),
-        t6_melee.as_ref(),
-    );
-    let mut t6_projectiles = 0usize;
-    for id in 1..weapons.len() as u32 {
-        if weapons.identity_namespace_of(id) != Some(asset_core::AssetNamespace::T6) {
-            continue;
-        }
-        let Some(name) = weapons.projectile_model_of(id) else {
-            continue;
-        };
-        if !projectile_meshes.contains(asset_core::AssetNamespace::Iw4, name)
-            && let Some(gun) = world_weapons.get(asset_core::AssetNamespace::Iw4, name)
-        {
-            projectile_meshes.absorb_world_weapon(gun);
-            t6_projectiles += 1;
-        }
-    }
-    common_report.push(format!(
-        "t6 weapon absorb: captured={t6_captured} dressed={} own_view={} own_anims={} (hands {t6_hands:?}) dual_wield={} borrowed_melee={} own_world={} own_projectile={} (+{t6_projectiles} projectile meshes) own_sounds={} missing_stand_ins={:?}; registry now {} (t6={})",
-        t6_dressed.dressed,
-        t6_dressed.own_view,
-        t6_dressed.own_anims,
-        t6_dressed.dual_wield,
-        t6_dressed.borrowed_melee,
-        t6_dressed.own_world,
-        t6_dressed.own_projectile,
-        t6_dressed.own_sounds,
-        t6_dressed.missing,
-        weapons.len(),
-        weapons.namespace_count(asset_core::AssetNamespace::T6)
-    ));
     common_report.push(format!(
         "FPV generation: common={fpv_common_n} iw5_keys={iw5_fpv_added} t5={t5_fpv_n} t5_keys={t5_fpv_added} collide={} merged={}",
         fpv_meshes.collide_name_count(),
@@ -737,21 +667,35 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
 
     let cac_tables: Vec<(asset_core::AssetNamespace, asset_game::CapturedStringTable)> = [
         (runtime_namespace, iw4_stats, iw4_census_stats),
-        (asset_core::AssetNamespace::Iw5, iw5_stats, iw5_census_stats),
         (
-            asset_core::AssetNamespace::T5,
+            Some(asset_core::AssetNamespace::Iw5),
+            iw5_stats,
+            iw5_census_stats,
+        ),
+        (
+            Some(asset_core::AssetNamespace::T5),
             t5_code_stats,
             t5_census_stats,
         ),
-        (asset_core::AssetNamespace::T6, t6_tables, Vec::new()),
+        (Some(asset_core::AssetNamespace::T6), t6_tables, Vec::new()),
     ]
     .into_iter()
     .flat_map(|(namespace, code, common)| {
         code.into_iter()
             .chain(common)
-            .map(move |table| (namespace, table))
+            .filter_map(move |table| Some((namespace?, table)))
     })
     .collect();
+
+    if let Some((_, table)) = cac_tables.iter().find(|(ns, table)| {
+        *ns == asset_core::AssetNamespace::Iw5
+            && table.name.eq_ignore_ascii_case("mp/camoTable.csv")
+    }) {
+        let dressed = weapons.prepare_iw5_camouflages(table, &material_seed, &fpv_meshes);
+        common_report.push(format!(
+            "IW5 camouflage: {dressed} weapon configurations prepared"
+        ));
+    }
 
     let mut camouflage_images = None;
     if let (Some((_, options)), Some((_, choices))) = (
@@ -808,7 +752,6 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         t6_prepared.prepared, t6_prepared.refused
     ));
     weapons.resolve_fpv_mesh_edges(&fpv_meshes);
-    weapons.resolve_fpv_hands(&fpv_meshes, &asset_model::BodyMeshCatalog::default());
     weapons.resolve_world_model_edges(&world_weapons);
 
     common_report.push(format!(
@@ -840,6 +783,8 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
     material_seed.mark_images_common_owned();
     let mut iw5_materials = iw5_materials;
     iw5_materials.mark_images_common_owned();
+    asset_material::retain_ui_material_images(&material_seed);
+    asset_material::retain_ui_material_images(&iw5_materials);
     let set = Arc::new(CommonSet {
         id: NEXT_COMMON_PROFILE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         key,

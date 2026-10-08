@@ -13,6 +13,8 @@ use asset_transport::{
 use asset_world::decode_rawfile_text;
 pub mod arena;
 mod attachment_hide;
+mod cac_host;
+mod cac_presentation;
 mod cac_stats;
 mod fpv_assembly;
 mod fx_catalog;
@@ -24,6 +26,7 @@ mod lochit;
 mod menu_catalog;
 mod menu_source;
 mod penetration;
+mod soldier_presentation;
 pub mod structured_data;
 mod tracer_catalog;
 mod weapon_anim_dispatch;
@@ -36,11 +39,13 @@ mod weapon_semantics;
 mod weapon_t6;
 pub use weapon_t6::{
     MELEE_WEAPON as T6_MELEE_WEAPON, T6_EFFECTS, T6_EQUIPMENT_SOUNDS, capture_t6_string_table,
-    planted_model as t6_planted_model, stand_in_for as t6_stand_in_for,
+    planted_model as t6_planted_model,
 };
 
 pub use arena::*;
 pub use attachment_hide::*;
+pub use cac_host::*;
+pub use cac_presentation::*;
 pub use cac_stats::*;
 pub use fpv_assembly::*;
 pub use fx_catalog::*;
@@ -51,6 +56,7 @@ pub use localize::*;
 pub use lochit::*;
 pub use menu_catalog::*;
 pub use penetration::*;
+pub use soldier_presentation::*;
 pub use tracer_catalog::*;
 pub use weapon_anim_dispatch::*;
 pub use weapon_animations::*;
@@ -64,3 +70,8 @@ pub mod asset_graph {
 
 mod team_t6;
 pub use team_t6::t6_team_properties;
+
+mod fpv_family;
+pub use fpv_family::{
+    FpvFamilyConnection, NativeFpvConnection, SoldierFpvConnection, SoldierHandsConnection,
+};

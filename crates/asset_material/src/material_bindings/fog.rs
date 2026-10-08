@@ -1,14 +1,42 @@
-use super::material_runtime::RuntimeCodeSources;
-use asset_material::t5_code_remap::{
+use super::{BindingWriter, FrameStep, MaterialFogInputs};
+use crate::t5_code_remap::{
     LEFTOVER_T5_CODE_BASE, T5_CODE_FOG, T5_CODE_FOG_COLOR, T5_CODE_FOG2, T5_CODE_SUN_FOG,
     T5_CODE_SUN_FOG_COLOR, T5_CODE_SUN_FOG_DIR,
 };
-use asset_material::t6_techset::CODE_T6_FOG;
-use asset_world::ExpFog;
-
-pub(super) fn produce(sources: &mut RuntimeCodeSources, fog: &ExpFog, eye_z: f32, enabled: bool) {
-    let put = |sources: &mut RuntimeCodeSources, index, row: [f32; 4]| {
-        sources.set_constant_rows(LEFTOVER_T5_CODE_BASE + index, &[row.map(f32::to_bits)]);
+use crate::t6_techset::CODE_T6_FOG;
+#[derive(Clone, Copy, Debug)]
+pub(super) enum FogPacking {
+    T5,
+    T6,
+}
+pub(super) fn prepare(steps: &mut Vec<FrameStep>, requested: &[u16]) {
+    let t5 = [
+        T5_CODE_FOG_COLOR,
+        T5_CODE_SUN_FOG_COLOR,
+        T5_CODE_SUN_FOG_DIR,
+        T5_CODE_SUN_FOG,
+        T5_CODE_FOG,
+        T5_CODE_FOG2,
+    ]
+    .map(|i| LEFTOVER_T5_CODE_BASE + i);
+    if super::demands_any(requested, &t5) {
+        steps.push(FrameStep::Fog(FogPacking::T5));
+    }
+    if super::demands_any(requested, &CODE_T6_FOG) {
+        steps.push(FrameStep::Fog(FogPacking::T6));
+    }
+}
+pub(super) fn produce(
+    sources: &mut BindingWriter<'_>,
+    fog: &MaterialFogInputs,
+    eye_z: f32,
+    enabled: bool,
+    packing: FogPacking,
+) {
+    let put = |sources: &mut BindingWriter<'_>, index, row: [f32; 4]| {
+        if matches!(packing, FogPacking::T5) {
+            sources.set_constant_rows(LEFTOVER_T5_CODE_BASE + index, &[row.map(f32::to_bits)]);
+        }
     };
     let (height_density, base_height, color) = match fog.volumetric {
         Some(volume) => (
@@ -29,7 +57,7 @@ pub(super) fn produce(sources: &mut RuntimeCodeSources, fog: &ExpFog, eye_z: f32
         None => (
             0.0,
             0.0,
-            super::command_context::fog_color_linear_and_gamma(fog.color_rgb, 1.0).0,
+            super::fog_color_linear_and_gamma(fog.color_rgb, 1.0).0,
         ),
     };
     put(sources, T5_CODE_FOG_COLOR, color);
@@ -38,8 +66,7 @@ pub(super) fn produce(sources: &mut RuntimeCodeSources, fog: &ExpFog, eye_z: f32
             let rgb = if fog.volumetric.is_some() {
                 sun.color_rgb
             } else {
-                let linear =
-                    super::command_context::fog_color_linear_and_gamma(sun.color_rgb, 1.0).0;
+                let linear = super::fog_color_linear_and_gamma(sun.color_rgb, 1.0).0;
                 [linear[0], linear[1], linear[2]]
             };
             (
@@ -80,6 +107,9 @@ pub(super) fn produce(sources: &mut RuntimeCodeSources, fog: &ExpFog, eye_z: f32
     );
     put(sources, T5_CODE_FOG, fog_row);
     put(sources, T5_CODE_FOG2, fog2);
+    if matches!(packing, FogPacking::T5) {
+        return;
+    }
     let scale = fog.volumetric.map_or(1.0, |volume| volume.color_scale);
     let hdr = |rgb: [f32; 4]| {
         [

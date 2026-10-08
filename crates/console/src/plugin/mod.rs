@@ -211,6 +211,7 @@ impl Plugin for ConsolePlugin {
                             crate::user_settings::native_menu_settings,
                             crate::user_settings::consume_menu_binding,
                             crate::game_folders::game_folder_menu,
+                            crate::community_servers::community_server_menu,
                         )
                             .chain(),
                         crate::user_settings::sync_binding_view,
@@ -309,7 +310,9 @@ struct PhysicalInputState {
 }
 
 fn publish_client_action_input(
-    time: Res<Time>,
+    // The clock `sample_client_input` reads: a press and the samples that
+    // time its hold must agree.
+    time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut motion: MessageReader<MouseMotion>,

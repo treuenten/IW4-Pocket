@@ -369,6 +369,7 @@ dependencies = [
  "asset_transport",
  "bcdec_rs",
  "bevy",
+ "d3d9_state",
  "diag",
  "dpvs_iw4",
  "dxbc_sm5",
@@ -3457,6 +3458,7 @@ dependencies = [
  "movement_iw4",
  "net",
  "playerstate_iw4",
+ "render_material",
  "sim",
  "weapon_iw4",
 ]
@@ -6006,6 +6008,7 @@ name = "sim"
 version = "0.1.0"
 dependencies = [
  "anim_iw4",
+ "asset_core",
  "bevy_ecs",
  "clipmap_iw4",
  "diag",
@@ -6822,6 +6825,7 @@ dependencies = [
  "net",
  "session",
  "sim",
+ "updater",
 ]
 
 [[package]]

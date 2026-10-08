@@ -19,7 +19,8 @@ pub struct MapDirPrimaryLight {
     pub t5_specular_color: Option<[f32; 4]>,
 }
 
-pub use render_frame::{LightAttenuationBind, T5LightFalloffPack};
+pub use asset_material::MaterialLightOverrides;
+pub use render_frame::LightAttenuationBind;
 
 #[derive(Clone, Debug)]
 pub struct WorldPortal {
@@ -142,6 +143,8 @@ pub struct WorldSmodelLightingSample {
     pub tile_rgba: [u8; 256],
 
     pub packed_lighting: [u8; 4],
+    pub lighting_sh: Option<[[f32; 4]; 3]>,
+    pub vertex_lighting: Option<std::sync::Arc<[Vec<[u8; 4]>; 4]>>,
 }
 
 pub const SMODEL_LIGHTING_MAX_CLIENT_VIEWS: u32 = 1;
@@ -200,6 +203,7 @@ pub struct WorldScene {
     pub smodel_lighting_samples: Vec<WorldSmodelLightingSample>,
 
     pub light_grid: Option<asset_model::OwnedLightGrid>,
+    pub(crate) material_world: asset_material::MaterialWorldBindingInputs,
 
     pub model_lighting_image: Option<Handle<Image>>,
     pub model_lighting_dims: Option<lighting_iw4::ModelLightingAtlasDims>,
@@ -209,6 +213,8 @@ pub struct WorldScene {
     pub radius: f32,
 
     pub world_bounds: Option<[f32; 6]>,
+
+    pub sun_sample_size_near: f32,
 
     pub cull: Option<WorldCull>,
 
@@ -232,6 +238,7 @@ pub struct WorldScene {
     pub retained_lightmap_uvs: Vec<[f32; 2]>,
 
     pub exp_fog: Option<asset_world::ExpFog>,
+    pub t6_film_grade: Option<asset_world::T6FilmGrade>,
 
     pub film_vision: Option<asset_world::FilmVision>,
     pub film_visions: std::collections::BTreeMap<
@@ -272,7 +279,7 @@ pub struct WorldScene {
 
     pub primary_light_def_names: Vec<Option<String>>,
 
-    pub primary_light_t5_falloff: Vec<T5LightFalloffPack>,
+    pub primary_light_overrides: Vec<MaterialLightOverrides>,
 
     pub reflection_probe_sh: Vec<Option<[[f32; 4]; 3]>>,
 
@@ -664,7 +671,12 @@ fn install_sun_effects(
 }
 
 impl WorldScene {
-    pub fn from_bounds(mesh: Mesh, min: [f32; 3], max: [f32; 3]) -> Self {
+    pub fn from_bounds(
+        mesh: Mesh,
+        min: [f32; 3],
+        max: [f32; 3],
+        policy: asset_world::WorldDrawPolicy,
+    ) -> Self {
         let min = Vec3::from_array(min);
         let max = Vec3::from_array(max);
         WorldScene {
@@ -706,11 +718,18 @@ impl WorldScene {
             dyn_ent_brushes: Vec::new(),
             smodel_lighting_samples: Vec::new(),
             light_grid: None,
+            material_world: super::world_bindings::prepare(
+                None,
+                asset_model::LightGridColorEncoding::Rgb8,
+                None,
+                None,
+            ),
             model_lighting_image: None,
             model_lighting_dims: None,
             center: (min + max) * 0.5,
             radius: ((max - min).length() * 0.5).max(1.0),
             world_bounds: None,
+            sun_sample_size_near: policy.sun_sample_size_near,
             cull: None,
             intermission_view: None,
             fx_glass: None,
@@ -727,6 +746,7 @@ impl WorldScene {
             retained_texture_uvs: Vec::new(),
             retained_lightmap_uvs: Vec::new(),
             exp_fog: None,
+            t6_film_grade: None,
             film_vision: None,
             film_visions: Default::default(),
             createart_name: None,
@@ -746,7 +766,7 @@ impl WorldScene {
             primary_light_attenuation: Vec::new(),
             dynamic_light: None,
             primary_light_def_names: Vec::new(),
-            primary_light_t5_falloff: Vec::new(),
+            primary_light_overrides: Vec::new(),
             reflection_probe_sh: Vec::new(),
             sun_primary_light_count: 0,
             light_region_hulls: None,
@@ -772,6 +792,7 @@ impl WorldScene {
         max: [f32; 3],
         dpvs: WorldDpvs,
         intermission_view: Option<WorldCameraPose>,
+        policy: asset_world::WorldDrawPolicy,
     ) -> Self {
         let min = Vec3::from_array(min);
         let max = Vec3::from_array(max);
@@ -805,11 +826,18 @@ impl WorldScene {
             dyn_ent_brushes: Vec::new(),
             smodel_lighting_samples: draw.smodel_lighting_samples,
             light_grid: None,
+            material_world: super::world_bindings::prepare(
+                None,
+                asset_model::LightGridColorEncoding::Rgb8,
+                None,
+                None,
+            ),
             model_lighting_image: None,
             model_lighting_dims: None,
             center: (min + max) * 0.5,
             radius: ((max - min).length() * 0.5).max(1.0),
             world_bounds: None,
+            sun_sample_size_near: policy.sun_sample_size_near,
             cull: None,
             intermission_view: None,
             fx_glass: None,
@@ -824,6 +852,7 @@ impl WorldScene {
             retained_texture_uvs: Vec::new(),
             retained_lightmap_uvs: Vec::new(),
             exp_fog: None,
+            t6_film_grade: None,
             film_vision: None,
             film_visions: Default::default(),
             createart_name: None,
@@ -843,7 +872,7 @@ impl WorldScene {
             primary_light_attenuation: Vec::new(),
             dynamic_light: None,
             primary_light_def_names: Vec::new(),
-            primary_light_t5_falloff: Vec::new(),
+            primary_light_overrides: Vec::new(),
             reflection_probe_sh: Vec::new(),
             sun_primary_light_count: 0,
             light_region_hulls: None,
@@ -920,6 +949,7 @@ impl WorldScene {
         catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
     ) -> Result<(), asset_world::SurfaceMaterialStampError> {
         let baked: Vec<Option<dpvs_iw4::GfxDrawSurf>> = catalog
+            .parts()
             .materials
             .iter()
             .map(|material| {
@@ -1083,6 +1113,7 @@ pub fn world_scene_from_draw(
     } = materials;
     let Some(mut draw) = world.draw else {
         let mut empty = WorldScene::default();
+        empty.sun_sample_size_near = world.policy.sun_sample_size_near;
         empty.common_profile_id = common_profile_id;
         empty.products_id = products_id;
         empty.fx_glass = fx_glass;
@@ -1106,8 +1137,7 @@ pub fn world_scene_from_draw(
         .iter()
         .map(|probe| probe.origin)
         .collect();
-    let runtime_material_catalog =
-        crate::assemble::drawsurf::capture_runtime_catalog(&global_materials);
+    let runtime_material_catalog = asset_material::compile_material_catalog(&global_materials);
     let asset_ref = asset_material::AssetRefDumpCensus::from_catalog(&global_materials);
 
     let exact_material_images = global_materials
@@ -1249,7 +1279,7 @@ pub fn world_scene_from_draw(
     }
     if let crate::assemble::drawsurf::RuntimeSortedMaterialTable::BuildFailed(
         crate::assemble::drawsurf::CatalogBuildError::ShaderIdentityMissing { material, slot },
-    ) = &runtime_material_catalog.sorted_materials
+    ) = &runtime_material_catalog.parts().sorted_materials
     {
         let name = global_materials
             .materials
@@ -1531,6 +1561,8 @@ pub fn world_scene_from_draw(
                     lighting_origin: sample.lighting_origin,
                     tile_rgba: sample.tile_rgba,
                     packed_lighting: sample.packed_lighting,
+                    lighting_sh: sample.lighting_sh,
+                    vertex_lighting: sample.vertex_lighting,
                 })
                 .collect(),
         },
@@ -1541,9 +1573,11 @@ pub fn world_scene_from_draw(
             origin: view.origin,
             angles: view.angles,
         }),
+        policy,
     );
     scene.fx_glass = fx_glass;
     scene.world_bounds = world_bounds;
+    scene.sun_sample_size_near = policy.sun_sample_size_near;
     scene.reflection_probe_origins = reflection_probe_origins;
     scene.runtime_material_catalog = std::sync::Arc::new(runtime_material_catalog);
     if let Some(cull) = scene.cull.as_mut() {
@@ -1558,7 +1592,7 @@ pub fn world_scene_from_draw(
     diag::info!(
         World,
         "canonical materials: n={} batch_mat={} smodel_mat={} (MaterialIndex into decoded catalog; runtime is derived)",
-        scene.runtime_material_catalog.materials.len(),
+        scene.runtime_material_catalog.parts().materials.len(),
         scene
             .batches
             .iter()
@@ -1571,9 +1605,21 @@ pub fn world_scene_from_draw(
             .filter(|surface| surface.material.is_some())
             .count(),
     );
+    scene.material_world = super::world_bindings::prepare(
+        world.source_namespace,
+        world
+            .light_grid
+            .as_ref()
+            .map_or(asset_model::LightGridColorEncoding::Rgb8, |grid| {
+                grid.color_encoding
+            }),
+        draw.t6_exposure,
+        draw.sky_dynamic_intensity,
+    );
     scene.light_grid = world.light_grid;
     scene.sky_model = sky_model;
     scene.exp_fog = world.exp_fog;
+    scene.t6_film_grade = world.t6_film_grade;
     scene.film_vision = world.film_vision;
     scene.film_visions = world.film_visions;
     scene.createart_name = world.createart_name;
@@ -1626,16 +1672,16 @@ pub fn world_scene_from_draw(
         .iter()
         .map(|light| light.def_name.clone())
         .collect();
-    scene.primary_light_t5_falloff = draw
+    scene.primary_light_overrides = draw
         .primary_lights
         .iter()
-        .map(|light| T5LightFalloffPack {
+        .map(|light| MaterialLightOverrides {
             diffuse: light.t5_diffuse_color,
             specular: light.t5_specular_color,
             attenuation: light.t5_attenuation,
             falloff: light.t5_falloff,
-            a_ab_b: light.t5_a_ab_b,
-            angle_z: light.t5_angle.map(|angle| angle[2]),
+            cone_bounds: light.t5_a_ab_b,
+            rotation: light.t5_angle.map(|angle| angle[2]),
             cookie0: light.t5_cookie0,
             cookie1: light.t5_cookie1,
             cookie2: light.t5_cookie2,

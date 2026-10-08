@@ -6,7 +6,6 @@ use bevy::tasks::{TaskPool, TaskPoolBuilder};
 use crate::{
     PreparedGaps, PreparedMap,
     lane::{LoadedWorld, lane},
-    lane_capability::PreparedCapability,
 };
 use asset_anim::{XAnimBuild, XAnimCatalog};
 use asset_game::{
@@ -96,8 +95,9 @@ fn set_thread_cpus(cpus: &[usize]) {
 #[cfg(not(target_os = "linux"))]
 fn set_thread_cpus(_cpus: &[usize]) {}
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct PreparedWorld {
+    pub source_namespace: Option<asset_core::AssetNamespace>,
     pub draw: Option<WorldDraw>,
     pub dynamic_light: Option<asset_world::ResolvedLightDef>,
     pub static_model_meshes: Vec<asset_world::ModelMesh>,
@@ -131,6 +131,7 @@ pub struct PreparedWorld {
     pub intermission_view: Option<IntermissionView>,
 
     pub exp_fog: Option<asset_world::ExpFog>,
+    pub t6_film_grade: Option<asset_world::T6FilmGrade>,
 
     pub film_vision: Option<asset_world::FilmVision>,
     pub film_visions: std::collections::BTreeMap<
@@ -146,7 +147,7 @@ pub struct PreparedWorld {
     pub policy: WorldDrawPolicy,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct PreparedMatch {
     pub scripts: crate::ScriptSources,
     pub world: PreparedWorld,
@@ -155,12 +156,13 @@ pub struct PreparedMatch {
     pub materials: crate::MatchMaterials,
     pub clip: Option<Arc<ClipCollision>>,
     pub weapons: Arc<WeaponRegistry>,
-    pub fpv_meshes: FpvMeshCatalog,
+    pub fpv_meshes: Arc<FpvMeshCatalog>,
     pub bodies: Arc<BodyMeshCatalog>,
+    pub soldiers: asset_game::SoldierPresentations,
     pub world_weapons: WorldWeaponCatalog,
 
     pub projectile_meshes: asset_model::ProjectileMeshCatalog,
-    pub xanims: XAnimCatalog,
+    pub xanims: Arc<XAnimCatalog>,
     pub destructible_death: Vec<crate::DestructibleDeathRow>,
     pub player_anim_sources: asset_anim::PlayerAnimSources,
 
@@ -185,4 +187,40 @@ pub struct PreparedMatch {
 pub enum MatchLoadOutcome {
     Ready(PreparedMatch),
     Canceled,
+    Refused(String),
+}
+
+impl PreparedWorld {
+    pub fn empty(policy: WorldDrawPolicy) -> Self {
+        Self {
+            source_namespace: Some(policy.family),
+            draw: Default::default(),
+            dynamic_light: Default::default(),
+            static_model_meshes: Default::default(),
+            static_model_instances: Default::default(),
+            map_xmodel_scene_assets: Default::default(),
+            script_model_instances: Default::default(),
+            script_brush_models: Default::default(),
+            flag_descriptors: Default::default(),
+            script_structs: Default::default(),
+            dyn_ents: Default::default(),
+            smodel_lighting_samples: Default::default(),
+            light_grid: Default::default(),
+            fx: Default::default(),
+            fx_models: Default::default(),
+            fx_glass: Default::default(),
+            impact_fx: Default::default(),
+            reflection_probe_images: Default::default(),
+            intermission_view: Default::default(),
+            exp_fog: Default::default(),
+            t6_film_grade: Default::default(),
+            film_vision: Default::default(),
+            film_visions: Default::default(),
+            createart_name: Default::default(),
+            min: Default::default(),
+            max: Default::default(),
+            world_bounds: Default::default(),
+            policy,
+        }
+    }
 }

@@ -209,7 +209,8 @@ pub(crate) fn spawn_world(
         let spawn = job.spawn;
         let gpu_ready = gpu.as_deref();
         let gpu_done = super::world_gpu::poll(&mut job.gpu_wait, spawn, gpu_ready, gap_ms);
-        let fpv_done = fpv.settled_for(&tess.catalog) && model_materials.settled_for(&tess.catalog);
+        let fpv_done =
+            fpv.settled_for(&tess.catalog()) && model_materials.settled_for(&tess.catalog());
         if gpu_done && !fpv_done {
             diag::info!(
                 World,
@@ -395,11 +396,13 @@ pub(crate) fn spawn_world(
             programs,
             exact_shaders,
         );
-        commands.insert_resource(render_scene::TessMaterials {
-            catalog: std::sync::Arc::clone(&generation.catalog),
-            prepared: std::sync::Arc::clone(&generation.prepared),
-            material_images: std::sync::Arc::new(Vec::new()),
-        });
+        commands.insert_resource(
+            render_scene::TessMaterials::new(
+                std::sync::Arc::clone(&generation.catalog),
+                std::sync::Arc::clone(&generation.prepared),
+            )
+            .expect("admitted material publication"),
+        );
         commands.insert_resource(scene.map_xmodel_scene_assets.clone());
         match &generation.postfx {
             crate::assemble::drawsurf::RuntimePostFxResources::Ready(film) => diag::info!(
@@ -532,7 +535,7 @@ pub(crate) fn spawn_world(
         commands.insert_resource(crate::assemble::drawsurf::MapPrimaryLights {
             lights: scene.primary_light_pack.clone(),
             attenuation: scene.primary_light_attenuation.clone(),
-            t5_falloff: scene.primary_light_t5_falloff.clone(),
+            overrides: scene.primary_light_overrides.clone(),
             reflection_probe_sh: scene.reflection_probe_sh.clone(),
             dynamic: scene.dynamic_light,
         });
@@ -549,7 +552,7 @@ pub(crate) fn spawn_world(
                 .filter(|bind| bind.image.is_some())
                 .count();
             let t5_atten = scene
-                .primary_light_t5_falloff
+                .primary_light_overrides
                 .iter()
                 .filter(|pack| pack.attenuation.is_some())
                 .count();
