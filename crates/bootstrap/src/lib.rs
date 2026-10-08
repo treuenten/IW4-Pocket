@@ -6,6 +6,7 @@ mod frame_pace;
 mod ios_input;
 mod launch;
 mod plugins;
+mod promotion;
 #[cfg(any(target_os = "ios", test))]
 mod touch_controls;
 

@@ -3,7 +3,7 @@
 //! - `IW4L_FRAME_PACE=off|0|30|40|60` (default off): hold each present to the
 //!   given rate with `presentDrawable:afterMinimumDuration:` in the vendored
 //!   wgpu-hal. Off is the plain present.
-//! - `IW4L_DT_SNAP=0|1` (default 1, acts only with a pace): advance game time
+//! - `IW4L_DT_SNAP=0|1` (default 0, acts only with a pace): advance game time
 //!   on the 120 Hz vsync grid (see `diag::frame_pacing::PaceClock`) through
 //!   `TimeUpdateStrategy::ManualInstant`, instead of Bevy's sample taken after
 //!   the previous present. Without a pace the time update stays automatic.
