@@ -5,6 +5,11 @@ use crate::controller::HostController;
 
 pub const MAX_HOST_BOTS: u32 = 20;
 
+/// MW2's player slots (sv_maxclients 18). Client ids double as entity numbers,
+/// and the next numbers belong to corpses, so a client above this collides with
+/// a corpse and overruns the 18-row match data.
+pub const MAX_CLIENT_SLOTS: u32 = playerstate_iw4::PLAYER_CORPSE_ENTITY_BASE as u32;
+
 const BOT_NAMES: [&str; 52] = [
     "contextrot",
     "t.me/contextrot",
@@ -250,16 +255,14 @@ impl BotRoster {
     }
 
     fn claim_id(&mut self, taken: &[ClientId]) -> Option<ClientId> {
-        // Only `bots + taken` ids are spoken for, so one candidate more than
-        // that always turns up a free one.
-        let candidates = self
-            .bots
-            .len()
-            .saturating_add(taken.len())
-            .saturating_add(1);
-        for _ in 0..candidates {
+        // Bots take ids 1..MAX_CLIENT_SLOTS; once every one is spoken for there is
+        // no room, whatever MAX_HOST_BOTS allows.
+        for _ in 1..MAX_CLIENT_SLOTS {
+            if !(1..MAX_CLIENT_SLOTS).contains(&self.next_client) {
+                self.next_client = 1;
+            }
             let id = ClientId(self.next_client);
-            self.next_client = self.next_client.wrapping_add(1).max(1);
+            self.next_client += 1;
             if !taken.contains(&id) && !self.is_bot(id) {
                 return Some(id);
             }
@@ -274,4 +277,33 @@ pub fn default_class_index(seed: u64, client: ClientId, pick: u32) -> u8 {
         .wrapping_add(u64::from(client.0).wrapping_mul(0xBF58_476D_1CE4_E5B9))
         .wrapping_add(u64::from(pick).wrapping_mul(0x94D0_49BB_1331_11EB));
     (mix >> 33) as u8
+}
+
+#[cfg(test)]
+mod client_slot_tests {
+    use super::*;
+
+    #[test]
+    fn bots_never_take_more_than_the_player_slots() {
+        let mut roster = BotRoster::default();
+        let human = [ClientId(0)];
+        let first = roster.add_bots(10, &human, true, None);
+        let second = roster.add_bots(9, &human, true, None);
+        assert_eq!(first.len() + second.len(), (MAX_CLIENT_SLOTS - 1) as usize);
+        let mut ids: Vec<u32> = first.iter().chain(&second).map(|id| id.0).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..MAX_CLIENT_SLOTS).collect::<Vec<_>>());
+        assert!(roster.add_bots(1, &human, true, None).is_empty());
+    }
+
+    #[test]
+    fn a_freed_slot_is_claimed_again() {
+        let mut roster = BotRoster::default();
+        let taken = [ClientId(0), ClientId(3)];
+        let added = roster.add_bots(20, &taken, true, None);
+        assert_eq!(added.len(), (MAX_CLIENT_SLOTS - 2) as usize);
+        assert!(!added.contains(&ClientId(3)));
+        roster.bots.retain(|bot| bot.id != ClientId(7));
+        assert_eq!(roster.add_bots(1, &taken, true, None), vec![ClientId(7)]);
+    }
 }
