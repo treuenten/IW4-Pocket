@@ -10,6 +10,11 @@ make map mp_boneyard CMDS='spawn 0; wait 2s; quit'
 cargo run --profile play -p launcher -- map iw5:mp_overwatch --cmds '…'
 ```
 
+The campaign's zones play as free-roam maps (Free for All or Team Deathmatch, private matches only):
+`map sp:trainer`, `map sp:favela`. `sp:` is the campaign's own zone; a bare `favela` is
+`mp_favela`. They are in the lobby's map list as "Campaign (free roam)", by mission name
+([`MAP-LOAD.md`](MAP-LOAD.md#campaign-maps)).
+
 `make` passes no foreign flags through: in the `Makefile` it is `CMDS`, on the
 binary `--cmds`. The colon is a GNU make pattern, so `make map iw5:…` fails —
 write `make map ZONE=iw5:mp_overwatch` or use `cargo run`. Recipes: `make

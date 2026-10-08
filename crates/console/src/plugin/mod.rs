@@ -769,8 +769,13 @@ fn setup_console(
     crate::debug_fx_marks::register_fx_mark_commands(&mut registry);
     binds.apply_defaults();
 
+    // `map <TAB>`: the multiplayer maps, then the campaign's `sp:` keys.
     let maps = asset_transport::games_root_from_env()
-        .map(|root| asset_transport::list_mp_maps(&root))
+        .map(|root| {
+            let mut maps = asset_transport::list_mp_maps(&root);
+            maps.extend(asset_transport::list_campaign_maps(&root));
+            maps
+        })
         .unwrap_or_default();
     crate::feature_dispatch::register_feature_commands(&mut registry, &maps);
     crate::frontend::register(&mut registry);

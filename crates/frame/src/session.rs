@@ -51,6 +51,21 @@ pub struct LaunchIdentity {
     pub games_root: PathBuf,
     pub artifacts: PathBuf,
     pub zone: String,
+    /// What the live map was asked for by (`iw4:mp_terminal`, `sp:favela`), when it was asked for
+    /// at all. The zone is the stem of the file that came of it, and a stem is not always the way
+    /// back: the bare `favela` is `mp_favela`, and the campaign's `favela` is `sp:favela`.
+    pub map_key: String,
+}
+
+impl LaunchIdentity {
+    /// What to ask `map` for to load the live map again.
+    pub fn reload_key(&self) -> &str {
+        if self.map_key.is_empty() {
+            &self.zone
+        } else {
+            &self.map_key
+        }
+    }
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -406,3 +421,21 @@ pub struct BotNavigationReady(pub WorldReadiness);
 
 #[derive(Component)]
 pub struct UiCamera;
+
+#[cfg(test)]
+mod launch_identity_tests {
+    use super::*;
+
+    #[test]
+    fn a_map_asked_for_by_key_is_reloaded_by_that_key() {
+        let mut identity = LaunchIdentity {
+            zone: "favela".into(),
+            ..Default::default()
+        };
+        assert_eq!(identity.reload_key(), "favela");
+        identity.map_key = "sp:favela".into();
+        assert_eq!(identity.reload_key(), "sp:favela");
+        identity.map_key.clear();
+        assert_eq!(identity.reload_key(), "favela");
+    }
+}

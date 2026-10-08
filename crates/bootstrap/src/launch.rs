@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use asset_audio::load_mp_sound_bank;
 use asset_game::{load_mp_localized_strings, load_ui_menu_catalog};
-use asset_transport::{LoadProgress, find_runtime_common_mp, find_zone_file, list_mp_map_packs};
+use asset_transport::{LoadProgress, find_runtime_common_mp, find_zone_file, list_map_packs};
 use assets::{
     LoadingPreviewSource, LoadingScreen, MatchLoadRequest, NamespaceSoundIwd, NamespaceTrees,
 };
@@ -119,6 +119,7 @@ fn launch_identity(config: &LaunchConfig) -> LaunchIdentity {
         games_root: config.games_root.clone(),
         artifacts: config.artifacts.clone(),
         zone: config.zone.clone(),
+        map_key: String::new(),
     }
 }
 
@@ -310,13 +311,17 @@ fn run_menu(
             menu_report.join("\n")
         ));
     }
-    let maps = list_mp_map_packs(&games);
+    let maps = list_map_packs(&games);
     diag::info!(
         Launch,
-        "menu: {} maps in {} packs under {}",
+        "menu: {} maps in {} packs under {} ({} campaign)",
         maps.iter().map(|pack| pack.maps.len()).sum::<usize>(),
         maps.len(),
-        games.0.display()
+        games.0.display(),
+        maps.iter()
+            .flat_map(|pack| &pack.maps)
+            .filter(|map| asset_transport::is_campaign_key(map))
+            .count()
     );
     let config = LaunchConfig {
         role: Role::Listen,
@@ -495,8 +500,15 @@ fn run_map(
     let loading_title = asset_transport::map_load_title(&zone_arg_lc, game);
     let namespace_trees = NamespaceTrees::discover(&games);
     let have = content_flags(&namespace_trees);
-    let requires = net::content_required_by_map(&zone_arg_lc)
-        .unwrap_or_else(|error| fatal(&format!("master content: {error}")));
+    // A campaign map is for a private match: no public lobby is named for it.
+    let requires = if asset_transport::is_campaign_key(&zone_arg_lc) {
+        None
+    } else {
+        Some(
+            net::content_required_by_map(&zone_arg_lc)
+                .unwrap_or_else(|error| fatal(&format!("master content: {error}"))),
+        )
+    };
 
     let master_intent = if role == Role::Replay {
         net::MasterLaunchIntent::disabled()
@@ -506,11 +518,17 @@ fn run_map(
             "master launch disabled: IW4 common_mp.ff is not installed"
         );
         net::MasterLaunchIntent::disabled()
-    } else {
+    } else if let Some(requires) = requires {
         net::MasterLaunchIntent::from_env_for_map(&zone, have, requires).unwrap_or_else(|error| {
             diag::warn!(Net, "master launch disabled: {error}");
             net::MasterLaunchIntent::disabled()
         })
+    } else {
+        diag::info!(
+            Net,
+            "master launch disabled: `{zone_arg_lc}` is a campaign map, for private matches"
+        );
+        net::MasterLaunchIntent::disabled()
     };
 
     let config = LaunchConfig {
@@ -575,7 +593,9 @@ fn run_map(
         });
     }
     let ui_games_root = asset_game::ui_games_root(&games).ok().map(|root| root.0);
-    app.insert_resource(launch_identity(&config))
+    let mut identity = launch_identity(&config);
+    identity.map_key = zone_arg_lc.clone();
+    app.insert_resource(identity)
         .insert_resource(cheats)
         .insert_resource(probe)
         .insert_resource(menus)

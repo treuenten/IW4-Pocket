@@ -57,6 +57,14 @@ pub fn content_required_by_map(map: &str) -> Result<ContentFlags> {
         "iw5" => CONTENT_IW5,
         "t5" => CONTENT_T5,
         "t6" => CONTENT_T6,
+        // The single-player zones (`sp:trainer`) play as free-roam maps in a private match. A
+        // public lobby is a room other builds join by this name, and they have no such map.
+        "sp" => {
+            return Err(format!(
+                "`{map}` is a campaign map; those are only available in private matches"
+            )
+            .into());
+        }
         other => return Err(format!("unknown content namespace `{other}` in map `{map}`").into()),
     }))
 }
@@ -3298,4 +3306,42 @@ fn refresh_relay_authority_hello(
         );
     }
     hub.hello.content = content;
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::*;
+
+    #[test]
+    fn a_map_requires_the_content_of_its_game() {
+        assert_eq!(
+            content_required_by_map("mp_terminal").unwrap().0,
+            CONTENT_IW4
+        );
+        assert_eq!(
+            content_required_by_map("iw4:mp_terminal").unwrap().0,
+            CONTENT_IW4
+        );
+        assert_eq!(
+            content_required_by_map("t5:mp_nuketown").unwrap().0,
+            CONTENT_T5
+        );
+        assert_eq!(
+            content_required_by_map("t6:mp_nuketown_2020").unwrap().0,
+            CONTENT_T6
+        );
+    }
+
+    #[test]
+    fn a_campaign_map_is_no_map_of_a_public_lobby() {
+        let error = content_required_by_map("sp:trainer")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("campaign map"), "{error}");
+        assert!(error.contains("private matches"), "{error}");
+        let error = content_required_by_map("nonsense:trainer")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown content namespace"), "{error}");
+    }
 }

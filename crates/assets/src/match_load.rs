@@ -43,6 +43,9 @@ pub struct MatchLoadAccepted {
     pub request_id: u64,
     pub load_key: frame::LocalLoadKey,
     pub zone: String,
+    /// The file the zone resolved to. The zone is a stem, and a stem is not a way back to its
+    /// file: the bare `favela` resolves to `mp_favela.ff`, and the campaign's is `favela.ff`.
+    pub zone_ff: Option<PathBuf>,
 }
 
 #[derive(Resource)]
@@ -133,6 +136,7 @@ fn start_match_load(
         return;
     }
     let zone_ff = request.zone_ff.clone();
+    let accepted_ff = zone_ff.as_ref().ok().cloned();
     let common_mp = request.common_mp.clone();
     let progress = request.progress.clone();
     let request_id = request.request_id;
@@ -204,6 +208,7 @@ fn start_match_load(
         request_id,
         load_key,
         zone: zone_accepted,
+        zone_ff: accepted_ff,
     });
     commands.insert_resource(MatchLoadTask {
         task,

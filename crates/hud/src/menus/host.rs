@@ -438,6 +438,11 @@ impl ExprHost for MenuHost<'_> {
         if map.is_empty() {
             return Err(ExprError::Host("mapname"));
         }
+        // A campaign zone is named for its mission. Its stem is no `mp_` map's: `favela` is the
+        // single-player zone, and `MPUI_FAVELA` would name the multiplayer map instead.
+        if let Some(title) = asset_transport::campaign_title(&map) {
+            return Ok(Operand::Str(title.to_owned()));
+        }
         let key = format!(
             "MPUI_{}",
             map.strip_prefix("mp_").unwrap_or(&map).to_ascii_uppercase()

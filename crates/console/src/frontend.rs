@@ -2,7 +2,10 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use frame::{UiMenuDvars, UiMenuRequest, UiPartyState};
 use ui::frontend::maps::{map_label, map_preview, pack_maps};
-use ui::frontend::rules::{MATCH_CONFIG, host_rules, seed_rules, selected_game};
+use ui::frontend::rules::{
+    CAMPAIGN_MODES_NOTICE, MATCH_CONFIG, current_setup, host_rules, map_fits_lobby, mode_fits_map,
+    mode_for_map, mode_refusal, seed_rules, selected_game,
+};
 
 use crate::{CommandSpec, ConsoleCommand, ConsoleRegistry};
 
@@ -234,6 +237,26 @@ pub(crate) fn route(
             sim::HostGameModeSelection::from_env().token(),
         );
     }
+    // Whatever set the map (the picker, a script, `set ui_mapname`), a private lobby holds a mode
+    // the map can start: a campaign map plays two of them.
+    if !state.public
+        && let (Some(map), Some(mode)) = (
+            dvars.get("ui_mapname"),
+            dvars
+                .get("ui_gametype")
+                .and_then(sim::HostGameModeSelection::from_token),
+        )
+        && !mode_fits_map(map, mode)
+    {
+        let fitted = mode_for_map(map, mode);
+        diag::info!(
+            Ui,
+            "frontend: `{map}` plays {} only, not {}",
+            fitted.display_name(),
+            mode.display_name()
+        );
+        dvars.set("ui_gametype", fitted.token());
+    }
     if !state.rules_seeded
         && let Some(config) = catalog.as_ref().and_then(|c| c.rawfile_text(MATCH_CONFIG))
     {
@@ -290,6 +313,7 @@ pub(crate) fn route(
                         services.submit(net::MasterMenuAction::LeaveLobby)?;
                     } else {
                         let (map, mode) = selected_game(&dvars, &maps)?;
+                        map_fits_lobby(&map, true)?;
                         services.submit(net::MasterMenuAction::Host {
                             map,
                             mode: mode.token().into(),
@@ -311,6 +335,7 @@ pub(crate) fn route(
                     }
                     state.reopen_lobby = None;
                     let (map, mode) = selected_game(&dvars, &maps)?;
+                    map_fits_lobby(&map, state.public)?;
                     commands.insert_resource(host_rules(&dvars));
                     if state.public {
                         services.submit(net::MasterMenuAction::StartMatch {
@@ -365,8 +390,10 @@ pub(crate) fn route(
                     if !party.in_lobby || !party.is_host {
                         return Err("Only the lobby host can change game setup".into());
                     }
-                    let (mut map, mut mode) = selected_game(&dvars, &maps)?;
+                    let (mut map, mut mode) = current_setup(&dvars, &maps)?;
                     let selecting_map = command.name == "ui_select_map";
+                    // Said in the lobby once the choice is made: what was set aside for it.
+                    let mut notice = String::new();
                     if selecting_map {
                         let row = command
                             .args
@@ -378,12 +405,24 @@ pub(crate) fn route(
                             .get(state.map_page * PAGE_SIZE + row)
                             .ok_or("Map is unavailable")?
                             .clone();
+                        map_fits_lobby(&map, state.public)?;
+                        let fitted = mode_for_map(&map, mode);
+                        if fitted != mode {
+                            notice = format!(
+                                "{CAMPAIGN_MODES_NOTICE} Mode set to {}.",
+                                fitted.display_name()
+                            );
+                            mode = fitted;
+                        }
                     } else {
                         mode = command
                             .args
                             .first()
                             .and_then(|arg| sim::HostGameModeSelection::from_token(arg))
                             .ok_or("Unsupported game mode")?;
+                        if !mode_fits_map(&map, mode) {
+                            return Err(mode_refusal(mode));
+                        }
                     }
                     if state.public {
                         services.submit(net::MasterMenuAction::UpdateLobby {
@@ -393,6 +432,7 @@ pub(crate) fn route(
                     }
                     dvars.set("ui_mapname", map);
                     dvars.set("ui_gametype", mode.token());
+                    dvars.set("ui_frontend_status", notice);
                     menus.write(UiMenuRequest::Close(
                         if selecting_map {
                             "game_map_select"
@@ -482,6 +522,7 @@ pub(crate) fn route(
                             .parse()
                             .map_err(|_| "Invalid lobby ID")?;
                         let (map, mode) = selected_game(&dvars, &maps)?;
+                        map_fits_lobby(&map, true)?;
                         (advert_id, map, mode.token().into())
                     } else {
                         let id = if command.name == "ui_join_lobby_selected" {
@@ -528,6 +569,7 @@ pub(crate) fn route(
                                 )
                             });
                         }
+                        map_fits_lobby(&advert.map, true)?;
                         if advert.password_protected {
                             state.password_advert = Some(advert.clone());
                             dvars.set("ui_password_input", "");
@@ -729,6 +771,9 @@ pub(crate) fn route(
         .and_then(sim::HostGameModeSelection::from_token)
         .map_or("", |mode| mode.display_name());
     dvars.set("ui_mode_label", mode_label);
+    // The mode list leaves out the modes the selected map cannot start.
+    let campaign = asset_transport::is_campaign_key(dvars.get("ui_mapname").unwrap_or(""));
+    dvars.set("ui_map_campaign", if campaign { "1" } else { "0" });
     let pack = pack_maps(&maps, state.map_pack);
     let hovered_map = pack.get(state.map_page * PAGE_SIZE + state.map_hover);
     dvars.set(
@@ -955,9 +1000,9 @@ fn map_pages(maps: &ui::MenuMapList) -> Vec<(usize, usize, String)> {
                     index,
                     page,
                     if pages > 1 {
-                        format!("{} {}", pack.label, page + 1)
+                        format!("{} {}", pack.label.to_uppercase(), page + 1)
                     } else {
-                        pack.label.clone()
+                        pack.label.to_uppercase()
                     },
                 )
             })

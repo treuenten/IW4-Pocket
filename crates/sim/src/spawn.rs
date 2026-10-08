@@ -87,6 +87,8 @@ pub struct HostCheats(pub bool);
 pub struct HostGameModeSelection(GameModeKind);
 
 impl HostGameModeSelection {
+    pub const FREE_FOR_ALL: Self = Self(GameModeKind::FreeForAll);
+
     pub const ALL: [Self; 8] = [
         Self(GameModeKind::FreeForAll),
         Self(GameModeKind::Domination),
@@ -116,6 +118,11 @@ impl HostGameModeSelection {
 
     pub fn display_name(self) -> &'static str {
         self.0.display_name()
+    }
+
+    /// Whether a campaign map plays this mode: Free for All and Team Deathmatch, no other.
+    pub fn plays_campaign_map(self) -> bool {
+        self.0.plays_campaign_map()
     }
 }
 

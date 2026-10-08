@@ -112,6 +112,13 @@ impl GameModeKind {
         !matches!(self, Self::FreeForAll)
     }
 
+    /// Whether a campaign map can play this mode. Its entity string is given deathmatch and
+    /// team-deathmatch spawn points and none of the flags, bomb sites or zones the other modes set
+    /// up, so those abort the level for want of them.
+    pub fn plays_campaign_map(self) -> bool {
+        matches!(self, Self::FreeForAll | Self::TeamDeathmatch)
+    }
+
     pub fn team_start_classname(self, axis: bool) -> Option<&'static str> {
         match self {
             Self::FreeForAll
@@ -157,6 +164,24 @@ impl GameModeKind {
                     ]
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GameModeKind;
+
+    #[test]
+    fn a_campaign_map_plays_free_for_all_and_team_deathmatch_only() {
+        for tag in 0..8 {
+            let kind = GameModeKind::from_wire_tag(tag).expect("a game mode");
+            assert_eq!(
+                kind.plays_campaign_map(),
+                matches!(kind.token(), "dm" | "war"),
+                "{}",
+                kind.token()
+            );
         }
     }
 }

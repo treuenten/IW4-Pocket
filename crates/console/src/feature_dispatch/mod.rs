@@ -208,7 +208,10 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     if registry.resolve("map").is_none() {
         registry.register(
             crate::CommandSpec::new("map")
-                .usage("map <zone> — tear down the current occupancy, then load a zone")
+                .usage(
+                    "map <zone> — tear down the current occupancy, then load a zone \
+                     (sp:<mission> is a campaign zone, free roam: sp:favela is favela.ff, not mp_favela)",
+                )
                 .arg(crate::StaticCompleter::new(maps.iter().cloned())),
         );
     }

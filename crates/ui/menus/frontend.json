@@ -1675,6 +1675,7 @@
         "index": 17,
         "fields": {
           "disabled_exp": "0",
+          "vis_exp": "op 35 s:75695f6d61705f63616d706169676e op 1 op 12 0",
           "handlers": {
             "action": [
               {
@@ -1688,6 +1689,7 @@
         "index": 18,
         "fields": {
           "disabled_exp": "0",
+          "vis_exp": "op 35 s:75695f6d61705f63616d706169676e op 1 op 12 0",
           "handlers": {
             "action": [
               {
@@ -1701,6 +1703,7 @@
         "index": 19,
         "fields": {
           "disabled_exp": "0",
+          "vis_exp": "op 35 s:75695f6d61705f63616d706169676e op 1 op 12 0",
           "handlers": {
             "action": [
               {
@@ -1714,6 +1717,7 @@
         "index": 20,
         "fields": {
           "disabled_exp": "0",
+          "vis_exp": "op 35 s:75695f6d61705f63616d706169676e op 1 op 12 0",
           "handlers": {
             "action": [
               {
@@ -1727,6 +1731,7 @@
         "index": 21,
         "fields": {
           "disabled_exp": "0",
+          "vis_exp": "op 35 s:75695f6d61705f63616d706169676e op 1 op 12 0",
           "handlers": {
             "action": [
               {
@@ -1740,6 +1745,7 @@
         "index": 22,
         "fields": {
           "disabled_exp": "0",
+          "vis_exp": "op 35 s:75695f6d61705f63616d706169676e op 1 op 12 0",
           "handlers": {
             "action": [
               {

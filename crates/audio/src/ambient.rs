@@ -161,6 +161,7 @@ pub(crate) fn start_sound_bank_compose(
     let games = GamesRoot(identity.games_root.clone());
     let zone = accepted.zone.clone();
     let opened_zone = zone.clone();
+    let opened_ff = accepted.zone_ff.clone();
 
     let iwd = match resident.0.as_ref().filter(|resident| resident.zone == zone) {
         Some(resident) => {
@@ -171,8 +172,15 @@ pub(crate) fn start_sound_bank_compose(
             let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
             IwdOpen::Opening(pool.spawn(async move {
                 let mut trees = NamespaceTrees::discover(&games);
-                if let Ok(zone) = asset_transport::find_zone_file(&games, &opened_zone) {
-                    trees.adopt_zone(&zone.path);
+                // The file the load resolved, not the stem looked up again: the stem of a
+                // campaign zone can be the stem of a multiplayer map.
+                let path = opened_ff.or_else(|| {
+                    asset_transport::find_zone_file(&games, &opened_zone)
+                        .ok()
+                        .map(|zone| zone.path)
+                });
+                if let Some(path) = path {
+                    trees.adopt_zone(&path);
                 }
                 NamespaceSoundIwd::open(&trees)
             }))

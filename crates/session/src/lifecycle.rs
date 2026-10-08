@@ -236,6 +236,7 @@ pub fn run_teardown(
 
     if let Some(identity) = identity.as_mut() {
         identity.zone.clear();
+        identity.map_key.clear();
     }
 
     gaps.0 = vec![
@@ -274,6 +275,14 @@ fn stamp_loaded_zone(
     };
     if let Some(identity) = identity.as_mut() {
         identity.zone = fact.zone.clone();
+    }
+}
+
+/// The key the map was asked for by, kept to ask for it again: its zone is a stem, and the
+/// campaign's `favela` is not the `favela` that `map` resolves to.
+fn stamp_map_key(identity: &mut Option<ResMut<LaunchIdentity>>, requested: &str) {
+    if let Some(identity) = identity.as_mut() {
+        identity.map_key = requested.trim().to_ascii_lowercase();
     }
 }
 
@@ -369,6 +378,7 @@ fn occupy_after_teardown(
                     RuntimeRole::Listen
                 },
             );
+            stamp_map_key(identity, &zone);
             approved.write(MapLoadApproved {
                 request_id: pending.id,
                 load_key: load_key_for_swap(pending.id, bridge),
@@ -379,6 +389,7 @@ fn occupy_after_teardown(
         }
         SessionSwapTarget::Demo { zone, .. } => {
             stamp_runtime_role(role, identity, RuntimeRole::Replay);
+            stamp_map_key(identity, &zone);
             approved.write(MapLoadApproved {
                 request_id: pending.id,
                 load_key: load_key_for_swap(pending.id, bridge),
@@ -418,6 +429,7 @@ fn run_session_swap(
         stamp_runtime_role(&mut role, &mut identity, RuntimeRole::Listen);
         if let Some(identity) = identity.as_mut() {
             identity.zone.clear();
+            identity.map_key.clear();
         }
         let error = fact.error.chars().take(420).collect::<String>();
         let details = if fact.error.chars().count() > 420 {

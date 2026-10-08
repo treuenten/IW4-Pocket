@@ -90,9 +90,35 @@ none of its scripts. `MapFacts::campaign` carries the fact from the lane to the 
   are built on common_mp's, and the campaign's `viewmodel_m4` is another model.
 
 Not there yet: the film vision when the zone carries none (`roadkill` does; `trainer`'s lives in
-the campaign `common.ff`, which no walk opens), ambient effects and sound, the static models a zone does not carry
+the campaign `common.ff`, which no walk opens), ambient effects and sound, and the static models a zone does not carry
 (probably in `common.ff`: `trainer` leaves 1,421 of 6,772 slots unresolved, `roadkill` 59 of
-17,422), and a place in the map list (`discover::list_mp_map_packs` and the UI keep to `mp_*`).
+17,422).
+
+### Asking for one: `sp:<stem>`
+
+A campaign zone is `<stem>.ff` of the IW4 game, and four of the stems (`favela`, `invasion`,
+`estate`, `boneyard`) are stems of multiplayer maps too: a bare stem resolves to `mp_<stem>` first
+(`discover::find_zone_stem`), so `map favela` is the multiplayer map. The key `sp:<stem>`
+(`discover::parse_zone_key`) is the zone `<stem>.ff` and never `mp_<stem>`. Only the campaign's own
+stems are in the namespace (`asset_transport::campaign::CAMPAIGN_MAPS`, with the mission titles);
+`sp:common` is refused. The zone that comes of it is still named by its stem: `mapname`, the
+script module `maps/mp/<zone>` and the ambient lookups all see `favela`. `LaunchIdentity::map_key`
+keeps the key it was asked for by, which is what `map_restart` asks for again.
+
+`discover::list_map_packs` is the multiplayer packs followed by the pack "Campaign (free roam)",
+the installed campaign zones in mission order (`list_mp_map_packs` and `list_mp_maps` stay
+multiplayer: the approved scenarios and the console choose from those). The lobby lists them by
+mission (`ui::frontend::maps::map_label`), has no preview image for them (an empty material, no
+name for an image that is in no archive) and starts them in Free for All or Team Deathmatch only: the
+mode list shows those two, picking a campaign map in another mode sets Free for All and says so, and
+`ui_start_match` refuses the rest in words. `preflight_match_install` refuses them too for the
+`map` path, with no level abort. A campaign map is for a private match: `ui_lobby_privacy`,
+`ui_select_map` on a public lobby and the lobby joins refuse it, and
+`net::content_required_by_map("sp:…")` names no content for the master. Its loading screen is
+titled by the mission and keeps the solid colour (`loadscreen_<stem>` is in no archive).
+
+Not covered: a demo or clip recorded on a campaign map names the bare stem, so `favela`,
+`invasion`, `estate` and `boneyard` replay on the multiplayer map of that name.
 
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<prefix>/<key>`
 

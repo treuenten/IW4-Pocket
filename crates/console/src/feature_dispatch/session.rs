@@ -20,7 +20,7 @@ pub(crate) fn route_session_commands(
             "map_restart" => {
                 let zone = identity
                     .as_ref()
-                    .map(|identity| identity.zone.clone())
+                    .map(|identity| identity.reload_key().to_owned())
                     .filter(|zone| has_world.0 && !zone.is_empty());
                 match (cmd.args.is_empty(), zone) {
                     (false, _) => {

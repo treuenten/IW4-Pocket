@@ -895,6 +895,14 @@ fn preflight_match_install(
             return Err(InstallRefusal::with_gap(gap, gap));
         }
     };
+    // The lobby does not offer the other modes a campaign map, but `map` and a master offer reach
+    // here without it: refuse the setup in words rather than abort the level for want of flags.
+    if prepared_map.facts.campaign && !kind.plays_campaign_map() {
+        return Err(InstallRefusal::new(format!(
+            "`{zone}` is a campaign map and plays Free for All or Team Deathmatch, not {}",
+            kind.display_name()
+        )));
+    }
     let mut objective_weapons = Vec::new();
     if let Some(namespace @ (asset_core::AssetNamespace::T5 | asset_core::AssetNamespace::Iw5)) =
         prepared_map.namespace
