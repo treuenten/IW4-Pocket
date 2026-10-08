@@ -33,14 +33,6 @@ pub fn map_fits_lobby(map: &str, public: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// What the lobby says when `mode` is asked of a map that cannot play it.
-pub fn mode_refusal(mode: HostGameModeSelection) -> String {
-    format!(
-        "{CAMPAIGN_MODES_NOTICE} {} cannot start here.",
-        mode.display_name()
-    )
-}
-
 /// The map and mode the lobby holds, whether or not the map plays that mode.
 pub fn current_setup(
     dvars: &UiMenuDvars,
@@ -64,7 +56,7 @@ pub fn selected_game(
 ) -> Result<(String, HostGameModeSelection), String> {
     let (map, mode) = current_setup(dvars, maps)?;
     if !mode_fits_map(&map, mode) {
-        return Err(mode_refusal(mode));
+        return Err(CAMPAIGN_MODES_NOTICE.into());
     }
     Ok((map, mode))
 }
@@ -193,9 +185,10 @@ mod tests {
     #[test]
     fn a_setup_a_campaign_map_cannot_start_says_so() {
         let (dvars, maps) = lobby("sp:favela", "sd");
-        let error = selected_game(&dvars, &maps).unwrap_err();
-        assert!(error.contains(CAMPAIGN_MODES_NOTICE), "{error}");
-        assert!(error.contains("SEARCH AND DESTROY"), "{error}");
+        assert_eq!(
+            selected_game(&dvars, &maps),
+            Err(CAMPAIGN_MODES_NOTICE.to_owned())
+        );
     }
 
     #[test]

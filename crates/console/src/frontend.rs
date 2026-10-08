@@ -1,15 +1,17 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use frame::{UiMenuDvars, UiMenuRequest, UiPartyState};
-use ui::frontend::maps::{map_label, map_preview, pack_maps};
+use ui::frontend::maps::{fit_title, map_label, map_preview, pack_maps};
 use ui::frontend::rules::{
     CAMPAIGN_MODES_NOTICE, MATCH_CONFIG, current_setup, host_rules, map_fits_lobby, mode_fits_map,
-    mode_for_map, mode_refusal, seed_rules, selected_game,
+    mode_for_map, seed_rules, selected_game,
 };
 
 use crate::{CommandSpec, ConsoleCommand, ConsoleRegistry};
 
 const PAGE_SIZE: usize = 10;
+/// Letters the map preview's title holds in its pane before it runs out of it.
+const PREVIEW_TITLE_LETTERS: usize = 24;
 const PACK_SLOTS: usize = 16;
 /// Frames to wait for the main menu after a match before reopening the lobby.
 const REOPEN_LOBBY_FRAMES: u16 = 300;
@@ -421,7 +423,7 @@ pub(crate) fn route(
                             .and_then(|arg| sim::HostGameModeSelection::from_token(arg))
                             .ok_or("Unsupported game mode")?;
                         if !mode_fits_map(&map, mode) {
-                            return Err(mode_refusal(mode));
+                            return Err(CAMPAIGN_MODES_NOTICE.into());
                         }
                     }
                     if state.public {
@@ -778,7 +780,9 @@ pub(crate) fn route(
     let hovered_map = pack.get(state.map_page * PAGE_SIZE + state.map_hover);
     dvars.set(
         "ui_map_preview_title",
-        hovered_map.map_or_else(String::new, |map| label(map)),
+        hovered_map.map_or_else(String::new, |map| {
+            fit_title(&label(map), PREVIEW_TITLE_LETTERS)
+        }),
     );
     dvars.set(
         "ui_map_preview",
