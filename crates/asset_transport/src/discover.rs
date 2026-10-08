@@ -442,6 +442,8 @@ pub fn find_zone_file_version(
     })
 }
 
+/// `game:stem` taken apart. A key of any other prefix is all stem, `sp:` included: the campaign
+/// namespace is not a game, and [`parse_zone_key`] is the one that knows it.
 pub fn split_zone_key(zone: &str) -> (Option<crate::ZoneGame>, &str) {
     let Some((prefix, rest)) = zone.split_once(':') else {
         return (None, zone);
@@ -452,7 +454,37 @@ pub fn split_zone_key(zone: &str) -> (Option<crate::ZoneGame>, &str) {
     }
 }
 
+/// A map key, taken apart: `stem`, `game:stem`, or `sp:stem` for a campaign zone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZoneKey<'a> {
+    pub game: Option<crate::ZoneGame>,
+    pub stem: &'a str,
+    /// `sp:<stem>`: the single-player zone of that stem, and never `mp_<stem>`.
+    pub campaign: bool,
+}
+
+pub fn parse_zone_key(zone: &str) -> ZoneKey<'_> {
+    if let Some(stem) = crate::campaign::campaign_stem(zone) {
+        return ZoneKey {
+            game: Some(crate::ZoneGame::Iw4),
+            stem,
+            campaign: true,
+        };
+    }
+    let (game, stem) = split_zone_key(zone);
+    ZoneKey {
+        game,
+        stem,
+        campaign: false,
+    }
+}
+
+/// The name a loading screen shows for `key`: the mission of a campaign key, the `game:stem` of
+/// any other.
 pub fn map_load_title(key: &str, game: Option<crate::ZoneGame>) -> String {
+    if let Some(title) = crate::campaign::campaign_key_title(key) {
+        return title.to_owned();
+    }
     let (parsed, stem) = split_zone_key(key);
     match parsed.or(game) {
         Some(game) => format!("{}:{stem}", game.prefix()),
@@ -479,8 +511,35 @@ pub fn find_zone_file(root: &GamesRoot, zone: &str) -> Result<ZoneFile, String> 
     if zone.is_empty() {
         return Err("zone name is empty".into());
     }
-    let (game, stem) = split_zone_key(&zone);
-    find_zone_stem(root, game, stem)
+    let key = parse_zone_key(&zone);
+    if key.campaign {
+        return find_campaign_zone(root, key.stem);
+    }
+    find_zone_stem(root, key.game, key.stem)
+}
+
+/// `sp:<stem>`: exactly `<stem>.ff` of the IW4 game, with no `mp_<stem>` alias to prefer. Only
+/// the campaign's own stems are in the namespace, so a key cannot name `common.ff` or a map of
+/// another kind.
+fn find_campaign_zone(root: &GamesRoot, stem: &str) -> Result<ZoneFile, String> {
+    let Some(title) = crate::campaign::campaign_title(stem) else {
+        return Err(format!(
+            "`sp:{stem}` is not a campaign map; they are {}",
+            crate::campaign::CAMPAIGN_MAPS
+                .iter()
+                .map(|(stem, _)| *stem)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    let found = find_zone_file_version(root, stem, IW4_ZONE_VERSION)
+        .map_err(|error| format!("campaign map `sp:{stem}` ({title}): {error}"))?;
+    diag::info!(
+        Zone,
+        "campaign zone: `sp:{stem}` ({title}) -> {}",
+        found.path.display()
+    );
+    Ok(found)
 }
 
 pub fn zone_version(game: crate::ZoneGame) -> u32 {
@@ -715,7 +774,36 @@ pub fn list_mp_maps(root: &GamesRoot) -> Vec<String> {
     maps
 }
 
+/// The multiplayer maps installed, in packs by game and folder. The campaign zones are not here:
+/// [`list_map_packs`] lists them after these, and the callers that pick a map to play against
+/// (the approved scenarios, the `map` completions) keep to what is multiplayer.
 pub fn list_mp_map_packs(root: &GamesRoot) -> Vec<MapPack> {
+    mp_map_packs(&scan_map_zones(root))
+}
+
+/// What a private match can start: the multiplayer packs, then the campaign pack when campaign
+/// zones are installed ([`CAMPAIGN_PACK_LABEL`](crate::campaign::CAMPAIGN_PACK_LABEL)).
+pub fn list_map_packs(root: &GamesRoot) -> Vec<MapPack> {
+    let zones = scan_map_zones(root);
+    let mut packs = mp_map_packs(&zones);
+    packs.extend(campaign_map_pack(&zones));
+    packs
+}
+
+/// The `sp:<stem>` keys of the campaign zones installed, in mission order.
+pub fn list_campaign_maps(root: &GamesRoot) -> Vec<String> {
+    campaign_map_pack(&scan_map_zones(root)).map_or_else(Vec::new, |pack| pack.maps)
+}
+
+/// A zone file that is a map, or may be: `mp_*` for the multiplayer list, a campaign stem for the
+/// campaign's.
+struct ScannedZone {
+    game: &'static str,
+    stem: String,
+    folder: String,
+}
+
+fn scan_map_zones(root: &GamesRoot) -> Vec<ScannedZone> {
     let mut zones = Vec::new();
     for entry in game_files(&root.0) {
         let path = match entry {
@@ -732,20 +820,33 @@ pub fn list_mp_map_packs(root: &GamesRoot) -> Vec<MapPack> {
         let is_ff = path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("ff"));
-        if !(is_ff && stem.starts_with("mp_")) {
+        let is_map = stem.starts_with("mp_") || crate::campaign::campaign_title(&stem).is_some();
+        if !(is_ff && is_map) {
             continue;
         }
         if let Some(game) = zone_game_for_path(&path) {
-            zones.push((game.prefix(), stem, map_pack_folder(&path)));
+            zones.push(ScannedZone {
+                game: game.prefix(),
+                stem,
+                folder: map_pack_folder(&path),
+            });
         }
     }
+    zones
+}
+
+fn mp_map_packs(zones: &[ScannedZone]) -> Vec<MapPack> {
+    let zones: Vec<_> = zones
+        .iter()
+        .filter(|zone| zone.stem.starts_with("mp_"))
+        .collect();
     let loads: HashSet<(&str, &str)> = zones
         .iter()
-        .filter_map(|(game, stem, _)| stem.strip_suffix("_load").map(|map| (*game, map)))
+        .filter_map(|zone| zone.stem.strip_suffix("_load").map(|map| (zone.game, map)))
         .collect();
     let mut packs: BTreeMap<(&str, &str), Vec<String>> = BTreeMap::new();
     let mut seen = HashSet::new();
-    for (game, stem, folder) in &zones {
+    for ScannedZone { game, stem, folder } in zones {
         if stem.ends_with("_load")
             || !(loads.contains(&(*game, stem.as_str())) || !loads.iter().any(|(g, _)| g == game))
         {
@@ -766,6 +867,25 @@ pub fn list_mp_map_packs(root: &GamesRoot) -> Vec<MapPack> {
             }
         })
         .collect()
+}
+
+/// The campaign zones of the IW4 game among `zones`, as one pack in mission order. A stem of
+/// another game's FastFile (a version-1 `estate.ff` is not this game's) is not a campaign map.
+fn campaign_map_pack(zones: &[ScannedZone]) -> Option<MapPack> {
+    let installed: HashSet<&str> = zones
+        .iter()
+        .filter(|zone| zone.game == crate::ZoneGame::Iw4.prefix())
+        .map(|zone| zone.stem.as_str())
+        .collect();
+    let maps: Vec<String> = crate::campaign::CAMPAIGN_MAPS
+        .iter()
+        .filter(|(stem, _)| installed.contains(stem))
+        .map(|(stem, _)| crate::campaign::campaign_key(stem))
+        .collect();
+    (!maps.is_empty()).then(|| MapPack {
+        label: crate::campaign::CAMPAIGN_PACK_LABEL.to_owned(),
+        maps,
+    })
 }
 
 fn map_pack_folder(zone_ff: &Path) -> String {
@@ -878,4 +998,250 @@ fn language_archive(
         .ok_or("language prefix")?;
     let dir = chosen.parent().ok_or("language directory")?;
     Ok((dir.to_path_buf(), prefix.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A games tree under the temp dir, gone when the test ends.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(name: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("iw4l-discover-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("zone/english")).unwrap();
+            Self(root)
+        }
+
+        fn zone(&self, file: &str, version: u32) {
+            let mut header = b"IWffu100".to_vec();
+            header.extend_from_slice(&version.to_le_bytes());
+            std::fs::write(self.0.join("zone/english").join(file), header).unwrap();
+        }
+
+        fn root(&self) -> GamesRoot {
+            GamesRoot(self.0.clone())
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn zone(game: &'static str, stem: &str) -> ScannedZone {
+        ScannedZone {
+            game,
+            stem: stem.to_owned(),
+            folder: "BASE".to_owned(),
+        }
+    }
+
+    fn is_campaign(map: &str) -> bool {
+        crate::campaign::is_campaign_key(map)
+    }
+
+    #[test]
+    fn a_campaign_key_is_its_own_namespace_and_the_rest_keep_their_game() {
+        let key = parse_zone_key("sp:favela");
+        assert_eq!(
+            key,
+            ZoneKey {
+                game: Some(crate::ZoneGame::Iw4),
+                stem: "favela",
+                campaign: true
+            }
+        );
+        let key = parse_zone_key("iw4:mp_favela");
+        assert_eq!(
+            (key.game, key.stem, key.campaign),
+            (Some(crate::ZoneGame::Iw4), "mp_favela", false)
+        );
+        let key = parse_zone_key("favela");
+        assert_eq!((key.game, key.stem, key.campaign), (None, "favela", false));
+        let key = parse_zone_key("t6:mp_nuketown_2020");
+        assert_eq!(
+            (key.game, key.stem, key.campaign),
+            (Some(crate::ZoneGame::T6), "mp_nuketown_2020", false)
+        );
+        for odd in ["sp:", "sp", "spy:favela", "campaign:favela"] {
+            let key = parse_zone_key(odd);
+            assert_eq!(
+                (key.game, key.stem, key.campaign),
+                (None, odd, false),
+                "{odd}"
+            );
+        }
+        assert_eq!(split_zone_key("sp:favela"), (None, "sp:favela"));
+    }
+
+    #[test]
+    fn a_loading_screen_names_the_mission_of_a_campaign_key() {
+        assert_eq!(
+            map_load_title("sp:favela", Some(crate::ZoneGame::Iw4)),
+            "Takedown"
+        );
+        assert_eq!(map_load_title("sp:trainer", None), "S.S.D.D.");
+        assert_eq!(map_load_title("iw4:mp_terminal", None), "iw4:mp_terminal");
+        assert_eq!(
+            map_load_title("mp_terminal", Some(crate::ZoneGame::Iw4)),
+            "iw4:mp_terminal"
+        );
+        assert_eq!(map_load_title("mp_terminal", None), "mp_terminal");
+    }
+
+    #[test]
+    fn the_multiplayer_packs_are_what_they_were_and_hold_no_campaign_map() {
+        let zones = [
+            zone("iw4", "mp_terminal"),
+            zone("iw4", "mp_terminal_load"),
+            zone("iw4", "mp_favela"),
+            zone("iw4", "mp_favela_load"),
+            zone("iw4", "favela"),
+            zone("iw4", "trainer"),
+        ];
+        let packs = mp_map_packs(&zones);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].label, "IW4 BASE");
+        assert_eq!(packs[0].maps, ["iw4:mp_favela", "iw4:mp_terminal"]);
+    }
+
+    #[test]
+    fn the_campaign_pack_lists_the_installed_zones_in_mission_order() {
+        let zones = [
+            zone("iw4", "estate"),
+            zone("iw4", "mp_estate"),
+            zone("iw4", "favela"),
+            zone("iw4", "trainer"),
+            zone("iw4", "roadkill"),
+            zone("iw4", "af_chase"),
+        ];
+        let pack = campaign_map_pack(&zones).expect("campaign zones are installed");
+        assert_eq!(pack.label, "Campaign (free roam)");
+        assert_eq!(
+            pack.maps,
+            [
+                "sp:trainer",
+                "sp:roadkill",
+                "sp:favela",
+                "sp:estate",
+                "sp:af_chase"
+            ]
+        );
+    }
+
+    #[test]
+    fn no_campaign_zone_installed_is_no_campaign_pack() {
+        assert_eq!(campaign_map_pack(&[]), None);
+        let zones = [zone("iw4", "mp_terminal"), zone("iw4", "mp_terminal_load")];
+        assert_eq!(campaign_map_pack(&zones), None);
+    }
+
+    #[test]
+    fn another_games_zone_of_a_campaign_stem_is_not_a_campaign_map() {
+        let zones = [zone("iw5", "estate"), zone("t5", "trainer")];
+        assert_eq!(campaign_map_pack(&zones), None);
+    }
+
+    #[test]
+    fn a_tree_lists_its_campaign_zones_after_its_maps_and_no_other_zone() {
+        let tree = Tree::new("list");
+        tree.zone("mp_favela.ff", IW4_ZONE_VERSION);
+        tree.zone("mp_favela_load.ff", IW4_ZONE_VERSION);
+        tree.zone("favela.ff", IW4_ZONE_VERSION);
+        tree.zone("trainer.ff", IW4_ZONE_VERSION);
+        tree.zone("common.ff", IW4_ZONE_VERSION);
+        tree.zone("so_killspree_trainer.ff", IW4_ZONE_VERSION);
+        tree.zone("estate.ff", IW5_ZONE_VERSION);
+        std::fs::write(tree.0.join("zone/english/roadkill.ff.part"), b"IWff").unwrap();
+        let root = tree.root();
+
+        let campaign = list_campaign_maps(&root);
+        assert_eq!(campaign, ["sp:trainer", "sp:favela"]);
+        let packs = list_map_packs(&root);
+        let last = packs.last().expect("a pack");
+        assert_eq!(last.label, "Campaign (free roam)");
+        assert_eq!(last.maps, campaign);
+        assert!(
+            packs[..packs.len() - 1]
+                .iter()
+                .all(|pack| pack.maps.iter().all(|map| !is_campaign(map)))
+        );
+        assert!(
+            list_mp_map_packs(&root)
+                .iter()
+                .flat_map(|pack| &pack.maps)
+                .all(|map| !is_campaign(map))
+        );
+        assert!(list_mp_maps(&root).iter().any(|map| map == "iw4:mp_favela"));
+        assert!(list_mp_maps(&root).iter().all(|map| !is_campaign(map)));
+    }
+
+    #[test]
+    fn a_tree_with_no_campaign_zone_has_no_campaign_pack() {
+        let tree = Tree::new("mponly");
+        tree.zone("mp_terminal.ff", IW4_ZONE_VERSION);
+        tree.zone("mp_terminal_load.ff", IW4_ZONE_VERSION);
+        let packs = list_map_packs(&tree.root());
+        assert!(
+            packs
+                .iter()
+                .all(|pack| pack.label != "Campaign (free roam)")
+        );
+        assert!(list_campaign_maps(&tree.root()).is_empty());
+    }
+
+    #[test]
+    fn a_campaign_key_finds_the_campaign_zone_and_a_bare_stem_still_prefers_the_map() {
+        let tree = Tree::new("find");
+        tree.zone("mp_favela.ff", IW4_ZONE_VERSION);
+        tree.zone("favela.ff", IW4_ZONE_VERSION);
+        tree.zone("trainer.ff", IW4_ZONE_VERSION);
+        let root = tree.root();
+        let file_of = |key: &str| {
+            find_zone_file(&root, key).map(|found| {
+                (
+                    found
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned)
+                        .expect("a file name"),
+                    found.zone_name,
+                )
+            })
+        };
+        let found = |file: &str, zone: &str| Ok((file.to_owned(), zone.to_owned()));
+
+        assert_eq!(file_of("sp:favela"), found("favela.ff", "favela"));
+        assert_eq!(file_of(" SP:Favela "), found("favela.ff", "favela"));
+        assert_eq!(file_of("favela"), found("mp_favela.ff", "mp_favela"));
+        assert_eq!(file_of("iw4:favela"), found("mp_favela.ff", "mp_favela"));
+        assert_eq!(file_of("sp:trainer"), found("trainer.ff", "trainer"));
+        assert_eq!(file_of("trainer"), found("trainer.ff", "trainer"));
+    }
+
+    #[test]
+    fn a_campaign_key_refuses_what_is_not_a_campaign_zone_here() {
+        let tree = Tree::new("refuse");
+        tree.zone("common.ff", IW4_ZONE_VERSION);
+        tree.zone("mp_terminal.ff", IW4_ZONE_VERSION);
+        tree.zone("estate.ff", IW5_ZONE_VERSION);
+        let root = tree.root();
+        for key in ["sp:common", "sp:mp_terminal", "sp:nothing"] {
+            let error = find_zone_file(&root, key).unwrap_err();
+            assert!(error.contains("not a campaign map"), "{key}: {error}");
+        }
+        let error = find_zone_file(&root, "sp:oilrig").unwrap_err();
+        assert!(
+            error.contains("`sp:oilrig`") && error.contains("not found"),
+            "{error}"
+        );
+        let error = find_zone_file(&root, "sp:estate").unwrap_err();
+        assert!(error.contains("`sp:estate`"), "{error}");
+    }
 }

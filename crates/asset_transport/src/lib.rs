@@ -1,4 +1,5 @@
 pub mod artifact_cache;
+pub mod campaign;
 pub mod discover;
 pub mod ipak;
 pub mod iwd;
@@ -14,13 +15,18 @@ pub use artifact_cache::{
     fnv1a64_more,
 };
 pub use asset_core::ZoneGame;
+pub use campaign::{
+    CAMPAIGN_MAPS, CAMPAIGN_NAMESPACE, CAMPAIGN_PACK_LABEL, campaign_key, campaign_key_title,
+    campaign_stem, campaign_title, is_campaign_key,
+};
 pub use discover::{
-    GamesRoot, MapPack, ZoneFile, ensure_artifacts_dir, find_common_mp_for_envelope,
+    GamesRoot, MapPack, ZoneFile, ZoneKey, ensure_artifacts_dir, find_common_mp_for_envelope,
     find_common_mp_for_zone, find_game_install, find_localized_common_mp_for_zone,
     find_runtime_common_mp, find_runtime_zone, find_zone_file, find_zone_file_version,
     find_zone_for_tree, folder_holds_game, game_install_root, game_root_for_zone,
-    games_content_report, games_root_from_env, games_root_report, group_mp_maps, list_mp_map_packs,
-    list_mp_maps, load_dotenv, map_load_title, peek_zone_version, search_roots, set_game_folders,
+    games_content_report, games_root_from_env, games_root_report, group_mp_maps,
+    list_campaign_maps, list_map_packs, list_mp_map_packs, list_mp_maps, load_dotenv,
+    map_load_title, parse_zone_key, peek_zone_version, search_roots, set_game_folders,
     split_zone_key, zone_game_for_path, zone_version,
 };
 pub use ipak::{IPak, ipak_name_hash};
