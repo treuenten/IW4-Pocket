@@ -46,6 +46,8 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
         .add_plugins(ReplayPlugin)
         .add_plugins(RenderPlugin)
         .add_plugins(SessionPlugin);
+    // iOS present pacing, dt snap and frame timing stats; nothing elsewhere.
+    crate::frame_pace::register(app);
     // Render setup can finish after Startup, so watch for the resource.
     app.add_systems(
         First,

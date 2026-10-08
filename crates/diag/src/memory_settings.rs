@@ -189,6 +189,11 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_TOUCH_LOOK" => value.parse::<f32>().is_ok_and(|scale| scale > 0.0 && scale <= 20.0),
         // Metal keeps at most three drawables, so latency above 2 does nothing.
         "IW4L_FRAME_LATENCY" => matches!(value, "1" | "2"),
+        // Frame pacing (see frame_pacing.rs): presents per second the present is
+        // held to (off by default); snap the time step to the vsync grid (acts only
+        // with a pace); log the on-screen frame timing every 128 presents.
+        "IW4L_FRAME_PACE" => matches!(value, "off" | "0" | "30" | "40" | "60"),
+        "IW4L_DT_SNAP" | "IW4L_FRAME_STATS" => matches!(value, "0" | "1"),
         // Personal build only: console lines run when the first match starts
         // (e.g. `bot add 5`). Not for upstream, which excludes engine controls.
         "IW4L_CMDS" => !value.contains('\0'),
@@ -300,5 +305,12 @@ mod tests {
         assert!(!valid_file_setting("IW4L_TOUCH_LOOK", "0"));
         assert!(!valid_file_setting("IW4L_TOUCH_LOOK", "NaN"));
         assert!(!valid_file_setting("IW4L_TOUCH_LOOK", "inf"));
+        for v in ["off", "0", "30", "40", "60"] { assert!(valid_file_setting("IW4L_FRAME_PACE", v), "{v}"); }
+        for v in ["on", "1", "45", "120", "", " 30", "30\0"] { assert!(!valid_file_setting("IW4L_FRAME_PACE", v), "{v:?}"); }
+        for name in ["IW4L_DT_SNAP", "IW4L_FRAME_STATS"] {
+            assert!(valid_file_setting(name, "0"));
+            assert!(valid_file_setting(name, "1"));
+            for v in ["on", "off", "45", "", "1\0"] { assert!(!valid_file_setting(name, v), "{name}={v:?}"); }
+        }
     }
 }
