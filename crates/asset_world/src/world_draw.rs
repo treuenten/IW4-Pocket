@@ -228,11 +228,59 @@ impl DpvsWorldData {
             cleared += reject_negative_half(table, nodes.iter().map(|node| node.bounds))?;
         }
         cleared += reject_negative_half(BoundsTable::Surface, self.surface_bounds.iter().copied())?;
-        cleared +=
-            reject_negative_half(BoundsTable::SmodelInst, self.smodel_bounds.iter().copied())?;
+        cleared += mend_inverted_models(&mut self.smodel_bounds)?;
         self.cleared_boxes = cleared;
         Ok(self)
     }
+}
+
+/// A few static models carry a box with its corners the wrong way round on an axis (the
+/// single-player `estate` has some among its tens of thousands: a mirrored prop whose box was
+/// carried over without sorting). The model is still where it was placed, so the box is put right
+/// and kept, and the count of cleared boxes is the one `reject_negative_half` would have given. A
+/// table where more than one box in a hundred is inverted is a box read in the wrong
+/// representation, and stays an error.
+fn mend_inverted_models(boxes: &mut [Bounds]) -> Result<usize, WorldMeshError> {
+    let inverted: Vec<usize> = boxes
+        .iter()
+        .enumerate()
+        .filter(|(_, bounds)| !bounds.is_cleared() && bounds.negative_half_axis().is_some())
+        .map(|(index, _)| index)
+        .collect();
+    if inverted.len() * 100 > boxes.len() {
+        let index = inverted[0];
+        let axis = boxes[index].negative_half_axis().unwrap_or(0);
+        return Err(WorldMeshError::NegativeBoundsHalf {
+            table: BoundsTable::SmodelInst,
+            index,
+            axis,
+            half: boxes[index].half()[axis],
+        });
+    }
+    for &index in &inverted {
+        let (mins, maxs) = (boxes[index].mins(), boxes[index].maxs());
+        boxes[index] = Bounds::from_mins_maxs(
+            [
+                mins[0].min(maxs[0]),
+                mins[1].min(maxs[1]),
+                mins[2].min(maxs[2]),
+            ],
+            [
+                mins[0].max(maxs[0]),
+                mins[1].max(maxs[1]),
+                mins[2].max(maxs[2]),
+            ],
+        );
+    }
+    if !inverted.is_empty() {
+        diag::info!(
+            World,
+            "world: {} of {} static model boxes were inverted on an axis and are put right",
+            inverted.len(),
+            boxes.len()
+        );
+    }
+    reject_negative_half(BoundsTable::SmodelInst, boxes.iter().copied())
 }
 
 fn reject_negative_half(
@@ -2007,6 +2055,71 @@ fn extract_dpvs(s: &ZoneStream<'_>, g: GfxWorldGeometry) -> Result<DpvsWorldData
     out.checked()
 }
 
+#[cfg(test)]
+mod inverted_model_tests {
+    use super::*;
+
+    fn unit_box() -> Bounds {
+        Bounds::from_mins_maxs([0.0, 0.0, 0.0], [10.0, 10.0, 10.0])
+    }
+
+    /// `total` unit boxes, the first `inverted` of them with x corners swapped.
+    fn table(inverted: usize, total: usize) -> Vec<Bounds> {
+        (0..total)
+            .map(|index| {
+                if index < inverted {
+                    Bounds::from_mins_maxs([100.0, 0.0, 0.0], [26.0, 10.0, 10.0])
+                } else {
+                    unit_box()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_few_inverted_boxes_are_put_right_and_kept() {
+        let mut boxes = table(2, 400);
+        assert_eq!(mend_inverted_models(&mut boxes).unwrap(), 0);
+        assert!(
+            boxes
+                .iter()
+                .all(|bounds| bounds.negative_half_axis().is_none())
+        );
+        assert_eq!(boxes[0].mins(), [26.0, 0.0, 0.0]);
+        assert_eq!(boxes[0].maxs(), [100.0, 10.0, 10.0]);
+        assert_eq!(boxes[2], unit_box());
+    }
+
+    #[test]
+    fn a_table_of_inverted_boxes_is_a_box_read_the_wrong_way() {
+        let mut boxes = table(5, 400);
+        assert!(matches!(
+            mend_inverted_models(&mut boxes),
+            Err(WorldMeshError::NegativeBoundsHalf {
+                table: BoundsTable::SmodelInst,
+                index: 0,
+                axis: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_cleared_box_is_counted_and_not_mended() {
+        let mut boxes = table(0, 100);
+        boxes[3] = Bounds::CLEARED;
+        assert_eq!(mend_inverted_models(&mut boxes).unwrap(), 1);
+        assert!(boxes[3].is_cleared());
+    }
+
+    #[test]
+    fn a_table_of_sound_boxes_is_left_alone() {
+        let mut boxes = table(0, 10);
+        assert_eq!(mend_inverted_models(&mut boxes).unwrap(), 0);
+        assert_eq!(boxes, table(0, 10));
+        assert_eq!(mend_inverted_models(&mut []).unwrap(), 0);
+    }
+}
 
 /// Lightmap pages are uploaded once and never read back on the CPU. On iOS the GPU shares
 /// the app's memory budget, so keeping a second copy in the main world (and a page is six

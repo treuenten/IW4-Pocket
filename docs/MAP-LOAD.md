@@ -117,8 +117,14 @@ mode list shows those two, picking a campaign map in another mode sets Free for 
 `net::content_required_by_map("sp:…")` names no content for the master. Its loading screen is
 titled by the mission and keeps the solid colour (`loadscreen_<stem>` is in no archive).
 
+The campaign's `estate` carries a few static models whose box has its corners swapped on an axis (a
+mirrored prop). `world_draw::mend_inverted_models` sorts them and keeps the model; more than one
+box in a hundred inverted is still a box read in the wrong representation, and an error.
+
 Not covered: a demo or clip recorded on a campaign map names the bare stem, so `favela`,
-`invasion`, `estate` and `boneyard` replay on the multiplayer map of that name.
+`invasion`, `estate` and `boneyard` replay on the multiplayer map of that name. A first load of the
+larger zones spends one to three minutes in the bot navigation bake (`airport`, `invasion` and
+`gulag` on an M3); the result is cached.
 
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<prefix>/<key>`
 
