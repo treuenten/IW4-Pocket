@@ -196,6 +196,8 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_DT_SNAP" | "IW4L_FRAME_STATS" => matches!(value, "0" | "1"),
         // 0 keeps the display at 60 Hz instead of asking for 120 Hz in matches.
         "IW4L_PROMOTION" => matches!(value, "0" | "1"),
+        // Render on its own thread, one frame behind the main loop (off by default).
+        "IW4L_PIPELINED_RENDERING" => matches!(value, "0" | "1"),
         // Personal build only: console lines run when the first match starts
         // (e.g. `bot add 5`). Not for upstream, which excludes engine controls.
         "IW4L_CMDS" => !value.contains('\0'),
