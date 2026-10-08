@@ -1,28 +1,30 @@
 //! iOS input bridge: Apple's GameController framework -> bevy gamepad messages, and
-//! single-finger touch -> left mouse button (so the menus are tappable).
+//! touch -> the on-screen controls in play, or the left mouse button elsewhere
+//! (so the menus are tappable; see `touch_controls`).
 //! gilrs has no iOS backend, so without this no controller is ever seen.
 
-use bevy::input::ButtonState;
 use bevy::input::InputSystems;
 use bevy::input::gamepad::{
     GamepadAxis, GamepadButton, GamepadConnection, GamepadConnectionEvent, RawGamepadAxisChangedEvent,
     RawGamepadButtonChangedEvent, RawGamepadEvent,
 };
-use bevy::input::mouse::{MouseButton, MouseButtonInput};
-use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use objc2::rc::Retained;
 use objc2_game_controller::GCController;
+
+use crate::touch_controls::{PhysicalPads, TouchControls, draw_touch_controls, route_touches};
 
 pub struct IosInputPlugin;
 
 impl Plugin for IosInputPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            PreUpdate,
-            (poll_controllers, touch_as_mouse).before(InputSystems),
-        );
+        app.init_resource::<PhysicalPads>()
+            .init_resource::<TouchControls>()
+            .add_systems(
+                PreUpdate,
+                (poll_controllers, route_touches).chain().before(InputSystems),
+            )
+            .add_systems(Update, draw_touch_controls);
     }
 }
 
@@ -107,6 +109,7 @@ fn poll_controllers(
     mut connections: MessageWriter<GamepadConnectionEvent>,
     mut button_events: MessageWriter<RawGamepadButtonChangedEvent>,
     mut axis_events: MessageWriter<RawGamepadAxisChangedEvent>,
+    mut physical: ResMut<PhysicalPads>,
 ) {
     // SAFETY: class method returning the current controller list.
     let list = unsafe { GCController::controllers() };
@@ -161,6 +164,10 @@ fn poll_controllers(
         });
     }
 
+    if physical.0 != pads.len() {
+        physical.0 = pads.len();
+    }
+
     // Values: the first frame after connecting only lets the entity materialise.
     for pad in pads.iter_mut() {
         if !pad.announced {
@@ -188,45 +195,6 @@ fn poll_controllers(
                 raw.write(event.into());
                 axis_events.write(event);
             }
-        }
-    }
-}
-
-fn touch_as_mouse(
-    mut touches: MessageReader<TouchInput>,
-    mut windows: Query<(Entity, &mut Window), With<PrimaryWindow>>,
-    mut buttons: MessageWriter<MouseButtonInput>,
-    mut active: Local<Option<u64>>,
-) {
-    let Ok((entity, mut window)) = windows.single_mut() else {
-        return;
-    };
-    for touch in touches.read() {
-        match touch.phase {
-            TouchPhase::Started => {
-                if active.is_none() {
-                    *active = Some(touch.id);
-                    window.set_cursor_position(Some(touch.position));
-                    buttons.write(MouseButtonInput {
-                        button: MouseButton::Left,
-                        state: ButtonState::Pressed,
-                        window: entity,
-                    });
-                }
-            }
-            TouchPhase::Moved if *active == Some(touch.id) => {
-                window.set_cursor_position(Some(touch.position));
-            }
-            TouchPhase::Ended | TouchPhase::Canceled if *active == Some(touch.id) => {
-                window.set_cursor_position(Some(touch.position));
-                buttons.write(MouseButtonInput {
-                    button: MouseButton::Left,
-                    state: ButtonState::Released,
-                    window: entity,
-                });
-                *active = None;
-            }
-            _ => {}
         }
     }
 }

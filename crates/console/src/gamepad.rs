@@ -19,10 +19,10 @@ fn radial(stick: Vec2, deadzone: f32) -> Vec2 {
     stick / length * scaled
 }
 
-pub(crate) fn sticks(pad: &Gamepad, settings: &frame::GameSettings) -> Sticks {
+pub(crate) fn sticks(pad: &Gamepad, settings: &frame::GameSettings, layout: u8) -> Sticks {
     let left = radial(pad.left_stick(), settings.pad_deadzone_left);
     let right = radial(pad.right_stick(), settings.pad_deadzone_right);
-    match settings.pad_stick_layout {
+    match layout {
         1 => Sticks {
             movement: Vec2::new(right.y, right.x),
             look: left,

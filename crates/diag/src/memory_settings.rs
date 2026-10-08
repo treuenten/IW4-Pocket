@@ -175,6 +175,10 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_IMAGE_DECODE_BUDGET_MIB" | "IW4L_CACHE_BUDGET_MIB" =>
             value.parse::<u64>().is_ok_and(|n| n <= 4096),
         "IW4L_SOUND" => matches!(value, "off" | "0" | "on" | "1"),
+        // On-screen touch controls: shown while no controller is connected,
+        // always, or never; and how far a swipe turns the view.
+        "IW4L_TOUCH_CONTROLS" => matches!(value, "auto" | "on" | "1" | "off" | "0"),
+        "IW4L_TOUCH_LOOK" => value.parse::<f32>().is_ok_and(|scale| scale > 0.0 && scale <= 20.0),
         // Metal keeps at most three drawables, so latency above 2 does nothing.
         "IW4L_FRAME_LATENCY" => matches!(value, "1" | "2"),
         // Personal build only: console lines run when the first match starts
@@ -258,5 +262,12 @@ mod tests {
         assert!(!valid_file_setting("IW4L_UNKNOWN", "1"));
         assert!(!valid_file_setting(FPV_CACHE_ENV, "1\0"));
         assert!(!valid_file_setting("IW4L_\0", "1"));
+        assert!(valid_file_setting("IW4L_TOUCH_CONTROLS", "auto"));
+        assert!(valid_file_setting("IW4L_TOUCH_CONTROLS", "off"));
+        assert!(!valid_file_setting("IW4L_TOUCH_CONTROLS", "yes"));
+        assert!(valid_file_setting("IW4L_TOUCH_LOOK", "3.5"));
+        assert!(!valid_file_setting("IW4L_TOUCH_LOOK", "0"));
+        assert!(!valid_file_setting("IW4L_TOUCH_LOOK", "NaN"));
+        assert!(!valid_file_setting("IW4L_TOUCH_LOOK", "inf"));
     }
 }

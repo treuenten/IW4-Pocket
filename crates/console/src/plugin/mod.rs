@@ -452,7 +452,13 @@ fn publish_client_action_input(
         out.pad_ads_sensitivity = settings.pad_ads_sensitivity;
         out.pad_acceleration = settings.pad_acceleration;
         if let Some(pad) = pad {
-            let sticks = crate::gamepad::sticks(pad, &settings);
+            // The on-screen stick only ever moves; it looks by swipe instead.
+            let layout = if active.0.is_some() && active.0 == devices.touch_pad {
+                0
+            } else {
+                settings.pad_stick_layout
+            };
+            let sticks = crate::gamepad::sticks(pad, &settings, layout);
             physical.movement_ready |= sticks.movement == Vec2::ZERO;
             physical.look_ready |= sticks.look == Vec2::ZERO;
             if physical.movement_ready {
@@ -507,7 +513,7 @@ fn publish_client_action_input(
             out.pad_deflection = 0.0;
             out.pad_turn_rate = [0.0; 2];
             physical.mouse_activity += out.mouse_x.abs() + out.mouse_y.abs();
-            if physical.mouse_activity >= 2.0 {
+            if physical.mouse_activity >= 2.0 && !devices.touch_controls {
                 devices.pad_prompts = false;
                 physical.mouse_activity = 0.0;
             }
