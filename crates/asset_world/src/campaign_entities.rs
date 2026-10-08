@@ -34,6 +34,12 @@ const SINGLE_PLAYER_ONLY: &[&str] = &["actor_", "script_vehicle", "info_vehicle_
 /// where they stand, still.
 const ANIMATED_MODEL: &str = "animated_model";
 
+/// `_ac130` and `_uav` centre their rigs between the first two `minimap_corner` origins. A
+/// campaign map can ship fewer (ending has one); it gets two around its walkable ground.
+const MINIMAP_CORNER: &str = "minimap_corner";
+/// The multiplayer maps put their corners at this height.
+const MINIMAP_CORNER_HEIGHT: f32 = 128.0;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Site {
     origin: [f32; 3],
@@ -106,6 +112,17 @@ fn spawn_block(classname: &str, site: Site) -> Block {
     ]
 }
 
+/// The x/y box around the given sites.
+fn extent<'a>(sites: impl Iterator<Item = &'a Site>) -> Option<([f32; 2], [f32; 2])> {
+    sites.fold(None, |acc, site| {
+        let [x, y, _] = site.origin;
+        Some(match acc {
+            None => ([x, y], [x, y]),
+            Some((lo, hi)) => ([lo[0].min(x), lo[1].min(y)], [hi[0].max(x), hi[1].max(y)]),
+        })
+    })
+}
+
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt()
 }
@@ -155,7 +172,8 @@ fn spawn_sites(starts: &[Site], nodes: &[Site]) -> Vec<Site> {
 /// The campaign's entity string as the multiplayer gametypes need it. In place: the start becomes
 /// an `mp_dm_spawn`, AI, vehicle and animated-model entities are set aside. At the end: more
 /// `mp_dm_spawn` and the `mp_tdm_spawn*` points around the start, an `mp_global_intermission`
-/// camera over it and the `care_package` that `_airdrop` looks for.
+/// camera over it, two `minimap_corner` origins when the map has fewer, and the `care_package`
+/// that `_airdrop` looks for.
 pub fn sp_entities_for_iw4_rules(text: &str) -> String {
     let mut blocks = read_blocks(text);
     let mut starts = Vec::new();
@@ -168,6 +186,10 @@ pub fn sp_entities_for_iw4_rules(text: &str) -> String {
         }
     }
     let sites = spawn_sites(&starts, &nodes);
+    let corners = blocks
+        .iter()
+        .filter(|block| get(block, "targetname") == Some(MINIMAP_CORNER) && site(block).is_some())
+        .count();
 
     for block in &mut blocks {
         let Some(classname) = get(block, "classname").map(str::to_owned) else {
@@ -183,6 +205,9 @@ pub fn sp_entities_for_iw4_rules(text: &str) -> String {
         }
         if get(block, "targetname") == Some(ANIMATED_MODEL) {
             set(block, "targetname", format!("sp_{ANIMATED_MODEL}"));
+        }
+        if corners < 2 && get(block, "targetname") == Some(MINIMAP_CORNER) {
+            set(block, "targetname", format!("sp_{MINIMAP_CORNER}"));
         }
     }
 
@@ -205,6 +230,20 @@ pub fn sp_entities_for_iw4_rules(text: &str) -> String {
         let mut view = *first;
         view.origin[2] += INTERMISSION_RAISE;
         added.push(spawn_block("mp_global_intermission", view));
+    }
+    if corners < 2
+        && let Some((lo, hi)) = extent(nodes.iter().chain(&sites))
+    {
+        for corner in [lo, hi] {
+            added.push(vec![
+                ("classname".into(), "script_origin".into()),
+                ("targetname".into(), MINIMAP_CORNER.into()),
+                (
+                    "origin".into(),
+                    vector([corner[0], corner[1], MINIMAP_CORNER_HEIGHT]),
+                ),
+            ]);
+        }
     }
     if !blocks
         .iter()
@@ -385,6 +424,47 @@ mod tests {
         assert_eq!(count(&out, "script_brushmodel"), 1);
         let again = sp_entities_for_iw4_rules(&out);
         assert_eq!(count(&again, "script_brushmodel"), 1);
+    }
+
+    fn corner_origins(text: &str) -> Vec<[f32; 3]> {
+        read_blocks(text)
+            .iter()
+            .filter(|block| get(block, "targetname") == Some(MINIMAP_CORNER))
+            .filter_map(|block| site(block).map(|s| s.origin))
+            .collect()
+    }
+
+    #[test]
+    fn a_map_short_of_minimap_corners_gets_two_around_its_ground() {
+        let mut text = campaign(&[(-512.0, 256.0), (1024.0, -768.0)]);
+        text.push_str(&entity(&[
+            ("classname", "script_origin"),
+            ("targetname", "minimap_corner"),
+            ("origin", "34560 37632 128"),
+        ]));
+        let out = sp_entities_for_iw4_rules(&text);
+        assert_eq!(
+            corner_origins(&out),
+            vec![[-512.0, -768.0, 128.0], [1024.0, 256.0, 128.0]]
+        );
+        assert_eq!(corner_origins(&sp_entities_for_iw4_rules(&out)).len(), 2);
+    }
+
+    #[test]
+    fn a_map_with_its_minimap_corners_keeps_them() {
+        let mut text = campaign(&[(-512.0, 256.0)]);
+        for origin in ["16640 6400 128", "-2816 -13056 128"] {
+            text.push_str(&entity(&[
+                ("classname", "script_origin"),
+                ("targetname", "minimap_corner"),
+                ("origin", origin),
+            ]));
+        }
+        let out = sp_entities_for_iw4_rules(&text);
+        assert_eq!(
+            corner_origins(&out),
+            vec![[16640.0, 6400.0, 128.0], [-2816.0, -13056.0, 128.0]]
+        );
     }
 
     #[test]

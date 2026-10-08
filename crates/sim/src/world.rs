@@ -997,9 +997,54 @@ impl SimState {
         let world_bounds =
             clipmap_iw4::AreaBounds::from_mins_maxs(world_model.mins, world_model.maxs)
                 .unwrap_or_else(|_| {
-                    panic!("area query: world cmodel Bounds are invalid");
+                    let fallback = self.fallback_world_bounds();
+                    diag::warn!(
+                        Sim,
+                        "area query: world cmodel bounds {:?}..{:?} are invalid; entities link in {:?}..{:?}",
+                        world_model.mins,
+                        world_model.maxs,
+                        fallback.mins(),
+                        fallback.maxs()
+                    );
+                    fallback
                 });
         self.area_entity_world = Some(clipmap_iw4::AreaEntityWorld::new(world_bounds));
+    }
+
+    /// Some campaign zones (arcadia, ending) carry a world cmodel whose
+    /// bounds are not a box. The sector tree only needs a box to split, so
+    /// it takes the union of the collision mesh, the other cmodels and the
+    /// static models, or a box as large as a map can be.
+    fn fallback_world_bounds(&self) -> clipmap_iw4::AreaBounds {
+        const MAP_EXTENT: f32 = 65536.0;
+        let mut mins = [f32::INFINITY; 3];
+        let mut maxs = [f32::NEG_INFINITY; 3];
+        let mut grow = |lo: [f32; 3], hi: [f32; 3]| {
+            if (0..3).all(|axis| lo[axis].is_finite() && hi[axis].is_finite() && lo[axis] <= hi[axis])
+            {
+                for axis in 0..3 {
+                    mins[axis] = mins[axis].min(lo[axis]);
+                    maxs[axis] = maxs[axis].max(hi[axis]);
+                }
+            }
+        };
+        for &vert in &self.content.clip_mesh().tables.verts {
+            grow(vert, vert);
+        }
+        for model in self.content.clip_cmodels().models.iter().skip(1) {
+            grow(model.mins, model.maxs);
+        }
+        for sm in &self.content.clip_mesh().static_models {
+            let (mid, half) = (sm.model.bounds_mid, sm.model.bounds_half);
+            grow(
+                [mid[0] - half[0], mid[1] - half[1], mid[2] - half[2]],
+                [mid[0] + half[0], mid[1] + half[1], mid[2] + half[2]],
+            );
+        }
+        clipmap_iw4::AreaBounds::from_mins_maxs(mins, maxs).unwrap_or_else(|_| {
+            clipmap_iw4::AreaBounds::from_mins_maxs([-MAP_EXTENT; 3], [MAP_EXTENT; 3])
+                .expect("a fixed box is valid")
+        })
     }
 
     pub(crate) fn link_player_area(
