@@ -54,8 +54,9 @@ impl FramePace {
     };
 
     /// Off the phone every switch is ignored: the hooks only exist there.
-    /// On iOS the pace is off unless set, the snap defaults to on (it only acts
-    /// with a pace) and the stats default to on. An invalid value keeps the
+    /// On iOS the pace is off unless set, the snap is off unless set (it only acts
+    /// with a pace; see [`PaceClock`] for why it is not on by default) and the
+    /// stats default to on. An invalid value keeps the
     /// default and returns a warning to log.
     pub fn parse(
         ios: bool,
@@ -79,7 +80,7 @@ impl FramePace {
                 0
             }
         };
-        let snap = switch(DT_SNAP_ENV, snap, true, &mut warnings);
+        let snap = switch(DT_SNAP_ENV, snap, false, &mut warnings);
         let stats = switch(FRAME_STATS_ENV, stats, true, &mut warnings);
         (Self { hz, snap, stats }, warnings)
     }
@@ -175,8 +176,8 @@ fn floor_units(hz: u32) -> u32 {
 /// floor. Fed the wall clock at the start of every frame, it returns the
 /// instant to advance game time to:
 ///
-/// - a frame that holds the pace steps exactly `floor` vsyncs, whatever the
-///   CPU jitter;
+/// - a frame that holds the pace steps exactly `floor` vsyncs, as long as each
+///   sample stays within half a vsync of the first sample's phase;
 /// - a missed frame steps one vsync more, on the frame that sees it;
 /// - game time is never more than one pace step ahead of the wall clock (it
 ///   holds still when ahead) and never more than half a vsync behind.
@@ -538,7 +539,7 @@ mod tests {
             ios,
             FramePace {
                 hz: 0,
-                snap: true,
+                snap: false,
                 stats: true
             }
         );
@@ -557,7 +558,12 @@ mod tests {
         for (value, hz) in [("30", 30), ("40", 40), ("60", 60)] {
             let (pace, warnings) = FramePace::parse(true, Some(value), None, None);
             assert_eq!(pace.hz, hz);
-            assert!(pace.snap_active());
+            assert!(!pace.snap_active());
+            assert!(
+                FramePace::parse(true, Some(value), Some("1"), None)
+                    .0
+                    .snap_active()
+            );
             assert!(warnings.is_empty());
         }
 
@@ -566,7 +572,7 @@ mod tests {
             junk,
             FramePace {
                 hz: 0,
-                snap: true,
+                snap: false,
                 stats: true
             }
         );
@@ -586,7 +592,7 @@ mod tests {
 
     #[test]
     fn boot_line_names_every_switch() {
-        let (pace, _) = FramePace::parse(true, Some("30"), None, None);
+        let (pace, _) = FramePace::parse(true, Some("30"), Some("1"), None);
         assert_eq!(
             pace.boot_line(2),
             "frame pace: pace=30 Hz min_present=31.33 ms frame_latency=2 dt_snap=on \
@@ -594,10 +600,7 @@ mod tests {
         );
         let (off, _) = FramePace::parse(true, None, None, Some("0"));
         assert!(off.boot_line(2).starts_with("frame pace: pace=off"));
-        assert!(
-            off.boot_line(2)
-                .ends_with("dt_snap=off (no pace) frame_stats=off")
-        );
+        assert!(off.boot_line(2).ends_with("dt_snap=off frame_stats=off"));
     }
 
     #[test]
