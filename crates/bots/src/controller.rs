@@ -460,7 +460,7 @@ impl HostController {
                 .next()
                 .or_else(|| self.memory.last_seen().next())
                 .map(|c| c.source);
-            diag::info!(
+            diag::debug!(
                 Sim,
                 "bots: id={} tick={} task={:?} reason={:?} path={:?} know={know:?} origin=({:.0},{:.0},{:.0}) left={left:.0} events={events:?} decision={:?} weapon={weapon_act:?} think_us={} report={:?}",
                 obs.self_state.id.0,

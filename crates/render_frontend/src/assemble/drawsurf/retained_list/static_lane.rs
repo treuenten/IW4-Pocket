@@ -531,7 +531,7 @@ fn emit_smodel_static_lane(
     if list.logged_buckets != Some(buckets) {
         list.logged_buckets = Some(buckets);
         let [rigid, skinned, cached, unread, consume] = buckets;
-        diag::info!(
+        diag::debug!(
             World,
             "smodel buckets: rigid={rigid} skinned={skinned} cached={cached} unread={unread} consume={consume}",
         );

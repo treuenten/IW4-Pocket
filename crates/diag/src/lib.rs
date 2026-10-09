@@ -221,14 +221,37 @@ pub fn latest_log_path() -> Option<PathBuf> {
 pub static IOS_TEXTURE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// iOS has no console: append breadcrumbs to Documents/iw4l-boot.log (visible in Files).
+///
+/// The file is opened at the first crumb and kept open, so the previous log must be
+/// rotated before then. Opening, appending and closing it per line cost 55-64 us a line
+/// on the phone, where every info line is mirrored here. Each line is still one write
+/// straight to the OS with nothing buffered, so a crash or a kill loses no crumb; the
+/// append mode keeps lines from two threads whole and in the order they were written.
 pub fn boot_crumb(message: &str) {
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = std::path::Path::new(&home).join("Documents").join("iw4l-boot.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            use std::io::Write;
-            let _ = writeln!(file, "{message}");
+    static BOOT_LOG: OnceLock<File> = OnceLock::new();
+    let file = match BOOT_LOG.get() {
+        Some(file) => file,
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return;
+            };
+            let path = Path::new(&home).join("Documents").join("iw4l-boot.log");
+            let Ok(file) = OpenOptions::new().create(true).append(true).open(path) else {
+                return;
+            };
+            BOOT_LOG.get_or_init(|| file)
         }
-    }
+    };
+    append_crumb(file, message);
+}
+
+/// One whole line in one write, flushed: the bytes `writeln!` would have written.
+fn append_crumb(mut file: &File, message: &str) {
+    let mut line = String::with_capacity(message.len() + 1);
+    line.push_str(message);
+    line.push('\n');
+    let _ = file.write_all(line.as_bytes());
+    let _ = file.flush();
 }
 
 pub fn exit_launch_error(message: &str) -> ! {
@@ -526,4 +549,41 @@ macro_rules! event {
             None,
         );
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_boot_log_handle_writes_what_reopening_per_line_wrote() {
+        let dir = std::env::temp_dir().join(format!("iw4l-boot-crumb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kept, reopened) = (dir.join("kept.log"), dir.join("reopened.log"));
+        let lines = [
+            "1 main entered, sandbox ready",
+            "",
+            "PANIC on thread\n  0: frame",
+            "mem: 41 MiB",
+        ];
+        let append = |path: &Path| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap()
+        };
+        let file = append(&kept);
+        for line in lines {
+            append_crumb(&file, line);
+            writeln!(append(&reopened), "{line}").unwrap();
+        }
+        let written = std::fs::read(&kept).unwrap();
+        assert_eq!(written, std::fs::read(&reopened).unwrap());
+        assert_eq!(
+            written,
+            b"1 main entered, sandbox ready\n\nPANIC on thread\n  0: frame\nmem: 41 MiB\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
