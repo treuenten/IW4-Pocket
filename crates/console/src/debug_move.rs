@@ -323,7 +323,17 @@ pub(crate) fn route_debug_move_commands(
                         continue;
                     }
                 };
-                if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
+                // Host only: the action is new to the wire (tag 23) and a host
+                // on an older protocol-111 build cannot decode it.
+                let Some(authority) = authority.as_ref() else {
+                    echo(
+                        "player_sustainAmmo: only the host of a local match can set it".into(),
+                        &mut console,
+                        &mut line,
+                    );
+                    continue;
+                };
+                if !authority.0.cheats_enabled() {
                     echo(
                         "player_sustainAmmo: cheats are off".into(),
                         &mut console,

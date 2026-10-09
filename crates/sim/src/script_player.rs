@@ -711,6 +711,15 @@ pub(crate) fn give_full_ammo(world: &mut FrameWorld, id: ClientId, weapon: u32) 
         .is_none_or(|eq| !eq.is_offhand())
     {
         set_ammo_clip(world, id, weapon, facts.clip_size);
+        // `set_ammo_clip` writes the right hand; an akimbo pair fills both.
+        if facts.dual_wield
+            || gsc_give_weapon_is_akimbo(world.weapon_script_name(weapon))
+        {
+            let key = weapon_iw4::clip_table_key(facts.clip_index, weapon);
+            if let Some(ps) = world.player_mut(id) {
+                let _ = weapon_iw4::set_clip_for_hand(&mut ps.ammoclip, key, 1, facts.clip_size);
+            }
+        }
     }
 }
 
