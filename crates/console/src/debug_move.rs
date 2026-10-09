@@ -710,7 +710,7 @@ pub(crate) fn update_showpos_overlay(
     }
 }
 
-fn alive(presented: &PresentedSnapshot, id: sim::ClientId) -> bool {
+pub(crate) fn alive(presented: &PresentedSnapshot, id: sim::ClientId) -> bool {
     presented
         .snapshot()
         .and_then(|s| s.meta.for_client(id))

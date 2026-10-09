@@ -299,7 +299,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "wait",
-            "wait [seconds|<n>t|world|spawn|torn|ambient] — pause the console FIFO; <n>t = n authority ticks; world = scene.spawned; spawn = AppScreen::InGame; torn = HasWorld false and scene.spawned false (hold after MatchTornDown); ambient = MapAmbientBooted (overlay finished, CreateFX sources published)",
+            "wait [seconds|<n>t|world|spawn|alive|torn|ambient] — pause the console FIFO; bare wait = 1s; <n>t = n authority ticks; world = scene.spawned; spawn = AppScreen::InGame (first spawn of the map only); alive = local player presented Alive, on a host in a snapshot after the wait began (holds through death and killcam until the respawn); torn = HasWorld false and scene.spawned false (hold after MatchTornDown); ambient = MapAmbientBooted (overlay finished, CreateFX sources published); one word only (wait 2s, not wait 2 s): any other word, or a second word, is an error and does not hold",
         ),
     ] {
         if registry.resolve(name).is_none() {
