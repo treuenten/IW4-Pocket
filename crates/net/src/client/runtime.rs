@@ -67,6 +67,41 @@ impl PendingPelletFx {
     }
 }
 
+/// Whether an adopted snapshot's pellet effects (shotgun pellets, sentry and
+/// turret rounds: their tracers and impacts) may play. A master-server match
+/// names its round by epoch, and a snapshot from another round must not play
+/// its shots into this one. A private or `map` match has no master key to
+/// check the epoch against, and every one of its shots plays; each record is
+/// still tagged with the world generation it arrived in, and drain_pellet_fx
+/// drops those of any other world.
+fn snapshot_pellet_fx_admitted(match_key: frame::MatchKey, snapshot_epoch: u32) -> bool {
+    match_key.is_none() || snapshot_epoch == match_key.match_epoch
+}
+
+#[cfg(test)]
+mod pellet_fx_admission_tests {
+    use super::snapshot_pellet_fx_admitted;
+    use frame::MatchKey;
+
+    #[test]
+    fn a_match_without_a_master_key_keeps_its_pellet_effects() {
+        assert!(snapshot_pellet_fx_admitted(MatchKey::NONE, 0));
+        assert!(snapshot_pellet_fx_admitted(MatchKey::NONE, 7));
+    }
+
+    #[test]
+    fn a_master_match_keeps_the_pellet_effects_of_its_own_round() {
+        assert!(snapshot_pellet_fx_admitted(MatchKey::new([3; 16], 7), 7));
+    }
+
+    #[test]
+    fn a_master_match_drops_the_pellet_effects_of_another_round() {
+        let key = MatchKey::new([3; 16], 7);
+        assert!(!snapshot_pellet_fx_admitted(key, 6));
+        assert!(!snapshot_pellet_fx_admitted(key, 0));
+    }
+}
+
 fn collect_received_entity_events(
     last_tick: Option<sim::Tick>,
     local: sim::ClientId,
@@ -557,10 +592,10 @@ pub fn reconcile_prediction(
             continue;
         }
         perf::net_leg("snap_adopt", tick.snapshot.tick.0, 0);
-        let match_key = crate::signon::live_match_key(reliable.bridge.as_deref());
-        if !match_key.is_none()
-            && tick.snapshot.meta.world_objects.map_round_epoch == match_key.match_epoch
-        {
+        if snapshot_pellet_fx_admitted(
+            crate::signon::live_match_key(reliable.bridge.as_deref()),
+            tick.snapshot.meta.world_objects.map_round_epoch,
+        ) {
             pellet_fx
                 .0
                 .extend(tick.snapshot.meta.pellet_fx.drain(..).map(|record| {
