@@ -2,8 +2,8 @@ use math_iw4::angle_vectors;
 use sim::{ClientId, ClientLifecycle, Snapshot};
 
 use crate::observation::{
-    BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective, SelfState,
-    Visibility, WeaponAction, WeaponSlot,
+    BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective,
+    ObjectiveAction, SelfState, TeamRole, Visibility, WeaponAction, WeaponSlot,
 };
 use crate::query::{QuerySubsystem, SightSample, WorldQuery};
 
@@ -56,6 +56,7 @@ pub fn observe_focused(
         ammo_clip: meta.ammo_clip,
         ammo_stock: meta.ammo_stock,
         team,
+        linked: meta.controls.linked,
     };
     let inventory = own_inventory(ps, meta, world);
     let mut seen = Vec::new();
@@ -245,34 +246,203 @@ fn probe_visible(
 }
 
 fn public_objectives(snapshot: &Snapshot, bot: ClientId, team: i32) -> Vec<ModeObjective> {
-    let Some(team) = gamemode_iw4::Team::from_packed_u8(team as u8) else {
+    let Some(side) = gamemode_iw4::Team::from_packed_u8(team as u8) else {
         return Vec::new();
     };
-    let feet = snapshot
+    let Some(feet) = snapshot
         .players
         .iter()
         .find(|(id, _)| *id == bot)
-        .map(|(_, p)| p.origin);
-    snapshot
-        .meta
-        .objectives
+        .map(|(_, p)| p.origin)
+    else {
+        return Vec::new();
+    };
+    let state = &snapshot.meta.objectives;
+    let markers: Vec<Marker> = state
         .compass
         .iter()
-        .filter(|o| {
-            o.shows_to(team, bot.0)
-                && !o.icon.contains("defend")
-                && !o.icon.starts_with("compassping")
-        })
-        .map(|o| ModeObjective {
-            id: u32::from(o.index),
+        .filter(|o| o.shows_to(side, bot.0))
+        .map(|o| Marker {
+            index: o.index,
+            icon: &o.icon,
             origin: o.origin,
-            touching: feet.is_some_and(|f| {
-                dist2([f[0], f[1], 0.0], [o.origin[0], o.origin[1], 0.0])
-                    <= DEFAULT_OBJECTIVE_RADIUS * DEFAULT_OBJECTIVE_RADIUS
-            }),
-            ..ModeObjective::at(o.origin)
+        })
+        .collect();
+    let mates: Vec<Mate> = snapshot
+        .players
+        .iter()
+        .filter_map(|(id, p)| {
+            let meta = snapshot.meta.for_client(*id)?;
+            (meta.lifecycle == ClientLifecycle::Alive && meta.client_state_team == team).then_some(
+                Mate {
+                    id: *id,
+                    origin: p.origin,
+                    linked: meta.controls.linked,
+                },
+            )
+        })
+        .collect();
+    // sd.gsc and sab.gsc run the bomb fuse on the game end time
+    // (setGameEndTime(gettime() + bombTimer)); before a plant it is the round clock.
+    let now_ms = snapshot.tick.0.saturating_mul(sim::MATCH_TICK_MS) as i32;
+    let remaining_ms = (state.game_end_time > 0).then(|| state.time_left_ms(now_ms).max(0) as u32);
+    objectives_from_compass(&markers, bot, feet, &mates, remaining_ms)
+}
+
+/// A compass marker the bot's team is shown: the 2D icon the gametype gave
+/// the objective with `_gameobjects::set2DIcon`, the same one a human reads off
+/// the map.
+struct Marker<'a> {
+    index: u8,
+    icon: &'a str,
+    origin: [f32; 3],
+}
+
+/// A live teammate, the bot included.
+struct Mate {
+    id: ClientId,
+    origin: [f32; 3],
+    /// Held by a script `playerLinkTo`, as `_gameobjects::useHoldThink` does
+    /// for the whole of a plant or a defuse.
+    linked: bool,
+}
+
+/// What a marker asks of the team that sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IconRole {
+    /// `waypoint_defend*` and compass pings: nowhere to walk to.
+    Ignore,
+    /// `waypoint_escort`: rides on the teammate carrying the bomb or the flag
+    /// (`objective_onentity`), so it is never a place to stand.
+    Escort,
+    /// `waypoint_target*`: a site to plant the carried bomb at.
+    Target,
+    /// `waypoint_defuse*`: a planted bomb to defuse.
+    Defuse,
+    /// Anything else: a loose bomb, a flag, a zone held by standing in it.
+    Capture,
+}
+
+fn icon_role(icon: &str) -> IconRole {
+    if icon.starts_with("compassping") || icon.contains("defend") {
+        IconRole::Ignore
+    } else if icon.contains("escort") {
+        IconRole::Escort
+    } else if icon.contains("target") {
+        IconRole::Target
+    } else if icon.contains("defuse") {
+        IconRole::Defuse
+    } else {
+        IconRole::Capture
+    }
+}
+
+/// sd.gsc, sab.gsc and dd.gsc default planttime and defusetime to 5 seconds.
+const BOMB_USE_MS: u32 = 5_000;
+/// How far the escort marker may sit from the carrier it rides on. Player
+/// hulls cannot overlap, so the nearest teammate this close is the carrier.
+const CARRIER_XY: f32 = 32.0;
+/// A use objective counts as reached on the same floor only.
+const USE_TOUCH_Z: f32 = 72.0;
+
+/// Bomb objectives follow MW2's own S&D rules: only the carrier plants
+/// (sd.gsc bombZone `setKeyObject(level.sdBomb)`), the bomb has to be picked
+/// up before any site matters, and one player at a time holds a plant or a
+/// defuse (`_gameobjects::useObjectUseThink` claims the trigger). So one bot
+/// is the Actor that presses Use and the rest of the team covers it.
+fn objectives_from_compass(
+    markers: &[Marker],
+    me: ClientId,
+    feet: [f32; 3],
+    mates: &[Mate],
+    remaining_ms: Option<u32>,
+) -> Vec<ModeObjective> {
+    let carrier = markers
+        .iter()
+        .filter(|m| icon_role(m.icon) == IconRole::Escort)
+        .find_map(|m| {
+            mates
+                .iter()
+                .filter(|mate| {
+                    dist2_xy(mate.origin, m.origin) <= CARRIER_XY * CARRIER_XY
+                        && (mate.origin[2] - m.origin[2]).abs() <= USE_TOUCH_Z
+                })
+                .min_by(|a, b| {
+                    dist2_xy(a.origin, m.origin)
+                        .total_cmp(&dist2_xy(b.origin, m.origin))
+                        .then_with(|| a.id.0.cmp(&b.id.0))
+                })
+                .map(|mate| mate.id)
+        });
+    let bomb_loose = markers
+        .iter()
+        .any(|m| icon_role(m.icon) == IconRole::Capture && m.icon.contains("bomb"));
+    markers
+        .iter()
+        .filter_map(|m| {
+            let base = ModeObjective {
+                id: u32::from(m.index),
+                ..ModeObjective::at(m.origin)
+            };
+            let claimant = || {
+                mates
+                    .iter()
+                    .find(|mate| mate.linked && use_touching(mate.origin, m.origin))
+                    .map(|mate| mate.id)
+            };
+            let bomb_use = |action, actor: Option<ClientId>| ModeObjective {
+                action,
+                role: if actor == Some(me) {
+                    TeamRole::Actor
+                } else {
+                    TeamRole::Cover
+                },
+                active_user: claimant(),
+                remaining_ms,
+                interaction_ms: BOMB_USE_MS,
+                touching: use_touching(feet, m.origin),
+                use_button: actor == Some(me),
+                ..base
+            };
+            match icon_role(m.icon) {
+                IconRole::Ignore | IconRole::Escort => None,
+                IconRole::Target if bomb_loose => None,
+                IconRole::Target => Some(bomb_use(ObjectiveAction::Plant, carrier)),
+                IconRole::Defuse => {
+                    let actor = claimant().or_else(|| {
+                        mates
+                            .iter()
+                            .min_by(|a, b| {
+                                dist2(a.origin, m.origin)
+                                    .total_cmp(&dist2(b.origin, m.origin))
+                                    .then_with(|| a.id.0.cmp(&b.id.0))
+                            })
+                            .map(|mate| mate.id)
+                    });
+                    Some(bomb_use(ObjectiveAction::Defuse, actor))
+                }
+                IconRole::Capture => Some(ModeObjective {
+                    touching: dist2_xy(feet, m.origin)
+                        <= DEFAULT_OBJECTIVE_RADIUS * DEFAULT_OBJECTIVE_RADIUS,
+                    ..base
+                }),
+            }
         })
         .collect()
+}
+
+/// Within the objective radius across and on the same floor. The trigger
+/// brush itself can start a little further in, so the controller keeps closing
+/// in and pressing Use until the script links the player.
+fn use_touching(feet: [f32; 3], origin: [f32; 3]) -> bool {
+    dist2_xy(feet, origin) <= DEFAULT_OBJECTIVE_RADIUS * DEFAULT_OBJECTIVE_RADIUS
+        && (feet[2] - origin[2]).abs() <= USE_TOUCH_Z
+}
+
+fn dist2_xy(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    dx * dx + dy * dy
 }
 
 fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -280,4 +450,124 @@ fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
     dx * dx + dy * dy + dz * dz
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SITE_A: [f32; 3] = [2000.0, 0.0, 0.0];
+    const SITE_B: [f32; 3] = [0.0, 2000.0, 0.0];
+
+    fn marker(index: u8, icon: &str, origin: [f32; 3]) -> Marker<'_> {
+        Marker {
+            index,
+            icon,
+            origin,
+        }
+    }
+
+    fn mate(id: u32, origin: [f32; 3], linked: bool) -> Mate {
+        Mate {
+            id: ClientId(id),
+            origin,
+            linked,
+        }
+    }
+
+    fn goals(markers: &[Marker], me: u32, mates: &[Mate]) -> Vec<ModeObjective> {
+        let feet = mates.iter().find(|m| m.id.0 == me).unwrap().origin;
+        objectives_from_compass(markers, ClientId(me), feet, mates, Some(30_000))
+    }
+
+    #[test]
+    fn mw2_icons_map_to_roles() {
+        for (icon, role) in [
+            ("waypoint_defend_a", IconRole::Ignore),
+            ("waypoint_defend_flag", IconRole::Ignore),
+            ("compassping_enemy", IconRole::Ignore),
+            ("waypoint_escort", IconRole::Escort),
+            ("waypoint_target_b", IconRole::Target),
+            ("waypoint_defuse_a", IconRole::Defuse),
+            ("waypoint_bomb", IconRole::Capture),
+            ("waypoint_captureneutral_a", IconRole::Capture),
+            ("waypoint_kill", IconRole::Capture),
+        ] {
+            assert_eq!(icon_role(icon), role, "{icon}");
+        }
+    }
+
+    #[test]
+    fn the_carrier_plants_and_his_team_covers_him() {
+        let carrier = [-2675.0, 1130.0, 7.0];
+        let markers = [
+            marker(
+                0,
+                "waypoint_escort",
+                [carrier[0] + 6.0, carrier[1], carrier[2]],
+            ),
+            marker(1, "waypoint_target_a", SITE_A),
+            marker(2, "waypoint_target_b", SITE_B),
+        ];
+        let mates = [
+            mate(3, carrier, false),
+            mate(4, [-2620.0, 1150.0, 0.0], false),
+        ];
+        let own = goals(&markers, 3, &mates);
+        assert_eq!(own.len(), 2, "{own:?}");
+        assert!(own.iter().all(|g| g.action == ObjectiveAction::Plant
+            && g.role == TeamRole::Actor
+            && g.use_button
+            && g.interaction_ms == BOMB_USE_MS));
+        let other = goals(&markers, 4, &mates);
+        assert_eq!(other.len(), 2, "{other:?}");
+        assert!(other.iter().all(|g| g.action == ObjectiveAction::Plant
+            && g.role == TeamRole::Cover
+            && !g.use_button));
+    }
+
+    #[test]
+    fn a_loose_bomb_comes_before_the_sites() {
+        let markers = [
+            marker(0, "waypoint_bomb", [-2664.0, 1128.0, 6.0]),
+            marker(1, "waypoint_target_a", SITE_A),
+            marker(2, "waypoint_target_b", SITE_B),
+        ];
+        let own = goals(&markers, 3, &[mate(3, [-3000.0, 1400.0, 20.0], false)]);
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert_eq!((own[0].id, own[0].action), (0, ObjectiveAction::Capture));
+    }
+
+    #[test]
+    fn a_site_on_another_floor_is_not_touching() {
+        let me = [10.0, 0.0, 0.0];
+        let markers = [
+            marker(0, "waypoint_escort", me),
+            marker(1, "waypoint_target_a", [0.0, 0.0, 200.0]),
+        ];
+        let own = goals(&markers, 3, &[mate(3, me, false)]);
+        assert!(own[0].use_button && !own[0].touching, "{own:?}");
+    }
+
+    #[test]
+    fn one_defender_defuses_and_the_rest_cover() {
+        let markers = [
+            marker(3, "waypoint_defend_b", SITE_B),
+            marker(4, "waypoint_defuse_a", SITE_A),
+        ];
+        let near = mate(5, [1700.0, 0.0, 0.0], false);
+        let far = mate(6, [1000.0, 0.0, 0.0], false);
+        let mates = [near, far];
+        let actor = goals(&markers, 5, &mates);
+        assert_eq!(actor.len(), 1, "{actor:?}");
+        assert_eq!(actor[0].action, ObjectiveAction::Defuse);
+        assert!(actor[0].use_button && actor[0].role == TeamRole::Actor);
+        let cover = goals(&markers, 6, &mates);
+        assert!(!cover[0].use_button && cover[0].role == TeamRole::Cover);
+        // A teammate already defusing keeps the claim however near the others are.
+        let claimant = mate(7, [1920.0, 30.0, 0.0], true);
+        let mates = [mate(5, [1990.0, 0.0, 0.0], false), claimant];
+        let own = goals(&markers, 5, &mates);
+        assert!(!own[0].use_button && own[0].active_user == Some(ClientId(7)));
+    }
 }

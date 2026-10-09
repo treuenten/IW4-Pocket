@@ -35,6 +35,11 @@ const FIGHT_SCAN_MAX_AGE_TICKS: u32 = 8;
 const FIGHT_COMMIT_MAX_AGE_TICKS: u32 = 60;
 /// Commanded movement without displacement for this long is a stuck bot.
 const STUCK_TICKS: u32 = 40;
+/// A use trigger fires on the press, so until the script takes hold of the
+/// player Use is let go for one think in this many.
+const USE_REPRESS_THINKS: u32 = 4;
+/// How close to a use objective's marker the final straight approach stops.
+const USE_APPROACH_IN: f32 = 16.0;
 
 #[derive(Clone, Debug)]
 pub struct HostController {
@@ -67,6 +72,9 @@ pub struct HostController {
     progress_origin: Option<[f32; 3]>,
     progress_tick: u32,
     escape: Option<([f32; 3], u32)>,
+    /// Thinks spent pressing Use at a use objective without the script
+    /// linking the player to it yet.
+    use_unlinked: u32,
 }
 
 impl HostController {
@@ -101,6 +109,7 @@ impl HostController {
             progress_origin: None,
             progress_tick: 0,
             escape: None,
+            use_unlinked: 0,
         }
     }
 
@@ -194,6 +203,7 @@ impl HostController {
             self.fire_target = None;
             self.progress_origin = None;
             self.escape = None;
+            self.use_unlinked = 0;
             self.decision = Decision::default();
             self.task = Task::default();
         }
@@ -328,6 +338,9 @@ impl HostController {
             .copied()
             .chain(obs.objective)
             .find(|obj| obj.touching && obj.use_button);
+        if touching_use.is_none() {
+            self.use_unlinked = 0;
+        }
         if touching_use.is_none()
             && let Some(intent) = self.unstick(obs, world)
         {
@@ -1094,12 +1107,33 @@ impl HostController {
                     return BotIntent::default();
                 };
                 if obj.touching && obj.use_button {
+                    // _gameobjects::useHoldThink links the player to the
+                    // trigger for the whole plant or defuse and stops it as soon
+                    // as Use is let go. Until then the press may have landed
+                    // short of the trigger brush: keep closing in and press again.
+                    if obs.self_state.linked {
+                        self.use_unlinked = 0;
+                        return BotIntent {
+                            look_at: Some(obj.origin),
+                            move_goal: Some(obs.self_state.origin),
+                            move_mode: MoveMode::Hold,
+                            path: PathOutcome::Clear,
+                            use_button: true,
+                            ..BotIntent::default()
+                        };
+                    }
+                    self.use_unlinked = self.use_unlinked.wrapping_add(1);
+                    let (move_mode, path, move_goal) = final_approach(
+                        obs.self_state.origin,
+                        obj.origin,
+                        self.route(obs.self_state.origin, obj.origin, world, nav, astar_budget),
+                    );
                     return BotIntent {
                         look_at: Some(obj.origin),
-                        move_goal: Some(obs.self_state.origin),
-                        move_mode: MoveMode::Hold,
-                        path: PathOutcome::Clear,
-                        use_button: true,
+                        move_goal,
+                        move_mode,
+                        path,
+                        use_button: use_pressed(self.use_unlinked),
                         ..BotIntent::default()
                     };
                 }
@@ -1527,6 +1561,28 @@ fn away_from(here: [f32; 3], threat: [f32; 3], dist: f32) -> [f32; 3] {
     ]
 }
 
+/// The route to an objective ends at the last baked node inside its disc,
+/// which can still be short of the trigger brush. Once it is spent, walk
+/// straight at the marker.
+fn final_approach(
+    here: [f32; 3],
+    marker: [f32; 3],
+    routed: (MoveMode, PathOutcome, Option<[f32; 3]>),
+) -> (MoveMode, PathOutcome, Option<[f32; 3]>) {
+    match routed {
+        (MoveMode::Hold, PathOutcome::Clear, _) if dist_xy(here, marker) > USE_APPROACH_IN => {
+            (MoveMode::Walk, PathOutcome::Clear, Some(marker))
+        }
+        routed => routed,
+    }
+}
+
+/// Use is held except for one think in `USE_REPRESS_THINKS`, counting from the
+/// first think at the objective, which presses.
+fn use_pressed(unlinked_thinks: u32) -> bool {
+    !unlinked_thinks.is_multiple_of(USE_REPRESS_THINKS)
+}
+
 fn path_ends_in_use_volume(
     world: &impl WorldQuery,
     path: &[nav::RouteStep],
@@ -1570,4 +1626,29 @@ fn dist_xy(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
     (dx * dx + dy * dy).sqrt()
+}
+
+#[cfg(test)]
+mod use_objective_tests {
+    use super::*;
+
+    #[test]
+    fn use_is_let_go_one_think_in_four_until_linked() {
+        let pressed: Vec<bool> = (1..=8).map(use_pressed).collect();
+        assert_eq!(pressed, [true, true, true, false, true, true, true, false]);
+    }
+
+    #[test]
+    fn a_spent_route_walks_straight_at_the_marker() {
+        let here = [0.0, 0.0, 0.0];
+        let marker = [70.0, 0.0, 0.0];
+        let spent = (MoveMode::Hold, PathOutcome::Clear, Some(here));
+        assert_eq!(
+            final_approach(here, marker, spent),
+            (MoveMode::Walk, PathOutcome::Clear, Some(marker))
+        );
+        assert_eq!(final_approach(here, [10.0, 0.0, 0.0], spent), spent);
+        let blocked = (MoveMode::Hold, PathOutcome::Blocked, Some(marker));
+        assert_eq!(final_approach(here, marker, blocked), blocked);
+    }
 }

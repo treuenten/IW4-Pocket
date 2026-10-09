@@ -196,6 +196,8 @@ pub struct SelfState {
     pub ammo_clip: i32,
     pub ammo_stock: i32,
     pub team: i32,
+    /// Held by a script `playerLinkTo`, as while planting or defusing.
+    pub linked: bool,
 }
 
 pub const DEFAULT_OBJECTIVE_RADIUS: f32 = 96.0;
