@@ -208,6 +208,9 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         // Top priority for the tick and render threads; the server tick on the
         // main thread (both off by default).
         "IW4L_THREAD_QOS" | "IW4L_TICK_ON_MAIN" => matches!(value, "0" | "1"),
+        // A bot with a spent gun and no loaded one switches to a gun with reserve
+        // ammunition instead of standing still (off by default).
+        "IW4L_BOT_RESERVE_AMMO" => matches!(value, "0" | "1"),
         // Health fields in the logs: memory, thermal state, Low Power Mode,
         // main-thread CPU, graphics-chip time, sim tick timing and memory
         // warnings (see crate::health). On by default; 0 turns all of it off.
@@ -337,6 +340,9 @@ mod tests {
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "0"));
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "1"));
         for v in ["on", "off", "false", "2", "", " 0", "0\0"] { assert!(!valid_file_setting("IW4L_HEALTH_LOG", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_BOT_RESERVE_AMMO", "0"));
+        assert!(valid_file_setting("IW4L_BOT_RESERVE_AMMO", "1"));
+        for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_BOT_RESERVE_AMMO", v), "{v:?}"); }
         for name in ["IW4L_THREAD_QOS", "IW4L_TICK_ON_MAIN"] {
             assert!(valid_file_setting(name, "0"));
             assert!(valid_file_setting(name, "1"));

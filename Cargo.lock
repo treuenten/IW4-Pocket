@@ -2068,6 +2068,7 @@ dependencies = [
  "math_iw4",
  "movement_iw4",
  "net",
+ "perf",
  "playerstate_iw4",
  "sim",
  "trace_iw4",

@@ -10,6 +10,7 @@ getrandom = "0.3"
 asset_transport.workspace = true
 assets.workspace = true
 diag.workspace = true
+perf.workspace = true
 bevy.workspace = true
 frame.workspace = true
 sim = { path = "../sim" }

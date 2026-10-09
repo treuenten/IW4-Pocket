@@ -44,6 +44,11 @@ baked support per sector around the threat, checked for line of fire and
 exposure, then reached through the ordinary route executor — reachability is
 never inferred from a component label.
 
+The weapon channel reloads the gun in hand or switches to a loaded one. With
+`IW4L_BOT_RESERVE_AMMO=1` (off by default) a bot whose gun is spent, with
+nothing loaded anywhere, also switches to a gun that still has reserve
+ammunition and reloads it there instead of keeping the empty one.
+
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a
 running match, which is where bot behaviour is judged: `make map mp_boneyard`
