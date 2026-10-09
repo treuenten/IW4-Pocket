@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bots::{
-    BotAddQueue, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpRequest, BotTpTarget,
+    BotAddQueue, BotFireQueue, BotHold, BotRoster, BotSide, BotTpQueue, BotTpRequest, BotTpTarget,
     BotTpWhere,
 };
 use hud::PendingSplash;
@@ -70,9 +70,13 @@ pub(crate) fn route_debug_feature_commands(
                 {
                     echo("bot: cheats are off".into(), console, line);
                 }
-                Ok(BotVerb::Add(n)) => {
+                Ok(BotVerb::Add(n, None)) => {
                     bot_add.push(n);
                     echo(format!("bot: queued add {n}"), console, line);
+                }
+                Ok(BotVerb::Add(n, Some(side))) => {
+                    bot_add.push_side(n, side);
+                    echo(format!("bot: queued add {n} {side:?}"), console, line);
                 }
                 Ok(BotVerb::Dummy(n)) => {
                     bot_add.push_dummy(n);
@@ -308,11 +312,13 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     }
 }
 
-pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
+pub(crate) const BOT_USAGE: &str = "usage: bot add [N] [enemy|friendly] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum BotVerb {
-    Add(u32),
+    /// A side places the bots like the lobby's Enemy Bots / Friendly Bots
+    /// rule: relative to the local player's team, ignored in free-for-all.
+    Add(u32, Option<BotSide>),
     Dummy(u32),
     Hold(bool),
     Give {
@@ -333,7 +339,17 @@ pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(1)
                 .clamp(1, 16);
-            Ok(BotVerb::Add(n))
+            let side = match args.get(2).map(String::as_str) {
+                None => None,
+                Some("enemy") => Some(BotSide::Enemy),
+                Some("friendly") => Some(BotSide::Friendly),
+                Some(other) => {
+                    return Err(format!(
+                        "usage: bot add [N] [enemy|friendly] (got `{other}`)"
+                    ));
+                }
+            };
+            Ok(BotVerb::Add(n, side))
         }
         "dummy" => {
             if args.len() > 2 {
@@ -424,4 +440,33 @@ fn parse_finite(s: &String) -> Result<f32, String> {
         .ok()
         .filter(|v| v.is_finite())
         .ok_or_else(|| format!("bot: not a finite number `{s}`"))
+}
+
+#[cfg(test)]
+mod bot_verb_tests {
+    use super::*;
+
+    fn parse(line: &str) -> Result<BotVerb, String> {
+        parse_bot_args(
+            &line
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn bot_add_takes_an_optional_side() {
+        assert_eq!(parse("add"), Ok(BotVerb::Add(1, None)));
+        assert_eq!(parse("add 9"), Ok(BotVerb::Add(9, None)));
+        assert_eq!(
+            parse("add 9 enemy"),
+            Ok(BotVerb::Add(9, Some(BotSide::Enemy)))
+        );
+        assert_eq!(
+            parse("add 4 friendly"),
+            Ok(BotVerb::Add(4, Some(BotSide::Friendly)))
+        );
+        assert!(parse("add 4 axis").is_err());
+    }
 }
