@@ -176,11 +176,10 @@ impl PresentedSnapshot {
         self.trajectory_time_ms.unwrap_or(render_time_ms)
     }
 
-    pub(crate) fn set_trajectory_sample(
-        &mut self,
-        time_ms: Option<i32>,
-        next: Option<Arc<Snapshot>>,
-    ) {
+    /// The trajectory time and the next buffered snapshot for an archived
+    /// (killcam seat) presentation; None for live play, which samples
+    /// trajectories at the render clock.
+    pub fn set_trajectory_sample(&mut self, time_ms: Option<i32>, next: Option<Arc<Snapshot>>) {
         self.trajectory_time_ms = time_ms;
         self.trajectory_next = next;
     }
