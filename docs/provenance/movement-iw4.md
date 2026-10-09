@@ -62,3 +62,28 @@ climb read as a jump) and checked with analytic fixtures, a synthetic
 open-tread staircase climbed and descended, and a headless run over
 Estate's clipmap. No retail, Quake or CoD source and no source of the
 replaced module was consulted.
+
+2026-10-09, step report. The solver's interface was widened without
+changing its logic: a traversal also returns the height its plain slide
+ended at, and `step_slide_move` returns how far the final height differs
+from it (a step up or the supported snap down, not travel along a slope)
+when the move started on a ground plane, off a ladder and alive, and the
+difference is over half a unit. When the slide stopped short having met
+nothing but its own ground plane (it can stall moving along a smooth brush
+ramp) and the step route finished the move, the slide's end is first
+carried on along its own velocity, so the ramp's rise is not reported as a
+step. The reported value is then held to the move's own height change:
+same sign, no larger. Retail reports the difference as it is; the hold is
+a deliberate departure. Against mesh a move can climb along a tilted tread
+edge and then be snapped down part of that climb, and the plain difference
+reports that as a step down while the player climbs, so the eye would sink
+on the way up (walking up Estate's upper flight at 33 ms in the headless
+harness, reports of a unit or more: 11 up and 11 down without the hold,
+11 up and none down with it). Movement only reports the value through
+`Pml::step_view_change`; the client uses it to smooth its first-person
+camera, and nothing in `PlayerState`, snapshots or the network carries it.
+The implementer worked from a written behavioural description of MW2's
+view-height smoothing. That description was obtained by reverse
+engineering the retail executable (its disassembly), not from source. No
+retail, Quake or CoD source and no source of the replaced module was
+consulted.

@@ -720,9 +720,10 @@ pub(crate) fn alive(presented: &PresentedSnapshot, id: sim::ClientId) -> bool {
 fn format_showpos(presented: &PresentedSnapshot, id: sim::ClientId) -> String {
     match presented.alive_player(id) {
         Some(ps) => {
-            let eye_z = ps.origin[2] + ps.view_height_current;
+            let step = presented.step_view_z();
+            let eye_z = ps.origin[2] - step + ps.view_height_current;
             format!(
-                "showpos origin={:.1} {:.1} {:.1}  eye={:.1} {:.1} {:.1}  yaw={:.0} pitch={:.0}",
+                "showpos origin={:.1} {:.1} {:.1}  eye={:.1} {:.1} {:.1}  yaw={:.0} pitch={:.0}  step={step:.2}",
                 ps.origin[0],
                 ps.origin[1],
                 ps.origin[2],
@@ -751,7 +752,8 @@ fn format_showpos_live(
         .unwrap_or_else(|| "—".into());
     let (origin, eye, yaw, pitch, vz, ground) = match presented.alive_player(id) {
         Some(ps) => {
-            let eye_z = ps.origin[2] + ps.view_height_current;
+            // The eye as drawn, step glide included, as showpos prints it.
+            let eye_z = ps.origin[2] - presented.step_view_z() + ps.view_height_current;
             (
                 format!(
                     "{:.0} {:.0} {:.0}",

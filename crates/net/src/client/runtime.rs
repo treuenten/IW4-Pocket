@@ -1616,6 +1616,20 @@ pub fn predict_local_move(
     }
 }
 
+/// Once per frame, after the snapshot replay (Reconcile) and the new
+/// prediction, before `publish_presented`: accept this frame's step for the
+/// first-person camera at this frame's client time. Demo playback has no
+/// prediction to follow and stays unsmoothed, as in MW2.
+pub fn finish_step_view(
+    role: Res<RuntimeRole>,
+    cg_clock: Res<FrameClock>,
+    mut prediction: ResMut<ClientPredictionState>,
+) {
+    prediction
+        .0
+        .finish_step_view(cg_clock.time(), *role != RuntimeRole::Replay);
+}
+
 pub fn flush_bootstrap_applied(
     mut link: Option<ResMut<crate::transport::udp_session::UdpClientLink>>,
     adopted: Res<LastAdoptedSnapshot>,
@@ -1984,6 +1998,19 @@ pub fn publish_presented(
             .predicted_error()
             .offset_for_pm_type(predicted.pm_type)
     };
+    // Step smoothing follows only the locally predicted player: not an
+    // archived (killcam) seat, not demo playback, which MW2 leaves unsmoothed.
+    let follows_prediction = armed
+        && !archived
+        && interpolated.is_none()
+        && predicted_ps.is_some()
+        && *role != RuntimeRole::Replay;
+    let step_view_z =
+        if follows_prediction && crate::client::step_view::smooths_pm_type(predicted.pm_type) {
+            prediction.0.step_view_offset(cg_clock.time())
+        } else {
+            0.0
+        };
     presented.publish_proxied(
         snap_arc,
         local.0,
@@ -1993,6 +2020,7 @@ pub fn publish_presented(
     );
     presented.set_presented_projectiles(merged_projectiles);
     presented.set_view_offset(view_offset);
+    presented.set_step_view_z(step_view_z);
     presented.set_snapshot_interpolation(interpolation_previous, frame_interpolation);
     presented.set_trajectory_sample(
         archived.then_some(body_time_ms),
@@ -2080,6 +2108,12 @@ pub fn register_client_runtime(app: &mut App) {
         enforce_client_work_limits
             .before(predict_local_move)
             .after(reconcile_prediction),
+    );
+    app.add_systems(
+        Update,
+        finish_step_view
+            .in_set(ClientSet::Predict)
+            .after(predict_local_move),
     );
     app.init_resource::<crate::SignonState>()
         .init_resource::<crate::ClientAdmission>()

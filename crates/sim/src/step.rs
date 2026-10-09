@@ -439,6 +439,7 @@ fn run_players_system(ecs: &mut World) {
                 force_movement_anim,
                 landing_animation,
                 fall_damage,
+                step_view_change,
             ) = {
                 let ps = world
                     .player_mut(*id)
@@ -481,6 +482,7 @@ fn run_players_system(ecs: &mut World) {
                     pml.mantle_movetype.is_some(),
                     pml.landing_animation,
                     pml.fall_damage,
+                    pml.step_view_change,
                 )
             };
             world
@@ -531,6 +533,11 @@ fn run_players_system(ecs: &mut World) {
                 }
             }
             world.set_pmove_walking(*id, walking);
+            // Only the client's prediction smooths its camera with this; the
+            // authority keeps no trace of it.
+            if step_view_change != 0.0 && !world.publishes_snapshot() {
+                world.set_pmove_step_view(*id, cmd.server_time, step_view_change);
+            }
             world.link_player_area(*id, linked_bounds);
 
             let shots = advance_weapon_command(
