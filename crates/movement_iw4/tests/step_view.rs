@@ -144,10 +144,8 @@ fn walking_on_flat_ground_reports_nothing() {
     assert_eq!(change, 0.0);
 }
 
-#[test]
-fn walking_up_a_ramp_reports_nothing() {
-    // A 20 degree ramp rising along +x; the player stands part way up it,
-    // already moving along it.
+/// A 20 degree brush ramp rising along +x, and its normal.
+fn ramp() -> (Brushes, [f32; 3], f32) {
     let (sin, cos) = 20.0_f32.to_radians().sin_cos();
     let n = [-sin, 0.0, cos];
     let world = Brushes::floor().with_box(
@@ -155,11 +153,39 @@ fn walking_up_a_ramp_reports_nothing() {
         [1000.0, 200.0, 400.0],
         &[[n[0], n[1], n[2], 0.0]],
     );
-    let start = world.settle([100.0, 0.0, 100.0 * sin / cos + 2.0]);
-    let mut ps = player(start, [190.0 * cos, 0.0, 190.0 * sin], true);
-    let (change, origin) = step(&world, &mut ps, Some(n));
-    assert!(origin[2] > start[2] + 1.0, "{origin:?}");
-    assert_eq!(change, 0.0);
+    (world, n, sin / cos)
+}
+
+/// Walks a few moves along the ramp and returns each move's report. On this
+/// brush the plain slide stops against the ramp it moves along and the step
+/// route finishes the move, so this also covers that case: the ramp's rise is
+/// not a step.
+fn walk_the_ramp(direction: f32) -> Vec<f32> {
+    let (world, n, slope) = ramp();
+    let (sin, cos) = 20.0_f32.to_radians().sin_cos();
+    let start = world.settle([100.0, 0.0, 100.0 * slope + 2.0]);
+    let mut ps = player(
+        start,
+        [direction * 190.0 * cos, 0.0, direction * 190.0 * sin],
+        true,
+    );
+    let changes = (0..8).map(|_| step(&world, &mut ps, Some(n)).0).collect();
+    let climbed = ps.origin[2] - start[2];
+    assert!(
+        climbed * direction > 8.0 * 0.033 * 190.0 * sin * 0.9,
+        "the player followed the ramp: {climbed}"
+    );
+    changes
+}
+
+#[test]
+fn walking_up_a_ramp_reports_nothing() {
+    assert_eq!(walk_the_ramp(1.0), vec![0.0; 8]);
+}
+
+#[test]
+fn walking_down_a_ramp_reports_nothing() {
+    assert_eq!(walk_the_ramp(-1.0), vec![0.0; 8]);
 }
 
 #[test]

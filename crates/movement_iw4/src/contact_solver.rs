@@ -334,6 +334,36 @@ pub(crate) struct Traversal {
     pub(crate) motion: Motion,
     pub(crate) slide_z: f32,
 }
+/// The plain slide's end height when the step route finished a move at
+/// `end` that the slide gave up on without meeting anything but its own
+/// ground plane: the slide carried on along its own final velocity to
+/// `end`'s horizontal position, kept between the slide's end and `end`. The
+/// slide can stop short against the ground plane it moves along (a smooth
+/// brush ramp) and leave the rest of the move to the step route; measured
+/// from where it stopped, the ramp's rise would read as a step. A ledge
+/// beyond the stop still counts, since travel along flat ground does not
+/// climb.
+fn continued_slide_z(plain: Motion, end: Vector) -> f32 {
+    let z = plain.origin[2];
+    let v = plain.velocity;
+    let horizontal = libm::sqrt(v[0] as f64 * v[0] as f64 + v[1] as f64 * v[1] as f64);
+    if !finite(v) || horizontal <= 1e-6 {
+        return z;
+    }
+    let along = ((end[0] as f64 - plain.origin[0] as f64) * v[0] as f64
+        + (end[1] as f64 - plain.origin[1] as f64) * v[1] as f64)
+        / horizontal;
+    if along.is_nan() || along <= 0. {
+        return z;
+    }
+    let carried = z as f64 + v[2] as f64 / horizontal * along;
+    let (low, high) = if end[2] < z { (end[2], z) } else { (z, end[2]) };
+    if carried.is_finite() {
+        (carried as f32).clamp(low, high)
+    } else {
+        z
+    }
+}
 pub(crate) fn traverse(
     m: Motion,
     s: Settings,
@@ -347,15 +377,22 @@ pub(crate) fn traverse(
         };
     }
     let all_solid = core::cell::Cell::new(false);
+    // Whether the plain slide touched anything besides the ground plane it
+    // moves along (only for the step report).
+    let met_other = core::cell::Cell::new(false);
     let baseline_trace = |a, b| {
         let hit = trace(a, b);
         if hit.blocked {
             all_solid.set(true);
         }
+        if hit.fraction < 1. && s.ground != Some(hit.normal) {
+            met_other.set(true);
+        }
         hit
     };
     let (mut baseline, obstructed) = slide(m, s, &baseline_trace);
-    let slide_z = baseline.origin[2];
+    let plain = baseline;
+    let slide_z = plain.origin[2];
     let done = |motion| Traversal { motion, slide_z };
     if all_solid.get() {
         return done(baseline);
@@ -424,13 +461,21 @@ pub(crate) fn traverse(
             + (p[1] as f64 - m.origin[1] as f64) * m.velocity[1] as f64)
             / horizontal
     };
-    done(
-        if progress(landed.origin) - progress(baseline.origin) > 0.001 {
-            landed
+    if progress(landed.origin) - progress(baseline.origin) > 0.001 {
+        // A slide stopped only by its own ground plane met no ledge; the
+        // step route merely finished its move along that ground.
+        let slide_z = if met_other.get() {
+            slide_z
         } else {
-            baseline
-        },
-    )
+            continued_slide_z(plain, landed.origin)
+        };
+        Traversal {
+            motion: landed,
+            slide_z,
+        }
+    } else {
+        done(baseline)
+    }
 }
 pub(crate) fn project_ground(v: &mut Vector, n: &Vector) {
     if !finite(*v) || !finite(*n) || n[2] < 0.001 {
@@ -581,5 +626,51 @@ mod landing_tests {
         let out = traverse(m, settings(Some(EDGE)), &plane([0., 0., 1.], 0., true)).motion;
         assert!(libm::fabsf(out.origin[2]) < 1e-3, "{:?}", out.origin);
         assert!(close(out.velocity, [150., 0., 0.]), "{:?}", out.velocity);
+    }
+
+    #[test]
+    fn a_slide_stopped_against_a_riser_keeps_its_height_for_the_step() {
+        let plain = Motion {
+            origin: [10., 0., 0.],
+            velocity: [0.; 3],
+        };
+        assert_eq!(continued_slide_z(plain, [16., 0., 8.]), 0.);
+        // Sliding along the riser does not climb either.
+        let along = Motion {
+            velocity: [0., 120., 0.],
+            ..plain
+        };
+        assert_eq!(continued_slide_z(along, [16., 3., 8.]), 0.);
+    }
+
+    #[test]
+    fn a_slide_stopped_short_on_a_ramp_carries_on_up_or_down_it() {
+        let up = Motion {
+            origin: [0., 0., 0.],
+            velocity: [100., 0., 50.],
+        };
+        assert!(libm::fabsf(continued_slide_z(up, [6., 0., 3.]) - 3.) < 1e-4);
+        let down = Motion {
+            velocity: [100., 0., -50.],
+            ..up
+        };
+        assert!(libm::fabsf(continued_slide_z(down, [6., 0., -3.]) + 3.) < 1e-4);
+    }
+
+    #[test]
+    fn a_carried_on_slide_never_passes_the_step_end() {
+        // Nearly vertical travel would carry far past the end; it is held
+        // between the slide's end and the step's end.
+        let steep = Motion {
+            origin: [0., 0., 0.],
+            velocity: [1., 0., 60.],
+        };
+        assert_eq!(continued_slide_z(steep, [5., 0., 4.]), 4.);
+        // Moving away from the end carries nothing.
+        let back = Motion {
+            velocity: [-100., 0., 50.],
+            ..steep
+        };
+        assert_eq!(continued_slide_z(back, [5., 0., 4.]), 0.);
     }
 }
