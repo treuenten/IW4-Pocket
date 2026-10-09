@@ -6,11 +6,6 @@ use std::{
 
 use serde::Serialize;
 
-/// Allocation size classes, cheap enough to leave on: <64 KB, 64 KB-1 MB, 1-16 MB, >=16 MB.
-/// A big heap made of a few huge buffers and one made of millions of small objects need
-/// different fixes; this tells them apart.
-static CLASS_COUNT: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static CLASS_BYTES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Number of allocations of 16 MB or more, and the largest single one seen.
 static HUGE_COUNT: AtomicU64 = AtomicU64::new(0);
 static LARGEST: AtomicU64 = AtomicU64::new(0);
@@ -28,10 +23,10 @@ fn size_class(size: u64) -> usize {
 }
 
 #[inline]
-fn record_size(size: u64) {
+fn record_size(slot: Slot, size: u64) {
     let c = size_class(size);
-    CLASS_COUNT[c].fetch_add(1, Ordering::Relaxed);
-    CLASS_BYTES[c].fetch_add(size, Ordering::Relaxed);
+    slot.bump(&slot.counters.class_count[c], 1);
+    slot.bump(&slot.counters.class_bytes[c], size);
     if c == 3 {
         HUGE_COUNT.fetch_add(1, Ordering::Relaxed);
         LARGEST.fetch_max(size, Ordering::Relaxed);
@@ -42,9 +37,19 @@ fn record_size(size: u64) {
 /// Allocation counts and total bytes ever requested per size class, plus the number of
 /// allocations of 16 MB or more and the largest single one. Totals, not live bytes.
 pub fn size_class_report() -> String {
+    let used = &SLOTS[..process_allocation_slots_used()];
     let mb = |b: u64| b / (1024 * 1024);
-    let n = |i: usize| CLASS_COUNT[i].load(Ordering::Relaxed);
-    let b = |i: usize| mb(CLASS_BYTES[i].load(Ordering::Relaxed));
+    let n = |i: usize| -> u64 {
+        used.iter()
+            .map(|s| s.class_count[i].load(Ordering::Relaxed))
+            .sum()
+    };
+    let b = |i: usize| {
+        mb(used
+            .iter()
+            .map(|s| s.class_bytes[i].load(Ordering::Relaxed))
+            .sum())
+    };
     format!(
         "allocs requested: <64KB {}x {}MB | 64KB-1MB {}x {}MB | 1-16MB {}x {}MB | >=16MB {}x {}MB (largest {}MB)",
         n(0), b(0), n(1), b(1), n(2), b(2), n(3), b(3),
@@ -61,12 +66,21 @@ pub fn take_last_huge() -> Option<u64> {
 const FALLBACK_SLOT: usize = 0;
 const MAX_THREADS: usize = 256;
 
-#[repr(C, align(64))]
+/// One whole cache line per thread: Apple chips move 128-byte lines, and two threads
+/// whose slots shared one would contend as if the counters were shared.
+#[repr(C, align(128))]
 struct ThreadCounters {
     alloc_count: AtomicU64,
     alloc_bytes: AtomicU64,
     dealloc_count: AtomicU64,
     dealloc_bytes: AtomicU64,
+    /// Allocation size classes, cheap enough to leave on:
+    /// <64 KB, 64 KB-1 MB, 1-16 MB, >=16 MB. A big heap made of a few huge buffers and
+    /// one made of millions of small objects need different fixes; this tells them apart.
+    /// Counted per thread even when counting is off: one process-wide pair that every
+    /// allocation on every thread bumped made alloc+free several times slower.
+    class_count: [AtomicU64; 4],
+    class_bytes: [AtomicU64; 4],
 }
 
 impl ThreadCounters {
@@ -76,6 +90,32 @@ impl ThreadCounters {
             alloc_bytes: AtomicU64::new(0),
             dealloc_count: AtomicU64::new(0),
             dealloc_bytes: AtomicU64::new(0),
+            class_count: [const { AtomicU64::new(0) }; 4],
+            class_bytes: [const { AtomicU64::new(0) }; 4],
+        }
+    }
+}
+
+/// The calling thread's counters. A slot that only this thread writes is bumped with a
+/// plain load and store: no other thread can race the update, and readers on other
+/// threads only ever load. The fallback slot and the last slot, which threads past the
+/// 256th share, take a real atomic add.
+#[derive(Clone, Copy)]
+struct Slot {
+    counters: &'static ThreadCounters,
+    exclusive: bool,
+}
+
+impl Slot {
+    #[inline]
+    fn bump(self, counter: &AtomicU64, by: u64) {
+        if self.exclusive {
+            counter.store(
+                counter.load(Ordering::Relaxed).wrapping_add(by),
+                Ordering::Relaxed,
+            );
+        } else {
+            counter.fetch_add(by, Ordering::Relaxed);
         }
     }
 }
@@ -90,7 +130,7 @@ thread_local! {
     static SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
-fn slot() -> &'static ThreadCounters {
+fn slot() -> Slot {
     let idx = SLOT
         .try_with(|cell| {
             let mut idx = cell.get();
@@ -106,16 +146,20 @@ fn slot() -> &'static ThreadCounters {
             idx
         })
         .unwrap_or(FALLBACK_SLOT);
-    &SLOTS[idx]
+    Slot {
+        counters: &SLOTS[idx],
+        exclusive: idx != FALLBACK_SLOT && idx != MAX_THREADS - 1,
+    }
 }
 
 fn record_alloc(size: u64) {
+    let s = slot();
+    record_size(s, size);
     if !counting_enabled() {
         return;
     }
-    let s = slot();
-    s.alloc_count.fetch_add(1, Ordering::Relaxed);
-    s.alloc_bytes.fetch_add(size, Ordering::Relaxed);
+    s.bump(&s.counters.alloc_count, 1);
+    s.bump(&s.counters.alloc_bytes, size);
 }
 
 fn record_dealloc(size: u64) {
@@ -123,8 +167,8 @@ fn record_dealloc(size: u64) {
         return;
     }
     let s = slot();
-    s.dealloc_count.fetch_add(1, Ordering::Relaxed);
-    s.dealloc_bytes.fetch_add(size, Ordering::Relaxed);
+    s.bump(&s.counters.dealloc_count, 1);
+    s.bump(&s.counters.dealloc_bytes, size);
 }
 
 /// Whether the counting allocator is actually counting. It is off unless
@@ -173,13 +217,11 @@ pub struct ProcessCountingAllocator;
 
 unsafe impl GlobalAlloc for ProcessCountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record_size(layout.size() as u64);
         record_alloc(layout.size() as u64);
         unsafe { BACKING.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record_size(layout.size() as u64);
         record_alloc(layout.size() as u64);
         unsafe { BACKING.alloc_zeroed(layout) }
     }
@@ -190,7 +232,6 @@ unsafe impl GlobalAlloc for ProcessCountingAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record_size(new_size as u64);
         record_alloc(new_size as u64);
         record_dealloc(layout.size() as u64);
         unsafe { BACKING.realloc(ptr, layout, new_size) }
@@ -208,6 +249,11 @@ pub struct ProcessAllocationStats {
 }
 
 pub fn process_allocations() -> ProcessAllocationStats {
+    // Off, every slot's totals are zero; reading them would pull a cache line from each
+    // thread that allocates, many times a frame, because the size classes keep them hot.
+    if !counting_enabled() {
+        return ProcessAllocationStats::default();
+    }
     let n = NEXT_SLOT.load(Ordering::Relaxed).clamp(1, MAX_THREADS);
     let mut stats = ProcessAllocationStats::default();
     for slot in &SLOTS[..n] {
@@ -238,4 +284,35 @@ pub fn process_allocation_slots_used() -> usize {
 
 pub fn process_allocation_saturated() -> u64 {
     SATURATED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The test binary keeps the system allocator, so these calls are the only counts.
+    #[test]
+    fn size_classes_add_up_across_threads() {
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..1000 {
+                        for size in [16, 70_000, 2 << 20] {
+                            record_alloc(size);
+                        }
+                    }
+                });
+            }
+        });
+        let report = size_class_report();
+        assert!(
+            report.starts_with(
+                "allocs requested: <64KB 4000x 0MB | 64KB-1MB 4000x 267MB | 1-16MB 4000x 8000MB | >=16MB 0x 0MB"
+            ),
+            "{report}"
+        );
+        if !counting_enabled() {
+            assert_eq!(process_allocations(), ProcessAllocationStats::default());
+        }
+    }
 }
