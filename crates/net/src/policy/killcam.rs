@@ -32,12 +32,13 @@ pub(crate) fn play_script_seats(
         if started_at_ms == now_ms {
             diag::info!(
                 Net,
-                "killcam: script seat viewer={} spectating={} entity={} archive_ms={} length_ms={}",
+                "killcam: script seat viewer={} spectating={} entity={} archive_ms={} length_ms={} final={}",
                 viewer.0,
                 seat.spectator_client,
                 seat.kill_cam_entity,
                 seat.archive_ms,
-                seat.length_ms
+                seat.length_ms,
+                u8::from(seat.final_kill)
             );
         }
         let mut session = KillcamSession {
@@ -45,7 +46,9 @@ pub(crate) fn play_script_seats(
             focus_client,
             focus,
             ends_at_ms: i32::MAX,
-            final_kill: false,
+            // The end-of-match killcam replays the archive to every player,
+            // survivors included; a live-follow seat is never final.
+            final_kill: seat.final_kill && seat.archive_ms > 0,
             started_at_ms,
             killcamoffset_ms: seat.archive_ms,
             predelay_ms: 0,
@@ -77,5 +80,39 @@ pub(crate) fn follow_archived_focus(archive: &FrameArchive, session: &mut Killca
             return;
         }
         session.archivetime_ms = (session.archivetime_ms - ARCHIVE_TICK_MS).max(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_archived_seat_of_the_final_killcam_is_final() {
+        let archive = FrameArchive::new();
+        let mut seats = ActiveKillcams::new();
+        let viewer = ClientId(0);
+        let seat = sim::ScriptSeat {
+            spectator_client: 0,
+            archive_ms: 10_050,
+            final_kill: true,
+            ..Default::default()
+        };
+        play_script_seats(&mut seats, &archive, 1_000, &[(viewer, seat)]);
+        assert!(seats.get(viewer).unwrap().final_kill);
+        let ordinary = sim::ScriptSeat {
+            final_kill: false,
+            ..seat
+        };
+        play_script_seats(&mut seats, &archive, 1_050, &[(viewer, ordinary)]);
+        assert!(!seats.get(viewer).unwrap().final_kill);
+        let live_follow = sim::ScriptSeat {
+            archive_ms: 0,
+            ..seat
+        };
+        play_script_seats(&mut seats, &archive, 1_100, &[(viewer, live_follow)]);
+        assert!(!seats.get(viewer).unwrap().final_kill);
+        play_script_seats(&mut seats, &archive, 1_150, &[]);
+        assert!(seats.get(viewer).is_none());
     }
 }
