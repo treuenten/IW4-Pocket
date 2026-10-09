@@ -196,7 +196,7 @@ fn waypoint_anchor(elem: &HudElem, target: Option<WaypointTarget>, eyes: i32) ->
 
 fn place_waypoint(
     elem: &HudElem,
-    camera: (&Camera, &GlobalTransform),
+    camera: (&Camera, &GlobalTransform, &Projection),
     entities: &Query<(&CEntity, &CEntityRuntime)>,
     surface: &crate::surface::Hud2dSurface,
     eyes: i32,
@@ -215,39 +215,73 @@ fn place_waypoint(
             origin: runtime.origin,
         });
     let world = waypoint_anchor(elem, target, eyes)?;
-    let (camera, transform) = camera;
-    let eye = transform.translation();
-    let forward = *transform.forward();
-    let depth = (world - eye).dot(forward);
+    let (camera, transform, projection) = camera;
+    let view = WaypointView {
+        eye: transform.translation(),
+        forward: *transform.forward(),
+        right: *transform.right(),
+        near: match projection {
+            Projection::Perspective(perspective) => perspective.near,
+            _ => 0.0,
+        },
+        screen: Vec2::new(surface.width(), surface.height()),
+        scale: surface.scale_virtual_to_real()[1],
+    };
+    waypoint_screen(elem, world, &view, |point| {
+        camera.world_to_viewport(transform, point).ok()
+    })
+}
+
+/// The camera a waypoint is placed with: its position and axes, its near plane, and the
+/// HUD surface size in pixels with its virtual-to-real scale.
+struct WaypointView {
+    eye: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    near: f32,
+    screen: Vec2,
+    scale: f32,
+}
+
+/// Screen position and size of a waypoint anchored at `world`. `project` maps a world
+/// point beyond the near plane to surface pixels and fails inside it.
+fn waypoint_screen(
+    elem: &HudElem,
+    world: Vec3,
+    view: &WaypointView,
+    project: impl Fn(Vec3) -> Option<Vec2>,
+) -> Option<(Vec2, f32)> {
+    let depth = (world - view.eye).dot(view.forward);
     let bits = elem.value as i32;
     let constant = bits & WAYPOINT_CONSTANT_SIZE != 0;
-    let scale = surface.scale_virtual_to_real()[1];
-    let (w, h) = (surface.width(), surface.height());
-    let mirrored = if depth <= 0.0 {
-        world - forward * (2.0 * depth - 1.0)
+    // Only the point's side of the screen matters once it is off screen. A point behind
+    // the camera is mirrored in front of it, and a point at or inside the near plane
+    // (right beside the camera) is moved just past it, so it still projects and clamps
+    // to the side edge instead of blinking out.
+    let probe_depth = if depth > view.near {
+        depth
     } else {
-        world
+        (1.0 - depth).max(view.near + 1.0)
     };
-    let pos = camera.world_to_viewport(transform, mirrored).ok()?;
-    let onscreen = depth > 0.0 && (0.0..=w).contains(&pos.x) && (0.0..=h).contains(&pos.y);
+    let pos = project(world + view.forward * (probe_depth - depth))?;
+    let (w, h) = (view.screen.x, view.screen.y);
+    let onscreen = depth > view.near && (0.0..=w).contains(&pos.x) && (0.0..=h).contains(&pos.y);
     if !constant {
         if !onscreen {
             return None;
         }
-        let edge = camera
-            .world_to_viewport(transform, world + *transform.right() * elem.width as f32)
-            .ok()?;
+        let edge = project(world + view.right * elem.width as f32)?;
         return Some((pos, (edge - pos).length()));
     }
-    let size = WAYPOINT_ICON_SIZE * scale;
+    let size = WAYPOINT_ICON_SIZE * view.scale;
     if onscreen {
         return Some((pos, size));
     }
     if bits & WAYPOINT_HIDE_OFFSCREEN != 0 {
         return None;
     }
-    let center = Vec2::new(w, h) * 0.5;
-    let half = (center - Vec2::splat(WAYPOINT_OFFSCREEN_PAD * scale)).max(Vec2::ONE);
+    let center = view.screen * 0.5;
+    let half = (center - Vec2::splat(WAYPOINT_OFFSCREEN_PAD * view.scale)).max(Vec2::ONE);
     let dir = pos - center;
     let reach =
         (half.x / dir.x.abs().max(f32::EPSILON)).min(half.y / dir.y.abs().max(f32::EPSILON));
@@ -273,7 +307,7 @@ pub(crate) fn update_hud_elems(
     mut pass: ResMut<HudTessPass>,
     mut sound_latch: ResMut<crate::hudelem::HudElemSoundLatch>,
     mut ui_sound: MessageWriter<UiPlaySound>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    cameras: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
     entities: Query<(&CEntity, &CEntityRuntime)>,
     view: Option<Res<frame::ViewSubject>>,
 ) {
@@ -362,7 +396,7 @@ pub(crate) fn update_hud_elems(
                 continue;
             }
             let placed = if elem.elem_type == HE_TYPE_WAYPOINT {
-                let Some(camera) = cameras.iter().find(|(c, _)| c.is_active) else {
+                let Some(camera) = cameras.iter().find(|(c, _, _)| c.is_active) else {
                     continue;
                 };
                 let Some((at, size)) = place_waypoint(elem, camera, &entities, &surface, eyes)
@@ -572,5 +606,34 @@ mod waypoint_anchor_tests {
     fn missing_target_entity_draws_nothing() {
         let e = elem(1.0, 2.0, 3.0, 5);
         assert_eq!(waypoint_anchor(&e, None, 0), None);
+    }
+
+    #[test]
+    fn waypoint_beside_the_camera_clamps_to_the_side_edge() {
+        // Camera at the origin looking down +X (Z up), near plane 2 units, 640x480 surface.
+        // A target at depth 0 cannot be projected where it is; it used to vanish.
+        let view = WaypointView {
+            eye: Vec3::ZERO,
+            forward: Vec3::X,
+            right: Vec3::NEG_Y,
+            near: 2.0,
+            screen: Vec2::new(640.0, 480.0),
+            scale: 1.0,
+        };
+        let project = |p: Vec3| {
+            let depth = p.dot(Vec3::X);
+            (depth >= 2.0).then(|| Vec2::new(320.0, 240.0) + Vec2::new(-p.y, -p.z) / depth * 320.0)
+        };
+        let mut e = elem(0.0, 0.0, 0.0, playerstate_iw4::ENTITYNUM_NONE);
+        e.value = WAYPOINT_CONSTANT_SIZE as f32;
+        let place = |y| waypoint_screen(&e, Vec3::new(0.0, y, 0.0), &view, project);
+        let (right, size) = place(-100.0).expect("a target on the right is drawn");
+        assert!(
+            right.abs_diff_eq(Vec2::new(640.0 - 24.0, 240.0), 1e-3),
+            "{right}"
+        );
+        assert_eq!(size, 24.0);
+        let (left, _) = place(100.0).expect("a target on the left is drawn");
+        assert!(left.abs_diff_eq(Vec2::new(24.0, 240.0), 1e-3), "{left}");
     }
 }
