@@ -209,6 +209,11 @@ pub struct SimState {
 
     last_pmove_walking: HashMap<ClientId, i32>,
 
+    /// Prediction worlds only: the command time and step height of a client's
+    /// last pmove that stepped (`Pml::step_view_change`), for the client's
+    /// camera smoothing. Never snapshotted, digested or compared.
+    last_pmove_step_view: HashMap<ClientId, (i32, f32)>,
+
     stuck_holdrand: u32,
 
     last_stuck_ejects: Vec<(ClientId, ClientId)>,
@@ -288,6 +293,7 @@ impl Default for SimState {
             presentation: PresentationQueue::default(),
             pending_final_kill: None,
             last_pmove_walking: HashMap::new(),
+            last_pmove_step_view: HashMap::new(),
             stuck_holdrand: 0,
             last_stuck_ejects: Vec::new(),
             last_anim_movement: HashMap::new(),
@@ -1118,6 +1124,7 @@ impl SimState {
         self.player_bodies.forget_client(id);
         self.collision_runtime.forget_client(id);
         self.last_pmove_walking.remove(&id);
+        self.last_pmove_step_view.remove(&id);
         self.last_anim_movement.remove(&id);
         self.anim_command_buttons.remove(&id);
     }
@@ -2205,6 +2212,16 @@ impl SimState {
 
     pub(crate) fn set_pmove_walking(&mut self, id: ClientId, walking: i32) {
         self.last_pmove_walking.insert(id, walking);
+    }
+
+    pub(crate) fn set_pmove_step_view(&mut self, id: ClientId, command_time: i32, change: f32) {
+        self.last_pmove_step_view.insert(id, (command_time, change));
+    }
+
+    /// The command time and height of the client's last step since this was
+    /// last taken (prediction worlds only).
+    pub fn take_pmove_step_view(&mut self, id: ClientId) -> Option<(i32, f32)> {
+        self.last_pmove_step_view.remove(&id)
     }
 
     pub(crate) fn stuck_holdrand_mut(&mut self) -> &mut u32 {

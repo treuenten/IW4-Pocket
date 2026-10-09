@@ -56,3 +56,15 @@ capsule rides walkable tread edges and the kept climb read as a jump) and
 checked with analytic fixtures, a synthetic open-tread staircase and a
 headless run over Estate's clipmap. No retail, Quake or CoD source and no
 source of the replaced module was consulted.
+
+2026-10-09, step report. The solver's interface was widened without
+changing its logic: a traversal also returns the height its plain slide
+ended at, and `step_slide_move` returns how far the final height differs
+from it (a step up or the supported snap down, not travel along a slope)
+when the move started on a ground plane, off a ladder and alive, and the
+difference is over half a unit. Movement only reports the value through
+`Pml::step_view_change`; the client uses it to smooth its first-person
+camera, and nothing in `PlayerState`, snapshots or the network carries it.
+It was written from a behavioural description of MW2's view-height
+smoothing; no retail, Quake or CoD source and no source of the replaced
+module was consulted.

@@ -327,14 +327,24 @@ fn tangent(v: Vector, n: Vector) -> Vector {
     let out = core::array::from_fn(|i| (v[i] as f64 - along * n[i] as f64) as f32);
     if finite(out) { out } else { [0.; 3] }
 }
+/// Where a traversal ended, and the height its plain slide ended at before
+/// the supported snap or a step moved it.
+#[derive(Clone, Copy)]
+pub(crate) struct Traversal {
+    pub(crate) motion: Motion,
+    pub(crate) slide_z: f32,
+}
 pub(crate) fn traverse(
     m: Motion,
     s: Settings,
     trace: &impl Fn(Vector, Vector) -> Contact,
-) -> Motion {
+) -> Traversal {
     let m = clean(m);
     if !s.dt.is_finite() || s.dt <= 0. {
-        return m;
+        return Traversal {
+            motion: m,
+            slide_z: m.origin[2],
+        };
     }
     let all_solid = core::cell::Cell::new(false);
     let baseline_trace = |a, b| {
@@ -345,8 +355,10 @@ pub(crate) fn traverse(
         hit
     };
     let (mut baseline, obstructed) = slide(m, s, &baseline_trace);
+    let slide_z = baseline.origin[2];
+    let done = |motion| Traversal { motion, slide_z };
     if all_solid.get() {
-        return baseline;
+        return done(baseline);
     }
     if s.ground.and_then(normal).is_some()
         && let Some(snapped) = land(baseline, s.snap_down, s, trace)
@@ -359,23 +371,23 @@ pub(crate) fn traverse(
         || !s.step_height.is_finite()
         || s.step_height <= 0.
     {
-        return baseline;
+        return done(baseline);
     }
     let horizontal = libm::sqrt(dot(
         [m.velocity[0], m.velocity[1], 0.],
         [m.velocity[0], m.velocity[1], 0.],
     ));
     if horizontal <= 1e-12 {
-        return baseline;
+        return done(baseline);
     }
     let mut up = m.origin;
     up[2] += s.step_height;
     let Some((_, raised)) = sweep(m.origin, up, trace) else {
-        return baseline;
+        return done(baseline);
     };
     let rise = raised[2] - m.origin[2];
     if rise <= 0. {
-        return baseline;
+        return done(baseline);
     }
     let elevated = Motion {
         origin: raised,
@@ -393,7 +405,7 @@ pub(crate) fn traverse(
     airborne.ground = None;
     let (advanced, _) = slide(elevated, airborne, &checked_trace);
     if rejected.get() {
-        return baseline;
+        return done(baseline);
     }
     let search = rise
         + if s.snap_down.is_finite() {
@@ -402,21 +414,23 @@ pub(crate) fn traverse(
             0.
         };
     let Some(landed) = land(advanced, search, s, trace) else {
-        return baseline;
+        return done(baseline);
     };
     if landed.origin[2] - m.origin[2] > s.step_height {
-        return baseline;
+        return done(baseline);
     }
     let progress = |p: Vector| {
         ((p[0] as f64 - m.origin[0] as f64) * m.velocity[0] as f64
             + (p[1] as f64 - m.origin[1] as f64) * m.velocity[1] as f64)
             / horizontal
     };
-    if progress(landed.origin) - progress(baseline.origin) > 0.001 {
-        landed
-    } else {
-        baseline
-    }
+    done(
+        if progress(landed.origin) - progress(baseline.origin) > 0.001 {
+            landed
+        } else {
+            baseline
+        },
+    )
 }
 pub(crate) fn project_ground(v: &mut Vector, n: &Vector) {
     if !finite(*v) || !finite(*n) || n[2] < 0.001 {
@@ -564,7 +578,7 @@ mod landing_tests {
             origin: [0., 0., 4.],
             velocity: [150., 0., 150.],
         };
-        let out = traverse(m, settings(Some(EDGE)), &plane([0., 0., 1.], 0., true));
+        let out = traverse(m, settings(Some(EDGE)), &plane([0., 0., 1.], 0., true)).motion;
         assert!(libm::fabsf(out.origin[2]) < 1e-3, "{:?}", out.origin);
         assert!(close(out.velocity, [150., 0., 0.]), "{:?}", out.velocity);
     }

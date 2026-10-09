@@ -54,6 +54,7 @@ pub struct PresentedSnapshot {
 
     pose: HashMap<ClientId, PlayerState>,
     view_offset: [f32; 3],
+    step_view_z: f32,
     remote_provenance: HashMap<ClientId, PresentationSampleProvenance>,
 
     presented_projectiles: Vec<PresentedProjectile>,
@@ -73,6 +74,7 @@ impl PresentedSnapshot {
         self.trajectory_next = None;
         self.pose.clear();
         self.view_offset = [0.0; 3];
+        self.step_view_z = 0.0;
         self.remote_provenance.clear();
         self.presented_projectiles.clear();
     }
@@ -249,6 +251,16 @@ impl PresentedSnapshot {
 
     pub fn set_view_offset(&mut self, o: [f32; 3]) {
         self.view_offset = o;
+    }
+
+    /// How far below the local player's origin the first-person eye starts
+    /// while it glides up (or down) a step; see `client::step_view`.
+    pub fn step_view_z(&self) -> f32 {
+        self.step_view_z
+    }
+
+    pub fn set_step_view_z(&mut self, z: f32) {
+        self.step_view_z = z;
     }
 
     pub fn snapshot(&self) -> Option<&Snapshot> {
