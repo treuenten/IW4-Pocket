@@ -16,7 +16,7 @@ use entity_iw4::glass_add_damage;
 use movement_iw4::{Pml, is_in_air, mantle::is_weapon_inactive};
 use playerstate_iw4::{ENTITYNUM_NONE, PlayerState, mantle_flags};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use weapon_iw4::{
     AIM_SPREAD_MOVE_SPEED_THRESHOLD_DEFAULT, AimSpreadMotion, AimSpreadState, CURSOR_HINT_NONE,
     FireWeaponKind, MELEE_TRACE_OFFSETS, MeleeChargeState, OFFHAND_INV_SLOTS, OffhandCmd,
@@ -1166,6 +1166,23 @@ pub(crate) fn phase_emit(world: &FrameWorld, shots: &[AcceptedShot]) -> Vec<Emis
     out
 }
 
+/// Script models each shot has already damaged. A bullet that passes
+/// through a model enters several of its collision surfaces and gets a trace
+/// segment for each one; only the first damages the model, the same way the
+/// trace stops hitting a player once it has gone through them. A shotgun
+/// blast also damages a model once, not once per pellet: MW2's
+/// _destructible.gsc multiplies spread-weapon damage by MP_SHOTGUN_BIAS
+/// because "shotguns only do one notify".
+#[derive(Default)]
+struct ModelsDamaged(HashSet<(ShotId, crate::ScriptModelId)>);
+
+impl ModelsDamaged {
+    /// True the first time any bullet of this shot reaches `model`.
+    fn first_hit(&mut self, shot: ShotId, model: crate::ScriptModelId) -> bool {
+        self.0.insert((shot, model))
+    }
+}
+
 fn segment_is_shield(collider: Option<ColliderId>) -> bool {
     matches!(
         collider,
@@ -1183,6 +1200,7 @@ pub(crate) fn phase_trace(
 ) -> TracePhaseOutput {
     let mut output = TracePhaseOutput::default();
     let mut segment_ordinals = HashMap::<(ShotId, PelletId), u16>::new();
+    let mut models_damaged = ModelsDamaged::default();
     let mut pending: std::collections::VecDeque<_> =
         emissions.iter().copied().map(|em| (em, 0u8)).collect();
     while let Some((em, bounces)) = pending.pop_front() {
@@ -1511,7 +1529,9 @@ pub(crate) fn phase_trace(
                     {
                         continue;
                     }
-                    if let Some(target) = owner.script_model() {
+                    if let Some(target) = owner.script_model()
+                        && models_damaged.first_hit(em.shot_id, target)
+                    {
                         let bone = match segment.collider {
                             Some(ColliderId::EntityDObjBone { bone, .. }) => {
                                 Some(usize::from(bone))
@@ -1911,5 +1931,33 @@ pub(crate) fn raise_given_weapon(
             entity_iw4::EntityEventKind::FIRST_RAISE_WEAPON.0,
             0,
         );
+    }
+}
+
+#[cfg(test)]
+mod model_damage_tests {
+    use super::*;
+    use crate::ScriptModelId;
+
+    #[test]
+    fn a_bullet_damages_a_model_once_however_many_surfaces_it_enters() {
+        let mut damaged = ModelsDamaged::default();
+        let (sentry, car) = (ScriptModelId::from_wire(7), ScriptModelId::from_wire(9));
+        // One rifle round goes in and out of three sentry surfaces, then a car.
+        let hits: Vec<bool> = [sentry, sentry, sentry, car]
+            .into_iter()
+            .map(|model| damaged.first_hit(ShotId(3), model))
+            .collect();
+        assert_eq!(hits, [true, false, false, true]);
+    }
+
+    #[test]
+    fn a_shotgun_blast_damages_a_model_once_and_the_next_shot_again() {
+        let mut damaged = ModelsDamaged::default();
+        let car = ScriptModelId::from_wire(9);
+        let pellets: Vec<bool> = (0..8).map(|_| damaged.first_hit(ShotId(3), car)).collect();
+        assert_eq!(pellets.iter().filter(|hit| **hit).count(), 1);
+        assert!(pellets[0]);
+        assert!(damaged.first_hit(ShotId(4), car));
     }
 }
