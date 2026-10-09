@@ -62,7 +62,11 @@ changing its logic: a traversal also returns the height its plain slide
 ended at, and `step_slide_move` returns how far the final height differs
 from it (a step up or the supported snap down, not travel along a slope)
 when the move started on a ground plane, off a ladder and alive, and the
-difference is over half a unit. Movement only reports the value through
+difference is over half a unit. When the slide stopped short having met
+nothing but its own ground plane (it can stall moving along a smooth brush
+ramp) and the step route finished the move, the slide's end is first
+carried on along its own velocity, so the ramp's rise is not reported as a
+step. Movement only reports the value through
 `Pml::step_view_change`; the client uses it to smooth its first-person
 camera, and nothing in `PlayerState`, snapshots or the network carries it.
 It was written from a behavioural description of MW2's view-height
