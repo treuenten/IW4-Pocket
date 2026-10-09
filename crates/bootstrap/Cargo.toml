@@ -30,6 +30,7 @@ audio.workspace = true
 console.workspace = true
 diag.workspace = true
 frame.workspace = true
+fx_iw4.workspace = true
 master_protocol.workspace = true
 render.workspace = true
 render_gpu.workspace = true

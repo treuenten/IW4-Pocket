@@ -203,6 +203,8 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_CHEAT_MENU" => matches!(value, "0" | "1"),
         // Keep the last 45 s of snapshots for the console `clip` command (off on iOS).
         "IW4L_CLIP_RING" => matches!(value, "0" | "1"),
+        // Effect randomness from a 64-bit integer mixer instead of BLAKE3 (off by default).
+        "IW4L_FX_FAST_RANDOM" => matches!(value, "0" | "1"),
         // Health fields in the logs: memory, thermal state, Low Power Mode,
         // main-thread CPU, graphics-chip time, sim tick timing and memory
         // warnings (see crate::health). On by default; 0 turns all of it off.
@@ -326,6 +328,9 @@ mod tests {
         assert!(valid_file_setting("IW4L_CLIP_RING", "0"));
         assert!(valid_file_setting("IW4L_CLIP_RING", "1"));
         for v in ["on", "off", "2", "", "1\0"] { assert!(!valid_file_setting("IW4L_CLIP_RING", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_FX_FAST_RANDOM", "0"));
+        assert!(valid_file_setting("IW4L_FX_FAST_RANDOM", "1"));
+        for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_FX_FAST_RANDOM", v), "{v:?}"); }
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "0"));
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "1"));
         for v in ["on", "off", "false", "2", "", " 0", "0\0"] { assert!(!valid_file_setting("IW4L_HEALTH_LOG", v), "{v:?}"); }

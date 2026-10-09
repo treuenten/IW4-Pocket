@@ -2032,6 +2032,7 @@ dependencies = [
  "console",
  "diag",
  "frame",
+ "fx_iw4",
  "hud",
  "libc",
  "master_protocol",

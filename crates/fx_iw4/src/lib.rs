@@ -263,7 +263,7 @@ pub use post_light::{
 pub use quat::{axis_to_quat, quat_nlerp, quat_normalize};
 pub use random::{
     FX_RANDOM_VERSION, FxRandomChannel, effect_random_key, elem_random_seed, elem_visual_index,
-    sample_at, sample_f32, sample_u16, trail_random_seed,
+    sample_at, sample_f32, sample_u16, set_fast_random, trail_random_seed,
 };
 pub use rotate_axis::{
     FX_DEG_TO_RAD, FX_RAD_TO_DEG, FX_RAND_ROT_DEGREES, impact_mark_axis, randomly_rotate_axis,

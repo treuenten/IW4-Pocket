@@ -37,6 +37,8 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
     app.insert_resource(audio::AudioRuntime::new(
         role != RuntimeRole::Dedicated && !audio::AudioSilent::active(),
     ));
+    // Before any effect can play: the source of effect randomness is fixed for the run.
+    fx_iw4::set_fast_random(fx_fast_random());
     app.add_plugins(AssetPlugin)
         .add_plugins(UiPlugin)
         .add_plugins(ConsolePlugin)
@@ -185,6 +187,21 @@ fn pipelined_rendering() -> bool {
         None => !cfg!(any(target_os = "macos", target_os = "ios")),
         Some(_) => perf::switch(PIPELINED_RENDERING_ENV),
     }
+}
+
+const FX_FAST_RANDOM_ENV: &str = "IW4L_FX_FAST_RANDOM";
+
+/// Draw effect randomness (particle size, colour, spin, velocity, spawn
+/// spread, which sprite) from a 64-bit integer mixer instead of BLAKE3. Only
+/// effects read these values; nothing in the sim or on the network does.
+///
+/// Off by default. BLAKE3 hashes a 37-48 byte tuple for every value, several
+/// per particle per frame: the largest single main-thread function on the Mac
+/// with 17 bots (1.1-1.9 s of every 30 s, Estate / Highrise). The mixer draws
+/// different values, so effects are as random but not particle for particle
+/// the same. `IW4L_FX_FAST_RANDOM=1` in iw4l-env.txt turns it on for the phone.
+fn fx_fast_random() -> bool {
+    perf::switch(FX_FAST_RANDOM_ENV)
 }
 
 const FRAME_LATENCY_ENV: &str = "IW4L_FRAME_LATENCY";
