@@ -293,48 +293,11 @@ fn boot_bots(
             continue;
         }
         let index = default_class_index(seed, bot.id, bot.class_picks);
-        let join_id = request_ids.allocate();
-        let class_request = request_ids.allocate();
-        let name_request = request_ids.allocate();
-        let queued = [
-            actions.push(
-                bot.id,
-                ClientAction::JoinMatch {
-                    request_id: join_id,
-                },
-            ),
-            team.map_or(Ok(()), |team| {
-                let request_id = request_ids.allocate();
-                match (
-                    sim::menu_response_field(sim::TEAM_MENU),
-                    sim::menu_response_field(team),
-                ) {
-                    (Some(menu), Some(response)) => actions.push(
-                        bot.id,
-                        ClientAction::MenuResponse {
-                            request_id,
-                            menu,
-                            response,
-                        },
-                    ),
-                    _ => Ok(()),
-                }
-            }),
-            actions.push(
-                bot.id,
-                ClientAction::ChooseDefaultClass {
-                    request_id: class_request,
-                    index,
-                },
-            ),
-            actions.push(
-                bot.id,
-                ClientAction::SetName {
-                    request_id: name_request,
-                    name: entity_iw4::pack_client_state_name(bot.name),
-                },
-            ),
-        ];
+        let name = entity_iw4::pack_client_state_name(bot.name);
+        let queued: Vec<_> = boot_batch(&mut request_ids, team, index, name)
+            .into_iter()
+            .map(|action| actions.push(bot.id, action))
+            .collect();
         if let Some(error) = queued.into_iter().find_map(Result::err) {
             diag::warn!(Sim, "bots: client {} not booted — {error}", bot.id.0);
             continue;
@@ -343,10 +306,51 @@ fn boot_bots(
         bot.class_picks += 1;
         diag::info!(
             Sim,
-            "bots: JoinMatch+changeclass client={} pick={index} request_id={class_request}",
+            "bots: JoinMatch+changeclass client={} pick={index} team={}",
             bot.id.0,
+            team.unwrap_or("auto"),
         );
     }
+}
+
+/// One bot's boot actions, in request-id order: the sim applies a client's
+/// actions sorted by request id. A sided bot answers the team menu right after
+/// JoinMatch, before its class pick, so the sim seats its team before the
+/// scripts connect it. That is how MW2's lobby places a player: sessionteam is
+/// set before Callback_PlayerConnect, and getTeamAssignment keeps it
+/// (_menus.gsc). With the class first, the bot would spawn on an auto-assigned
+/// team and then switch, and MW2 kills a live player who switches team
+/// (_menus.gsc menuAllies/menuAxis).
+fn boot_batch(
+    request_ids: &mut net::ActionRequestIds,
+    team: Option<&str>,
+    class_index: u8,
+    name: [u8; 16],
+) -> Vec<ClientAction> {
+    let mut batch = vec![ClientAction::JoinMatch {
+        request_id: request_ids.allocate(),
+    }];
+    if let Some(team) = team
+        && let (Some(menu), Some(response)) = (
+            sim::menu_response_field(sim::TEAM_MENU),
+            sim::menu_response_field(team),
+        )
+    {
+        batch.push(ClientAction::MenuResponse {
+            request_id: request_ids.allocate(),
+            menu,
+            response,
+        });
+    }
+    batch.push(ClientAction::ChooseDefaultClass {
+        request_id: request_ids.allocate(),
+        index: class_index,
+    });
+    batch.push(ClientAction::SetName {
+        request_id: request_ids.allocate(),
+        name,
+    });
+    batch
 }
 
 fn apply_bot_tp(
@@ -762,4 +766,43 @@ fn aim_viewangles(from: [f32; 3], target: [f32; 3]) -> [f32; 3] {
     }
     angles[0] = angles[0].clamp(-VIEW_PITCH_DOWN, VIEW_PITCH_DOWN);
     angles
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+
+    /// The batch as the sim applies it: sorted by request id.
+    fn applied(team: Option<&str>) -> Vec<ClientAction> {
+        let mut ids = net::ActionRequestIds::default();
+        let mut batch = boot_batch(&mut ids, team, 2, [0; 16]);
+        batch.sort_by_key(sim::action_request_id);
+        batch
+    }
+
+    #[test]
+    fn a_sided_bot_answers_the_team_menu_before_its_class() {
+        let batch = applied(Some("axis"));
+        assert_eq!(batch.len(), 4);
+        assert!(matches!(batch[0], ClientAction::JoinMatch { .. }));
+        let ClientAction::MenuResponse { menu, response, .. } = batch[1] else {
+            panic!("the team answer is not second: {batch:?}");
+        };
+        assert_eq!(sim::menu_response_text(&menu), sim::TEAM_MENU);
+        assert_eq!(sim::menu_response_text(&response), "axis");
+        assert!(matches!(
+            batch[2],
+            ClientAction::ChooseDefaultClass { index: 2, .. }
+        ));
+        assert!(matches!(batch[3], ClientAction::SetName { .. }));
+    }
+
+    #[test]
+    fn an_unsided_bot_sends_no_team_answer() {
+        let batch = applied(None);
+        assert_eq!(batch.len(), 3);
+        assert!(matches!(batch[0], ClientAction::JoinMatch { .. }));
+        assert!(matches!(batch[1], ClientAction::ChooseDefaultClass { .. }));
+        assert!(matches!(batch[2], ClientAction::SetName { .. }));
+    }
 }

@@ -352,6 +352,35 @@ pub(crate) fn note_team_answer(world: &mut World, client: u32, menu: &str) {
     }
 }
 
+/// A team answer that arrives before the scripts began the player seats its
+/// session team, the way MW2's lobby sets sessionteam before
+/// Callback_PlayerConnect. In a matchmaking game the connect callback then
+/// auto-assigns, and getTeamAssignment (_menus.gsc) keeps a sessionteam that
+/// is already allies or axis. The answer itself stays queued; once the class
+/// menu is open, deliver_answers drops it. An answer after begin is a live
+/// team switch and goes through the scripts unchanged.
+pub(crate) fn seat_team_answer(world: &mut World, client: u32, menu: &str, response: &str) {
+    if menu != TEAM_MENU {
+        return;
+    }
+    let team = match response {
+        "axis" => entity_iw4::TEAM_AXIS,
+        "allies" => entity_iw4::TEAM_ALLIES,
+        _ => return,
+    };
+    let begun = world
+        .resource::<Runtime>()
+        .players
+        .get(&client)
+        .is_some_and(|slot| slot.begun);
+    let mut frame = FrameWorld::from_world(world);
+    let id = ClientId(client);
+    if begun || !frame.bootstrap_ref().kind.is_team() || frame.client_meta(id).is_none() {
+        return;
+    }
+    frame.client_meta_mut(id).client_state_team = team;
+}
+
 fn push_answer(world: &mut World, client: u32, answer: MenuAnswer) {
     world
         .resource_mut::<Runtime>()
@@ -1703,5 +1732,57 @@ pub(crate) fn apply_player_links(world: &mut World) {
             link.parent_axis = axis;
             link.link_axis = link_axis;
         }
+    }
+}
+
+#[cfg(test)]
+mod seat_tests {
+    use super::*;
+
+    const BOT: u32 = 3;
+
+    /// A team match with client 3 joined (JoinMatch made its client record).
+    fn joined_bot() -> crate::SimWorld {
+        let mut sim = crate::SimWorld::default();
+        let mut frame = sim.frame();
+        frame
+            .bootstrap(crate::MatchBootstrap {
+                kind: gamemode_iw4::GameModeKind::Sabotage,
+                ..Default::default()
+            })
+            .expect("bootstrap");
+        frame.client_meta_mut(ClientId(BOT));
+        sim
+    }
+
+    #[test]
+    fn a_team_answer_before_begin_seats_the_team() {
+        let mut sim = joined_bot();
+        let mut frame = sim.frame();
+        seat_team_answer(frame.ecs(), BOT, "changeclass", "axis");
+        seat_team_answer(frame.ecs(), BOT, TEAM_MENU, "autoassign");
+        let unseated = frame.client_state_team(ClientId(BOT));
+        assert_ne!(unseated, Some(entity_iw4::TEAM_AXIS));
+        seat_team_answer(frame.ecs(), BOT, TEAM_MENU, "axis");
+        assert_eq!(
+            frame.client_state_team(ClientId(BOT)),
+            Some(entity_iw4::TEAM_AXIS)
+        );
+    }
+
+    #[test]
+    fn a_team_answer_after_begin_is_left_to_the_scripts() {
+        let mut sim = joined_bot();
+        let mut frame = sim.frame();
+        let mut slot = PlayerSlot::new(1);
+        slot.begun = true;
+        frame
+            .ecs()
+            .resource_mut::<Runtime>()
+            .players
+            .insert(BOT, slot);
+        let before = frame.client_state_team(ClientId(BOT));
+        seat_team_answer(frame.ecs(), BOT, TEAM_MENU, "allies");
+        assert_eq!(frame.client_state_team(ClientId(BOT)), before);
     }
 }
