@@ -301,24 +301,39 @@ fn aim_point(world: &mut World, object: u64, offset: [f32; 3]) -> Option<Vec3> {
     Some(Vec3::from_array(origin) + Vec3::from_array(offset))
 }
 
+/// Whether a turret on `own_team` shoots a player on `target_team`. No team,
+/// "none" (the session team of every player in free-for-all) or "free" means
+/// the turret shoots everyone; the owner exemption is the caller's.
+fn turret_hostile(own_team: Option<&str>, target_team: Option<&str>) -> bool {
+    match own_team {
+        None | Some("none" | "free") => true,
+        Some(own) => target_team != Some(own),
+    }
+}
+
 fn hostile(world: &mut World, turret: &Turret, target: u64) -> bool {
     if Some(target) == turret.owner {
         return false;
     }
-    let team = |world: &mut World, object: u64| match super::players::entity_field(
-        world, object, "team",
+    // The engine session team, never the GSC `team` field: in free-for-all
+    // MW2's getTeamAssignment still puts a random "allies" or "axis" there,
+    // while addToTeam sets the session team to "none". setTurretTeam is only
+    // called in team modes (_autosentry.gsc sentry_setOwner).
+    let session = |world: &mut World, object: u64| match super::players::entity_field(
+        world,
+        object,
+        "sessionteam",
     ) {
         Value::String(team) => Some(Arc::<str>::from(team)),
         _ => None,
     };
-    let own = turret
-        .team
-        .clone()
-        .or_else(|| turret.owner.and_then(|o| team(world, o)));
-    match own.as_deref() {
-        None | Some("free") => true,
-        Some(own) => team(world, target).as_deref() != Some(own),
-    }
+    let own = match (&turret.team, turret.owner) {
+        (Some(team), _) => Some(team.clone()),
+        (None, Some(owner)) => session(world, owner),
+        (None, None) => None,
+    };
+    let target_team = session(world, target);
+    turret_hostile(own.as_deref(), target_team.as_deref())
 }
 
 fn visible(world: &mut World, from: [f32; 3], to: Vec3, ignore: TraceIgnore, target: u64) -> bool {
@@ -580,4 +595,25 @@ pub(crate) fn fire_bullet(
             flags: 0,
             hitloc: 0,
         });
+}
+
+#[cfg(test)]
+mod turret_tests {
+    use super::turret_hostile;
+
+    #[test]
+    fn a_free_for_all_sentry_shoots_everyone() {
+        assert!(turret_hostile(Some("none"), Some("none")));
+        assert!(turret_hostile(Some("none"), Some("allies")));
+        assert!(turret_hostile(None, Some("axis")));
+        assert!(turret_hostile(Some("free"), Some("axis")));
+    }
+
+    #[test]
+    fn a_team_sentry_spares_its_own_team() {
+        assert!(!turret_hostile(Some("allies"), Some("allies")));
+        assert!(turret_hostile(Some("allies"), Some("axis")));
+        assert!(turret_hostile(Some("axis"), Some("allies")));
+        assert!(turret_hostile(Some("axis"), None));
+    }
 }
