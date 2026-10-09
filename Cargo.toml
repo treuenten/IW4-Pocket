@@ -259,3 +259,19 @@ strip = "none"
 inherits = "play"
 strip = "none"
 debug = 0
+
+# The phone build to hand out: `release`'s fat LTO in one codegen unit (the A/B above
+# [profile.release]: wall p50 -5.7% on the Mac), symbol names kept like `ios`, and DWARF
+# line tables packed into iw4l.dSYM beside the binary, so an iOS crash report
+# symbolicates to file and line (keep the dSYM with the build). Not the deploy loop:
+# that link is the ~13 min, ~6.6 GB one described above [profile.play].
+# `cargo build --profile ios-release --target aarch64-apple-ios -p launcher --bin iw4l`
+# writes target/aarch64-apple-ios/ios-release/iw4l.
+[profile.ios-release]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+incremental = false
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"
