@@ -59,8 +59,18 @@ fn main() {
     // keeps the manifest describing the binary rather than some earlier one.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", lock.display());
-    for head in ["HEAD", "refs"] {
-        let path = root.join(".git").join(head);
+    // In a linked worktree `.git` is a file: the worktree's HEAD lives in its
+    // own git directory and the branch refs in the common one, so a commit
+    // made there would otherwise never rerun this and the binary would name
+    // whatever revision the first build saw.
+    let git_dir = git(&root, &["rev-parse", "--absolute-git-dir"]).map(PathBuf::from);
+    let common_dir = git(&root, &["rev-parse", "--git-common-dir"]).map(|dir| root.join(dir));
+    let watched = [
+        git_dir.map(|dir| dir.join("HEAD")),
+        common_dir.as_ref().map(|dir| dir.join("refs")),
+        common_dir.map(|dir| dir.join("packed-refs")),
+    ];
+    for path in watched.into_iter().flatten() {
         if path.exists() {
             println!("cargo:rerun-if-changed={}", path.display());
         }
