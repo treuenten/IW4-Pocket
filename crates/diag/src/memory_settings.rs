@@ -201,6 +201,8 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         // Testing cheat menu in the pause menu: God Mode, Unlimited Ammo, killstreaks,
         // bots. Local host only; off unless 1.
         "IW4L_CHEAT_MENU" => matches!(value, "0" | "1"),
+        // Keep the last 45 s of snapshots for the console `clip` command (off on iOS).
+        "IW4L_CLIP_RING" => matches!(value, "0" | "1"),
         // Personal build only: console lines run when the first match starts
         // (e.g. `bot add 5`). Not for upstream, which excludes engine controls.
         "IW4L_CMDS" => !value.contains('\0'),
@@ -317,6 +319,9 @@ mod tests {
         assert!(valid_file_setting("IW4L_CHEAT_MENU", "0"));
         assert!(valid_file_setting("IW4L_CHEAT_MENU", "1"));
         for v in ["on", "2", "", "1\0"] { assert!(!valid_file_setting("IW4L_CHEAT_MENU", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_CLIP_RING", "0"));
+        assert!(valid_file_setting("IW4L_CLIP_RING", "1"));
+        for v in ["on", "off", "2", "", "1\0"] { assert!(!valid_file_setting("IW4L_CLIP_RING", v), "{v:?}"); }
         for name in ["IW4L_DT_SNAP", "IW4L_FRAME_STATS"] {
             assert!(valid_file_setting(name, "0"));
             assert!(valid_file_setting(name, "1"));

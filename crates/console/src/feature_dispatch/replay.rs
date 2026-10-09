@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::replay::{
-    CLIP_DEMO_FILE, CLIP_DUMP_FILE, CLIP_MANIFEST_FILE, CLIP_MS, ClipRing, MatchRecordIdentity,
-    Recording, ReplaySession,
+    CLIP_DEMO_FILE, CLIP_DUMP_FILE, CLIP_MANIFEST_FILE, CLIP_MS, CLIP_RING_ENV, ClipRing,
+    MatchRecordIdentity, Recording, ReplaySession,
 };
 use bevy::prelude::*;
 use frame::{LaunchIdentity, RuntimeRole};
@@ -210,6 +210,18 @@ pub(crate) fn route_replay_commands(
             "clip" => {
                 if parse_clip_args(&cmd.args).is_err() {
                     echo("usage: clip".into(), console, line);
+                    continue;
+                }
+                if !ring.is_enabled() {
+                    echo(
+                        format!(
+                            "clip: the clip ring is off; set {CLIP_RING_ENV}=1 \
+                             (iw4l-env.txt on the phone) and restart to keep the last {}s",
+                            CLIP_MS / 1000
+                        ),
+                        console,
+                        line,
+                    );
                     continue;
                 }
                 if ring.is_empty() {

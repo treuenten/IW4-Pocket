@@ -83,7 +83,8 @@ impl Plugin for ReplayPlugin {
             (
                 record_received_ticks
                     .after(ClientSet::Receive)
-                    .before(ClientSet::Reconcile),
+                    .before(ClientSet::Reconcile)
+                    .run_if(|ring: Res<ClipRing>| ring.is_enabled()),
                 sync_theater_occupancy
                     .in_set(ClientSet::Load)
                     .after(SessionSwapApplied),
@@ -133,7 +134,7 @@ fn record_received_ticks(
         return;
     }
     for tick in &received.0 {
-        ring.push(tick.snapshot.clone());
+        ring.record(&tick.snapshot);
     }
 }
 
@@ -147,8 +148,9 @@ fn record_server_tick(
     let Some(tick) = server_tick.0.as_ref() else {
         return;
     };
+    // The ring is optional; the demo `record` below is not.
     if role.runs_authority() {
-        ring.push(tick.snapshot.clone());
+        ring.record(&tick.snapshot);
     }
     let Some(recording) = session.0.as_mut() else {
         return;

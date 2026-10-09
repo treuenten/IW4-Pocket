@@ -77,7 +77,9 @@ with no map installed. `bot` is
 `add | dummy | hold | tp | give | fire`; `dump [name]` writes the current snapshot into
 `dumps/`. `clip` writes the last available 45 s into `clips/<ULID>/` (demo + dump)
 on host and clients — the host records authority, a client the snapshots it
-received plus its own presented state; `demo LATEST` plays it back.
+received plus its own presented state; `demo LATEST` plays it back. The ring behind
+it is on by default on desktop and off on iOS; `IW4L_CLIP_RING=0|1` overrides (on the
+phone, in `iw4l-env.txt`), and with it off `clip` says so and saves nothing.
 
 * `god` toggles invincibility for a live player; repeat it to turn protection off. It blocks damage while cheats are enabled; `kill` still forces death. It is refused while dead or in the killcam, so scripts write `wait alive; god`.
 * `player_sustainAmmo [0|1]` is MW2's dvar as a verb: while on, firing does not spend the magazine (a bare call toggles). Turning it on also fills the magazine and reserve of every weapon held. The flag lives in the replicated client dvars, so prediction agrees with the host.
