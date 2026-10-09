@@ -18,23 +18,35 @@ fn object_of(world: &World, receiver: &Value) -> Result<u64, String> {
     super::natives::engine::entity_id(world, receiver)
 }
 
+/// The use state an entity gets the first time a script sets its hint, its
+/// cursor, its usability or a player bar on it.
+///
+/// MW2 map use triggers are usable from spawn. setHintString and
+/// setCursorHint only set what the hint shows, and no MP script calls
+/// makeUsable on a trigger: the bomb sites (_gameobjects.gsc setUseHintText,
+/// called from sab.gsc resetBombsite, sd.gsc and dd.gsc), vending machines
+/// (_dynamic_world.gsc vending_machine) and elevators (_elevator.gsc) just set
+/// a hint and wait for "trigger". Script models stay unusable until
+/// makeUsable (_airdrop.gsc crateSetupForUse, _autosentry.gsc).
+fn new_usable(classname: &str) -> super::entities::Usable {
+    super::entities::Usable {
+        cursor: 1,
+        hint: -1,
+        enabled: super::triggers::is_use_trigger(classname),
+        barred: Default::default(),
+    }
+}
+
 fn usable<'a>(
     world: &'a mut World,
     receiver: &Value,
 ) -> Result<&'a mut super::entities::Usable, String> {
     let object = object_of(world, receiver)?;
     let runtime = world.resource_mut::<Runtime>().into_inner();
-    Ok(runtime
-        .entities
-        .get_mut(&object)
-        .unwrap()
+    let entity = runtime.entities.get_mut(&object).unwrap();
+    Ok(entity
         .usable
-        .get_or_insert_with(|| super::entities::Usable {
-            cursor: 1,
-            hint: -1,
-            enabled: false,
-            barred: Default::default(),
-        }))
+        .get_or_insert_with(|| new_usable(&entity.classname)))
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
@@ -208,4 +220,37 @@ pub(crate) fn select_usables(world: &mut World) {
         }
     }
     world.resource_mut::<Runtime>().use_selected = selected;
+}
+
+#[cfg(test)]
+mod usable_tests {
+    use super::super::triggers::is_use_trigger;
+    use super::*;
+
+    #[test]
+    fn a_hint_leaves_a_use_trigger_usable() {
+        assert!(new_usable("trigger_use").enabled);
+        assert!(new_usable("trigger_use_touch").enabled);
+    }
+
+    #[test]
+    fn other_entities_wait_for_make_usable() {
+        for classname in [
+            "script_model",
+            "script_brushmodel",
+            "trigger_multiple",
+            "trigger_radius",
+        ] {
+            assert!(!new_usable(classname).enabled, "{classname}");
+        }
+    }
+
+    #[test]
+    fn only_use_triggers_count_as_use_triggers() {
+        assert!(is_use_trigger("trigger_use"));
+        assert!(is_use_trigger("trigger_use_touch"));
+        assert!(!is_use_trigger("trigger_once"));
+        assert!(!is_use_trigger("trigger_damage"));
+        assert!(!is_use_trigger("script_model"));
+    }
 }

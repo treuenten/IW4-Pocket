@@ -587,6 +587,12 @@ fn fires(classname: &str) -> Option<Fires> {
     }
 }
 
+/// A map trigger that fires on a Use press. Dispatch and the usable state
+/// share this one rule.
+pub(crate) fn is_use_trigger(classname: &str) -> bool {
+    fires(classname) == Some(Fires::Use)
+}
+
 fn volume<'f>(runtime: &mut Runtime, frame: &'f FrameWorld, object: u64) -> Option<Volume<'f>> {
     let entity = runtime.entities.get(&object)?;
     let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
