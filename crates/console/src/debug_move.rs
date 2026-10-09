@@ -58,6 +58,13 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
             crate::CommandSpec::new("god").usage("god — toggle invincibility (needs cheats)"),
         );
     }
+    if registry.resolve(sim::SUSTAIN_AMMO_DVAR).is_none() {
+        registry.register(
+            crate::CommandSpec::new(sim::SUSTAIN_AMMO_DVAR)
+                .alias("sustainammo")
+                .usage("player_sustainAmmo [0|1] — firing does not spend the magazine; bare toggles (needs cheats)"),
+        );
+    }
     if registry.resolve("kill").is_none() {
         registry
             .register(crate::CommandSpec::new("kill").usage(
@@ -294,6 +301,68 @@ pub(crate) fn route_debug_move_commands(
                 }
                 echo(
                     format!("god: queued toggle request_id={request_id}"),
+                    &mut console,
+                    &mut line,
+                );
+            }
+            sim::SUSTAIN_AMMO_DVAR | "sustainammo" => {
+                let current = presented
+                    .snapshot()
+                    .and_then(|snapshot| snapshot.meta.for_client(local.0))
+                    .is_some_and(|meta| sim::sustains_ammo(&meta.client_dvars));
+                let on = match cmd.args.as_slice() {
+                    [] => !current,
+                    [value] if value == "1" => true,
+                    [value] if value == "0" => false,
+                    _ => {
+                        echo(
+                            "usage: player_sustainAmmo [0|1]".into(),
+                            &mut console,
+                            &mut line,
+                        );
+                        continue;
+                    }
+                };
+                if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
+                    echo(
+                        "player_sustainAmmo: cheats are off".into(),
+                        &mut console,
+                        &mut line,
+                    );
+                    continue;
+                }
+                if !alive(&presented, local.0) {
+                    echo(
+                        "player_sustainAmmo: not Alive — spawn a class first".into(),
+                        &mut console,
+                        &mut line,
+                    );
+                    continue;
+                }
+                let Some(inbox) = inbox.as_deref_mut() else {
+                    echo(
+                        "player_sustainAmmo: no action inbox".into(),
+                        &mut console,
+                        &mut line,
+                    );
+                    continue;
+                };
+                let request_id = seq.allocate();
+                if let Err(error) =
+                    inbox.push(local.0, ClientAction::SetSustainAmmo { request_id, on })
+                {
+                    echo(
+                        format!("player_sustainAmmo: {error}"),
+                        &mut console,
+                        &mut line,
+                    );
+                    continue;
+                }
+                echo(
+                    format!(
+                        "player_sustainAmmo: queued {} request_id={request_id}",
+                        u8::from(on)
+                    ),
                     &mut console,
                     &mut line,
                 );

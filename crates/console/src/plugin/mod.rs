@@ -236,6 +236,9 @@ impl Plugin for ConsolePlugin {
                 )
                     .chain(),
             );
+        if ui::cheat_menu_enabled() {
+            app.add_systems(Update, crate::cheat_menu::publish_state);
+        }
         crate::diagnostics::register_diagnostics_mirror(app);
     }
 }

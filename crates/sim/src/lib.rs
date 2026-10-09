@@ -110,6 +110,16 @@ pub const CONSTANT_RADAR_DVAR: &str = "scr_game_constantradar";
 pub const ENEMY_BOTS_DVAR: &str = "scr_game_enemybots";
 pub const FRIENDLY_BOTS_DVAR: &str = "scr_game_friendlybots";
 
+/// MW2's own cheat dvar: firing does not spend the magazine. Kept per client in
+/// the replicated client dvars, so the predicted world reads what the authority does.
+pub const SUSTAIN_AMMO_DVAR: &str = "player_sustainAmmo";
+
+pub fn sustains_ammo(client_dvars: &[(String, String)]) -> bool {
+    client_dvars
+        .iter()
+        .any(|(name, value)| name.eq_ignore_ascii_case(SUSTAIN_AMMO_DVAR) && value.trim() == "1")
+}
+
 pub const TEAM_MENU: &str = "team_marinesopfor";
 pub use match_state::{
     ClassDef, ClassRejectReason, ClientLifecycle, ClientSnapshotMeta,

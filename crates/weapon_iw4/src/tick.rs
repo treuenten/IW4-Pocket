@@ -699,6 +699,9 @@ pub struct WeaponCmd {
     pub perks0: u32,
 
     pub perk_weap_reload_multiplier: f32,
+
+    /// `player_sustainAmmo`: a shot is fired without spending the magazine.
+    pub sustain_ammo: bool,
 }
 
 impl Default for WeaponCmd {
@@ -734,6 +737,7 @@ impl Default for WeaponCmd {
             offhand: crate::offhand::OffhandCmd::default(),
             perks0: 0,
             perk_weap_reload_multiplier: PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT,
+            sustain_ammo: false,
         }
     }
 }
@@ -1249,7 +1253,9 @@ fn finish_weapon_tick(
                 && hand.clip > 1;
             cmd.weap_flags = (cmd.weap_flags & !0x200) | if double { 0x200 } else { 0 };
             let used = if double { 2 } else { facts.ammo_per_shot() }.min(hand.clip);
-            hand.clip -= used;
+            if !cmd.sustain_ammo {
+                hand.clip -= used;
+            }
             if facts.bolt_action {
                 hand.rechamber_pending = true;
             }

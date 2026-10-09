@@ -1,4 +1,5 @@
 pub mod barracks;
+mod cheat_menu;
 pub mod classes;
 mod community_servers;
 pub mod frontend;
@@ -13,6 +14,7 @@ mod options;
 mod plugin;
 mod screen;
 
+pub use cheat_menu::cheat_menu_enabled;
 pub use classes::equip_txn::{
     EquipTxnWatch, apply_pending_class_equip, resolve_class_equip_transaction,
     sync_class_change_allowed,

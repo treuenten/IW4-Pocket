@@ -111,6 +111,11 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
             out.put_u8(22);
             out.put_u32(request_id);
         }
+        ClientAction::SetSustainAmmo { request_id, on } => {
+            out.put_u8(23);
+            out.put_u32(request_id);
+            out.put_u8(u8::from(on));
+        }
         ClientAction::DebugDamage { request_id, amount } => {
             out.put_u8(10);
             out.put_u32(request_id);
@@ -304,6 +309,15 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
         22 => Ok(ClientAction::ToggleGod {
             request_id: input.get_u32()?,
         }),
+        23 => {
+            let request_id = input.get_u32()?;
+            let on = match input.get_u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(WireError::Malformed("bad sustain ammo tag")),
+            };
+            Ok(ClientAction::SetSustainAmmo { request_id, on })
+        }
         20 => Ok(ClientAction::ResupplyAmmo {
             request_id: input.get_u32()?,
         }),

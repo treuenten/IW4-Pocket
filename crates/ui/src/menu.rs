@@ -228,6 +228,7 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
             }
         }
     }
+    crate::cheat_menu::install(catalog);
     Ok(())
 }
 

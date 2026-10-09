@@ -1,5 +1,6 @@
 mod barracks_menu;
 pub mod binds;
+mod cheat_menu;
 mod class_dispatch;
 mod class_menu;
 mod command;

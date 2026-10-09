@@ -1144,6 +1144,39 @@ fn apply_action(
 
             ActionOutcome::Applied
         }
+        ClientAction::SetSustainAmmo { on, .. } => {
+            if !world.bootstrap_ref().allow_debug_actions
+                || !world
+                    .client_meta(id)
+                    .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
+            {
+                return ActionOutcome::Refused;
+            }
+            let value = if on { "1" } else { "0" }.to_owned();
+            let dvars = &mut world.client_meta_mut(id).client_dvars;
+            match dvars
+                .iter_mut()
+                .find(|(name, _)| name.eq_ignore_ascii_case(crate::SUSTAIN_AMMO_DVAR))
+            {
+                Some(row) => row.1 = value,
+                None => dvars.push((crate::SUSTAIN_AMMO_DVAR.to_owned(), value)),
+            }
+            if on {
+                for weapon in
+                    crate::script_player::weapons(world, id, crate::script_player::WeaponList::All)
+                {
+                    crate::script_player::give_full_ammo(world, id, weapon);
+                }
+            }
+            diag::info!(
+                Sim,
+                "sustain ammo: client={} {}",
+                id.0,
+                if on { "on" } else { "off" }
+            );
+
+            ActionOutcome::Applied
+        }
         ClientAction::DebugDamage {
             request_id: _,
             amount,

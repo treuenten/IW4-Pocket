@@ -700,6 +700,20 @@ pub(crate) fn give_max_ammo(world: &mut FrameWorld, id: ClientId, weapon: u32) {
     set_ammo_stock(world, id, weapon, facts.max_ammo);
 }
 
+/// Magazine and reserve both full, which is what a sustained weapon then keeps.
+pub(crate) fn give_full_ammo(world: &mut FrameWorld, id: ClientId, weapon: u32) {
+    give_max_ammo(world, id, weapon);
+    let Some(facts) = world.combat_facts_for(weapon) else {
+        return;
+    };
+    if world
+        .equipment_facts_for(weapon)
+        .is_none_or(|eq| !eq.is_offhand())
+    {
+        set_ammo_clip(world, id, weapon, facts.clip_size);
+    }
+}
+
 pub(crate) fn give_start_ammo(world: &mut FrameWorld, id: ClientId, weapon: u32) {
     let Some(facts) = world.combat_facts_for(weapon) else {
         return;

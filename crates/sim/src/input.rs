@@ -74,6 +74,11 @@ pub enum ClientAction {
         request_id: ActionRequestId,
     },
 
+    SetSustainAmmo {
+        request_id: ActionRequestId,
+        on: bool,
+    },
+
     DebugDamage {
         request_id: ActionRequestId,
         amount: i32,
@@ -221,6 +226,7 @@ pub fn action_request_id(action: &ClientAction) -> ActionRequestId {
         | ClientAction::Move { request_id, .. }
         | ClientAction::BeginScriptMoverRotateVelocity { request_id, .. }
         | ClientAction::ToggleGod { request_id }
+        | ClientAction::SetSustainAmmo { request_id, .. }
         | ClientAction::DebugDamage { request_id, .. }
         | ClientAction::SetName { request_id, .. }
         | ClientAction::SetProfile { request_id, .. }

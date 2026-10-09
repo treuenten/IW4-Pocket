@@ -452,6 +452,7 @@ pub(crate) fn advance_weapon_command(
             },
             perks0: ps.perks[0],
             perk_weap_reload_multiplier: weapon_iw4::PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT,
+            sustain_ammo: crate::sustains_ammo(&meta.client_dvars),
             offhand: {
                 let mut inventory = [OffhandInvRow::default(); OFFHAND_INV_SLOTS];
                 for (i, &slot) in ps.weapons.iter().enumerate() {

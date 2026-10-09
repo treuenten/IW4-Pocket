@@ -24,6 +24,16 @@ actions: `move`, `look`, `tp`, `nudge`, `god`, `kill`, `damage`, `force_spawn`,
 turns them off for `map`, `serve` and `menu`; a lobby host toggles them in the
 game setup.
 
+**Cheat menu (testing).** `IW4L_CHEAT_MENU=1` adds a CHEATS row to the in-match
+pause menu: God Mode and Unlimited Ammo toggles (their labels show the state), Add 5
+Bots, Start Match Now and Give rows for UAV, Care Package, Predator Missile, Precision
+Airstrike, Harrier Strike, AC-130 and Chopper Gunner. Each row runs the console verb of
+the same name (`god`, `player_sustainAmmo`, `bot add 5`, `force_match_start`,
+`give killstreak/<name>`), so pad (d-pad and A), touch and mouse all work as in any
+menu. Off by default. On the phone put the line in `iw4l-env.txt`; on the desktop it
+is an ordinary environment variable. The row is offered only to the host of a match
+with cheats on, never for a joined client, a public lobby or a master room.
+
 **GSC controls the start freeze.** `freezecontrols` constrains authority movement;
 snapshots carry the same constraints into client prediction and command replay.
 Wait for the loaded mode's countdown, or use the debug command:
@@ -49,7 +59,7 @@ it is part of the script and waits its turn.
 `map spawn class give attach name god kill damage move tp look nudge press hold
 release bind bot wait mark record stoprecord clip demo dump screenshot ui disconnect quit
 finish_run`
-plus the debug `force_match_start` / `showpos`. `quit` leaves now and abandons
+plus the debug `force_match_start` / `showpos` / `player_sustainAmmo`. `quit` leaves now and abandons
 whatever screenshot was queued or half-written; `finish_run` is the scripted
 ending that waits for those files first. `disconnect` leaves the session, not
 just the world — it also leaves the room, or closes it when hosting, and works
@@ -60,6 +70,7 @@ on host and clients — the host records authority, a client the snapshots it
 received plus its own presented state; `demo LATEST` plays it back.
 
 * `god` toggles invincibility for a live player; repeat it to turn protection off. It blocks damage while cheats are enabled; `kill` still forces death.
+* `player_sustainAmmo [0|1]` is MW2's dvar as a verb: while on, firing does not spend the magazine (a bare call toggles). Turning it on also fills the magazine and reserve of every weapon held. The flag lives in the replicated client dvars, so prediction agrees with the host.
 * ADS is `hold +speed_throw`, not `+speed`;
 * Hold Shift (`+breath_sprint`) or bind `+holdbreath` to steady eligible sights
   at full ADS. Breath lasts 4.5 seconds; releasing or exhausting it requires recovery.
