@@ -372,7 +372,24 @@ impl HudImages {
                 return Some(handle);
             }
         }
+        let started = std::time::Instant::now();
         let decoded = self.decode_iwd(ns, name, sampling, sampler, images);
+        if let Some(size) = decoded
+            .as_ref()
+            .and_then(|handle| images.get(handle))
+            .map(|image| image.texture_descriptor.size)
+        {
+            // Once per image: the decode runs on the main thread the first
+            // time a HUD element shows it.
+            diag::info!(
+                Ui,
+                "hud: `{}:{name}` decoded from the game files on first use: {}x{} in {:.1} ms",
+                ns.as_str(),
+                size.width,
+                size.height,
+                started.elapsed().as_secs_f32() * 1000.0
+            );
+        }
         self.by_name.insert(key, decoded.clone());
         decoded
     }

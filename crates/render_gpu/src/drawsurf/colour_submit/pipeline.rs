@@ -88,10 +88,19 @@ pub(super) fn kick_extracted_colour_pipelines(
     }
     registry.poll();
 
-    for key in registry.take_discovered() {
+    let mut first_use = FirstUseRequests::default();
+    for (key, kind) in registry.take_discovered() {
         if pipeline.get(key.port).is_some() {
-            request_exact_pipeline(&mut registry, &pipeline, &device, key);
+            let new = registry.slot(&key).is_none();
+            let slot = request_exact_pipeline(&mut registry, &pipeline, &device, key);
+            if new {
+                registry.mark_first_use(slot);
+                first_use.note(kind, &key);
+            }
         }
+    }
+    if let Some(line) = first_use.line() {
+        diag::info!(World, "exact pipelines: requested on first use: {line}");
     }
     kick_admitted_pipelines(
         extracted,
@@ -103,6 +112,35 @@ pub(super) fn kick_extracted_colour_pipelines(
         &mut warmup,
     );
     registry.flush(&device);
+}
+
+/// Pipelines a draw asked for that the load-time working set did not hold,
+/// counted by draw kind for one `requested on first use:` line per frame.
+#[derive(Default)]
+struct FirstUseRequests {
+    kinds: Vec<(&'static str, usize)>,
+    sample: Option<String>,
+}
+
+impl FirstUseRequests {
+    fn note(&mut self, kind: &'static str, key: &ExactColourPipelineKey) {
+        match self.kinds.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => *n += 1,
+            None => self.kinds.push((kind, 1)),
+        }
+        self.sample.get_or_insert_with(|| key.describe());
+    }
+
+    fn line(&self) -> Option<String> {
+        let sample = self.sample.as_ref()?;
+        let kinds = self
+            .kinds
+            .iter()
+            .map(|(kind, n)| format!("{kind}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(format!("{kinds} (first: {sample})"))
+    }
 }
 
 pub(super) fn kick_admitted_pipelines(

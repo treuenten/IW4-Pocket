@@ -78,6 +78,8 @@ enum SlotState {
 
 struct PortBuild {
     module: ModuleKey,
+    /// Wall time of the job (module plus its pipelines), for the first-use line.
+    built_ms: f32,
     created: Option<Arc<ShaderModule>>,
     /// Lean shaders: the module this job made and let go with its plans.
     released: Option<Weak<ShaderModule>>,
@@ -112,7 +114,12 @@ pub(super) struct ExactPipelineRegistry {
 
     layouts: Mutex<HashMap<BindGroupLayoutDescriptor, BindGroupLayout>>,
 
-    discovered: Mutex<Vec<super::colour_submit::ExactColourPipelineKey>>,
+    discovered: Mutex<Vec<(super::colour_submit::ExactColourPipelineKey, &'static str)>>,
+
+    /// Slots first asked for by a draw rather than by the load-time working
+    /// set, and when: their builds are logged when they finish (see
+    /// [`Self::poll`]).
+    first_use: HashMap<ExactPipelineSlot, std::time::Instant>,
 }
 
 impl ExactPipelineRegistry {
@@ -142,14 +149,22 @@ impl ExactPipelineRegistry {
             .clone()
     }
 
-    pub(super) fn discover(&self, key: super::colour_submit::ExactColourPipelineKey) {
+    /// A draw of `kind` found no pipeline for `key`; it is requested on the
+    /// next kick and the draw is refused until it is built.
+    pub(super) fn discover(
+        &self,
+        key: super::colour_submit::ExactColourPipelineKey,
+        kind: &'static str,
+    ) {
         self.discovered
             .lock()
             .expect("exact pipeline discovery list is never poisoned")
-            .push(key);
+            .push((key, kind));
     }
 
-    pub(super) fn take_discovered(&mut self) -> Vec<super::colour_submit::ExactColourPipelineKey> {
+    pub(super) fn take_discovered(
+        &mut self,
+    ) -> Vec<(super::colour_submit::ExactColourPipelineKey, &'static str)> {
         std::mem::take(
             &mut *self
                 .discovered
@@ -174,6 +189,10 @@ impl ExactPipelineRegistry {
 
     pub(super) fn is_ready(&self, slot: ExactPipelineSlot) -> bool {
         matches!(self.slots.get(slot.0 as usize), Some(SlotState::Ready(_)))
+    }
+
+    pub(super) fn mark_first_use(&mut self, slot: ExactPipelineSlot) {
+        self.first_use.insert(slot, std::time::Instant::now());
     }
 
     pub(super) fn request(
@@ -234,6 +253,27 @@ impl ExactPipelineRegistry {
             };
 
             drop(self.jobs.swap_remove(index));
+            let asked: Vec<std::time::Instant> = build
+                .pipelines
+                .iter()
+                .filter_map(|(slot, _)| self.first_use.remove(slot))
+                .collect();
+            if let Some(first) = asked.iter().min() {
+                diag::info!(
+                    World,
+                    "exact pipelines: first-use build done: {} of {} pipelines in {:.1} ms, ready {:.1} ms after the first draw asked (vertex type {}{})",
+                    asked.len(),
+                    build.pipelines.len(),
+                    build.built_ms,
+                    first.elapsed().as_secs_f32() * 1000.0,
+                    build.module.port.vertex_type,
+                    if build.module.cached_lighting {
+                        ", cached lighting"
+                    } else {
+                        ""
+                    }
+                );
+            }
             if let Some(created) = build.created {
                 self.modules.insert(build.module, created);
             }
@@ -282,6 +322,7 @@ fn build_port(
     lean: bool,
     plans: Vec<(ExactPipelineSlot, ExactPipelinePlan)>,
 ) -> PortBuild {
+    let started = std::time::Instant::now();
     let label = format!(
         "iw4_exact_colour/{:016x}/{}{}",
         module.port.vertex_program_hash,
@@ -313,6 +354,7 @@ fn build_port(
     let (created, released) = keep_or_release(created, lean);
     PortBuild {
         module,
+        built_ms: started.elapsed().as_secs_f32() * 1000.0,
         created,
         released,
         pipelines,

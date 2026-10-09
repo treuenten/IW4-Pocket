@@ -217,6 +217,24 @@ pub(super) struct ExactColourPipelineKey {
     forward_z: bool,
 }
 
+impl ExactColourPipelineKey {
+    /// The fields that tell first-use pipelines apart, for the log.
+    fn describe(&self) -> String {
+        format!(
+            "vertex_type={} target={:?} depth={:?} samples={} mark_mesh={} forward_z={} cached_lighting={} blend={:?} depth_write={}",
+            self.port.vertex_type,
+            self.target,
+            self.depth_format,
+            self.samples,
+            self.mark_mesh,
+            self.forward_z,
+            self.cached_lighting,
+            self.state0.blend,
+            self.state1.depth_write,
+        )
+    }
+}
+
 fn exact_colour_target_format(target: TextureFormat, srgb_write: bool) -> TextureFormat {
     if srgb_write {
         target.add_srgb_suffix()
@@ -1186,6 +1204,22 @@ enum ExactTessBind {
     ParticleCloud,
     MarkMesh,
     Glass,
+}
+
+impl ExactTessBind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::World => "world",
+            Self::Smodel => "smodel",
+            Self::SmodelCached => "smodel-cached",
+            Self::SmodelSkinned => "smodel-skinned",
+            Self::XModel => "xmodel",
+            Self::CodeMesh => "code-mesh",
+            Self::ParticleCloud => "particle-cloud",
+            Self::MarkMesh => "mark-mesh",
+            Self::Glass => "glass",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2744,7 +2778,7 @@ impl ExactPrepare<'_> {
                         };
 
                         let Some(pipeline) = self.registry.slot(&key) else {
-                            self.registry.discover(key);
+                            self.registry.discover(key, tess.name());
                             return Err(GpuSubmitRefusal::PipelineNotReady);
                         };
                         if !self.registry.is_ready(pipeline) {
