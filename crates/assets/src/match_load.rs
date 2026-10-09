@@ -35,6 +35,8 @@ pub struct MatchLoadRequest {
 struct MatchLoadTask {
     task: Task<Result<Option<PreparedMatchReady>, MapLoadFailed>>,
     request_id: u64,
+    load_key: frame::LocalLoadKey,
+    zone: String,
     progress: LoadProgress,
 }
 
@@ -139,6 +141,7 @@ fn start_match_load(
     let load_key = request.load_key;
     let zone = request.zone.clone();
     let zone_accepted = zone.clone();
+    let zone_task = zone.clone();
     let cancel_handle = progress.clone();
     // The process outlives the overlay and every task this spawns: it is what
     // the table reads, what admission finishes, and what the bench still has
@@ -208,6 +211,8 @@ fn start_match_load(
     commands.insert_resource(MatchLoadTask {
         task,
         request_id,
+        load_key,
+        zone: zone_task,
         progress: cancel_handle,
     });
     commands.remove_resource::<MatchLoadRequest>();
@@ -295,8 +300,16 @@ fn poll_match_load(
             task.request_id
         );
     }
-    let Some(outcome) = future::block_on(future::poll_once(&mut task.task)) else {
-        return;
+    // A panic in the walk (on a load thread, or in a task it waited on) is handed on
+    // by the task to whoever polls it, here. Bad map data is a map that failed to
+    // load, not a reason to close the app: the menu shows the map error instead.
+    let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        future::block_on(future::poll_once(&mut task.task))
+    }));
+    let outcome = match polled {
+        Ok(None) => return,
+        Ok(Some(outcome)) => outcome,
+        Err(panic) => Err(walk_panic_failure(task, panic.as_ref())),
     };
     let request_id = task.request_id;
     inflight.0 = false;
@@ -352,6 +365,29 @@ fn poll_match_load(
     commands.insert_resource(ready);
 }
 
+/// The walk panicked: the same failure a refused map gives, with the panic's text.
+/// The panic hook has already written where it happened (iOS: iw4l-boot.log with a
+/// backtrace; elsewhere stderr).
+fn walk_panic_failure(task: &MatchLoadTask, panic: &(dyn std::any::Any + Send)) -> MapLoadFailed {
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message");
+    diag::error!(
+        World,
+        "match load: walk request #{} (`{}`) panicked: {message} — reported as a failed map load",
+        task.request_id,
+        task.zone
+    );
+    MapLoadFailed {
+        request_id: task.request_id,
+        load_key: task.load_key,
+        zone: task.zone.clone(),
+        error: format!("The load stopped on an internal error: {message}"),
+    }
+}
+
 fn expire_match_load_abort(
     mut commands: Commands,
     abort: Option<Res<MatchLoadAbort>>,
@@ -384,4 +420,63 @@ pub fn register_match_load_systems(app: &mut App) {
             .after(frame::SessionSwapApplied)
             .in_set(ClientSet::Load),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::message::Messages;
+    use bevy::ecs::system::RunSystemOnce;
+    use std::time::{Duration, Instant};
+
+    fn bad_map_data(what: &str) -> Result<Option<PreparedMatchReady>, MapLoadFailed> {
+        panic!("xmodel surfaces: {what} runs past the end of the zone");
+    }
+
+    #[test]
+    fn a_panic_in_the_walk_is_a_failed_map_load() {
+        let pool = bevy::tasks::TaskPool::new();
+        let mut world = World::new();
+        world.insert_resource(MatchLoadBusy(true));
+        world.init_resource::<Messages<MapLoadFailed>>();
+        let load_key = frame::LocalLoadKey::from_request(7, frame::MatchKey::NONE, 1);
+        world.insert_resource(MatchLoadAccepted {
+            request_id: 7,
+            load_key,
+            zone: "mp_rust".into(),
+        });
+        world.insert_resource(MatchLoadTask {
+            task: pool.spawn(async { bad_map_data("index 4096") }),
+            request_id: 7,
+            load_key,
+            zone: "mp_rust".into(),
+            progress: LoadProgress::new(7),
+        });
+        let started = Instant::now();
+        while world.contains_resource::<MatchLoadTask>() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the walk never ended"
+            );
+            world.run_system_once(poll_match_load).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!world.resource::<MatchLoadBusy>().0);
+        assert!(!world.contains_resource::<MatchLoadAccepted>());
+        let failed: Vec<_> = world
+            .resource::<Messages<MapLoadFailed>>()
+            .iter_current_update_messages()
+            .cloned()
+            .collect();
+        assert_eq!(
+            failed,
+            [MapLoadFailed {
+                request_id: 7,
+                load_key,
+                zone: "mp_rust".into(),
+                error: "The load stopped on an internal error: xmodel surfaces: index 4096 runs past the end of the zone"
+                    .into(),
+            }]
+        );
+    }
 }

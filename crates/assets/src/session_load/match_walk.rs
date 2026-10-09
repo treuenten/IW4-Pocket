@@ -2,6 +2,25 @@ use super::*;
 
 static NEXT_PRODUCTS_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Test hook, not a setting: `IW4L_TEST_LOAD_PANIC=<zone>` makes the walk of that map
+/// panic on its load thread, in a task the walk waits on, right after the zone opens,
+/// as bad map data would. It exercises the way back to the menu
+/// (`match_load::poll_match_load`). iw4l-env.txt does not accept it, so the phone never
+/// has it.
+const TEST_LOAD_PANIC_ENV: &str = "IW4L_TEST_LOAD_PANIC";
+
+fn injected_load_panic(zone: &Path) {
+    let Some(stem) = zone.file_stem() else {
+        return;
+    };
+    if std::env::var_os(TEST_LOAD_PANIC_ENV).is_some_and(|target| target == stem) {
+        panic!(
+            "{TEST_LOAD_PANIC_ENV}={}: injected panic in the map walk",
+            stem.to_string_lossy()
+        );
+    }
+}
+
 pub(super) async fn walk_prepared_match(
     zone_ff: Result<PathBuf, String>,
     common_mp: Result<PathBuf, String>,
@@ -38,6 +57,7 @@ pub(super) async fn walk_prepared_match(
             let stage = progress.begin_scoped(StageId::MapAssets, "open", None);
             progress.begin_zone_open();
             let opened = open_zone_shared(&path);
+            injected_load_panic(&path);
             finish_zone_open(stage, &opened);
             let image = opened.map_err(|error| format!("open zone: {error}"))?;
             progress.record_zone_image_bytes(image.bytes.len());
