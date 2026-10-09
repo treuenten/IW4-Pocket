@@ -2181,6 +2181,7 @@ fn encode_corpse_pool(out: &mut WireWriter, pool: &PlayerCorpsePool) {
         }
         out.put_u8(u8::from(slot.falling));
         out.put_i32(slot.ground_entity_num);
+        out.put_i32(slot.spawn_time_ms);
     }
 }
 
@@ -2214,6 +2215,7 @@ fn decode_corpse_pool(input: &mut WireReader<'_>) -> Result<PlayerCorpsePool, Wi
                     tr_base: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
                     falling: input.get_u8()? != 0,
                     ground_entity_num: input.get_i32()?,
+                    spawn_time_ms: input.get_i32()?,
                 };
             }
             _ => return Err(WireError::Malformed("bad corpse slot tag")),
@@ -3136,4 +3138,47 @@ fn decode_objectives(input: &mut WireReader<'_>) -> Result<sim::ObjectiveMatch, 
         state.vehicle_targets.push(target);
     }
     Ok(state)
+}
+
+#[cfg(test)]
+mod corpse_pool_wire_tests {
+    use super::*;
+
+    #[test]
+    fn a_corpse_pool_round_trips_with_each_body_spawn_time() {
+        let mut pool = PlayerCorpsePool {
+            spawn_ring: 3,
+            ..PlayerCorpsePool::default()
+        };
+        pool.slots[1] = PlayerCorpseSlot {
+            occupied: true,
+            entnum: 1001,
+            victim: ClientId(4),
+            origin: [782.5, -1096.7, 190.1],
+            viewangles: [0.0, 180.0, 0.0],
+            anim: AnimPair {
+                legs_anim: 312,
+                torso_anim: 0,
+            },
+            view_height_current: 60.0,
+            weapon: 7,
+            e_flags: 0x20000,
+            tr_type: 5,
+            tr_time: 22_400,
+            tr_duration: 0,
+            tr_delta: [-80.0, 0.0, 12.5],
+            tr_base: [782.5, -1096.7, 190.1],
+            falling: true,
+            ground_entity_num: 2047,
+            spawn_time_ms: 22_350,
+        };
+        let mut out = WireWriter::new();
+        encode_corpse_pool(&mut out, &pool);
+        let bytes = out.finish();
+        let mut input = WireReader::new(&bytes);
+        let decoded = decode_corpse_pool(&mut input).expect("decodes");
+        assert!(input.is_empty());
+        assert_eq!(decoded, pool);
+        assert_eq!(decoded.slots[1].spawn_time_ms, 22_350);
+    }
 }

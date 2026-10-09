@@ -335,6 +335,9 @@ pub fn corpse_slot_to_entity_state(slot: &PlayerCorpseSlot) -> EntityState {
     es.number = slot.entnum;
     es.e_type = ET_PLAYER_CORPSE;
     es.client_num = i32::try_from(slot.victim.0).unwrap_or(0);
+    // time2 carries the body's death time. With the victim it names one body
+    // for its whole life; render_anim keys the death animation on the pair.
+    es.time2 = slot.spawn_time_ms;
     es.e_flags = slot.e_flags;
     es.tr_type = slot.tr_type;
     es.tr_time = slot.tr_time;

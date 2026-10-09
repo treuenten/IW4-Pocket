@@ -12,7 +12,7 @@ pub struct PersistentRemoteTree {
     pub(crate) legs_restart: bool,
     pub(crate) torso_restart: bool,
 
-    pub(crate) occupation_tr_time: Option<i32>,
+    pub(crate) occupation_key: Option<CorpseOccupationKey>,
 
     pub(crate) legs_rate_sample: ClientAnimSample,
 
@@ -80,16 +80,45 @@ pub fn skip_frozen_corpse_dobj(
     is_corpse && tree_reused && last_was_cache_hit && has_cache
 }
 
+/// Names one body for its whole life: the victim and the time it died. The
+/// body's trajectory (tr_type, tr_time, tr_base, tr_delta) changes while it
+/// falls, slides and lands, and must not restart its death animation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CorpseOccupationKey {
+    pub spawn_time_ms: i32,
+    pub victim: i32,
+}
+
+/// The corpse's entityState carries its death time in time2 (see
+/// net::corpse_slot_to_entity_state).
+pub fn corpse_occupation_key(es: &entity_iw4::EntityState) -> CorpseOccupationKey {
+    CorpseOccupationKey {
+        spawn_time_ms: es.time2,
+        victim: es.client_num,
+    }
+}
+
+/// Where a death clip starts when the corpse has no victim tree to blend
+/// from (it was first seen late, or its entity number now holds another
+/// body): as far into the clip as the body is old, so an old body shows the
+/// pose it already lies in instead of dying again.
+pub fn fresh_corpse_clip_time(age_ms: i32, clip_length_ms: i32) -> f32 {
+    if clip_length_ms <= 0 || age_ms <= 0 {
+        return 0.0;
+    }
+    (age_ms as f32 / clip_length_ms as f32).min(1.0)
+}
+
 pub fn clone_corpse_tree_from_victim(
     trees: &mut RemoteBodyTrees,
     corpse_ent: u32,
     victim: u32,
-    tr_time: i32,
+    key: CorpseOccupationKey,
 ) {
     if trees
         .by_ent
         .get(&corpse_ent)
-        .is_some_and(|slot| slot.occupation_tr_time == Some(tr_time))
+        .is_some_and(|slot| slot.occupation_key == Some(key))
     {
         return;
     }
@@ -100,7 +129,7 @@ pub fn clone_corpse_tree_from_victim(
     let mut dst = src;
     dst.dobj = None;
     dst.reuse_key = None;
-    dst.occupation_tr_time = Some(tr_time);
+    dst.occupation_key = Some(key);
     trees.by_ent.insert(corpse_ent, dst);
 }
 
@@ -121,6 +150,7 @@ pub fn advance_remote_tree(
     dt: f32,
     origin: [f32; 3],
     pose_time_ms: i32,
+    corpse_age_ms: Option<i32>,
     trees: &mut RemoteBodyTrees,
 ) -> Result<AdvancedRemoteTree, String> {
     let tree = binding.tree();
@@ -131,7 +161,7 @@ pub fn advance_remote_tree(
     let legs_restart = legs.restart_toggle();
     let torso_restart = torso.restart_toggle();
     let previous = trees.by_ent.remove(&persist_key);
-    let occupation_tr_time = previous.as_ref().and_then(|slot| slot.occupation_tr_time);
+    let occupation_key = previous.as_ref().and_then(|slot| slot.occupation_key);
     let prev = previous.filter(|slot| Arc::ptr_eq(&slot.binding, binding));
     let prev_restart_changed_legs = prev
         .as_ref()
@@ -170,6 +200,7 @@ pub fn advance_remote_tree(
             let overlayed = overlay_legs_clip(&clip, &torso_clip);
             (Arc::new(overlayed), Some(torso_clip))
         };
+        let fresh = prev.is_none();
         let old_legs = prev.as_ref().map(|slot| slot.legs).unwrap_or(0);
         let old_torso = prev.as_ref().map(|slot| slot.torso).unwrap_or(0);
         let old_legs_moving = prev
@@ -217,7 +248,7 @@ pub fn advance_remote_tree(
                 torso: 0,
                 legs_restart: false,
                 torso_restart: false,
-                occupation_tr_time,
+                occupation_key,
                 legs_rate_sample: ClientAnimSample::default(),
                 torso_rate_sample: ClientAnimSample::default(),
             },
@@ -284,6 +315,23 @@ pub fn advance_remote_tree(
                 .set_state(id, state)
                 .map_err(|error| error.to_string())?;
         }
+        if fresh && let Some(age_ms) = corpse_age_ms {
+            for (index, leaf_clip) in [
+                (legs_index, Some(&clip)),
+                (torso_index, torso_clip.as_ref()),
+            ] {
+                let Some(leaf_clip) = leaf_clip else {
+                    continue;
+                };
+                let time = fresh_corpse_clip_time(age_ms, leaf_clip.length_msec());
+                let mut state = slot.runtime.states()[index as usize];
+                state.time = time;
+                state.old_time = time;
+                slot.runtime
+                    .set_state(xmodel_runtime::XAnimNodeId(index), state)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         clips = Some(PoseClips {
             clip,
             torso_clip,
@@ -341,4 +389,55 @@ pub fn tree_clips_unchanged(
         && last_torso == torso
         && last_legs_restart == legs_restart
         && last_torso_restart == torso_restart
+}
+
+#[cfg(test)]
+mod corpse_occupation_tests {
+    use super::*;
+
+    fn corpse_state() -> entity_iw4::EntityState {
+        entity_iw4::EntityState {
+            number: 1001,
+            e_type: entity_iw4::ET_PLAYER_CORPSE,
+            time2: 22_350,
+            client_num: 4,
+            tr_type: entity_iw4::TR_GRAVITY,
+            tr_time: 22_350,
+            tr_delta: [-80.0, 0.0, 0.0],
+            tr_base: [782.0, -1095.0, 190.0],
+            legs_anim: 312,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_falling_sliding_or_landing_body_keeps_its_key() {
+        let key = corpse_occupation_key(&corpse_state());
+        let mut moved = corpse_state();
+        moved.tr_type = entity_iw4::TR_INTERPOLATE;
+        moved.tr_time = 0;
+        moved.tr_delta = [0.0; 3];
+        moved.tr_base = [700.0, -1095.0, 160.0];
+        assert_eq!(corpse_occupation_key(&moved), key);
+    }
+
+    #[test]
+    fn another_death_in_the_same_slot_gets_a_new_key() {
+        let key = corpse_occupation_key(&corpse_state());
+        let mut later = corpse_state();
+        later.time2 = 31_000;
+        assert_ne!(corpse_occupation_key(&later), key);
+        let mut other_victim = corpse_state();
+        other_victim.client_num = 5;
+        assert_ne!(corpse_occupation_key(&other_victim), key);
+    }
+
+    #[test]
+    fn a_body_first_seen_late_starts_as_far_into_its_clip_as_it_is_old() {
+        assert_eq!(fresh_corpse_clip_time(0, 1433), 0.0);
+        assert_eq!(fresh_corpse_clip_time(-50, 1433), 0.0);
+        assert_eq!(fresh_corpse_clip_time(716, 1432), 0.5);
+        assert_eq!(fresh_corpse_clip_time(3000, 1433), 1.0);
+        assert_eq!(fresh_corpse_clip_time(3000, 0), 0.0);
+    }
 }
