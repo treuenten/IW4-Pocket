@@ -11,5 +11,8 @@ playerstate_iw4.workspace = true
 trace_iw4.workspace = true
 libm = { version = "0.2.16", default-features = false }
 
+[dev-dependencies]
+clipmap_iw4.workspace = true
+
 [lints]
 workspace = true
