@@ -75,6 +75,7 @@ struct ScriptModelPoseLocals<'w, 's> {
     remap: Local<'s, Vec<Option<usize>>>,
     lod_skinned: Res<'w, render_scene::LodRampSkinnedDvar>,
     gfx_scene: Res<'w, HostGfxScene>,
+    sun_volume: Res<'w, render_scene::SunShadowCasterVolume>,
 }
 
 #[derive(SystemParam)]
@@ -86,6 +87,7 @@ struct ScriptModelTessLocals<'w, 's> {
     product_to_plan: Local<'s, Vec<usize>>,
     keep: Local<'s, Vec<bool>>,
     remap: Local<'s, Vec<Option<usize>>>,
+    object_ids_warned: Local<'s, bool>,
 }
 
 struct ScriptOwnerRow {
@@ -143,10 +145,39 @@ struct ScriptSceneSlot<'a> {
     skin_entries: &'a [dpvs_iw4::SceneEntSkinEntry],
 }
 
+/// The camera portal walk did not reach the model's entity this frame.
+const SCENE_ENT_HIDDEN: &str = "scene_ent_hidden";
+
+/// Script models number their object ids up from here, one per owner row.
+const SCRIPT_OBJECT_ID_BASE: u16 = 0x200;
+
+/// Owner rows that fit below the missile ids, which start at 0x400.
+const SCRIPT_OBJECT_ID_SLOTS: usize =
+    (crate::XMODEL_OBJECT_ID_MISSILE_BASE - SCRIPT_OBJECT_ID_BASE) as usize;
+
+/// The order commit numbers posed rows in: every camera-visible row first,
+/// then the shadow-only rows. Object ids are positions in the owner list, so a
+/// shadow-only row entering or leaving the sun volume never renumbers a model
+/// the camera sees.
+fn camera_visible_first<T>(
+    rows: &[T],
+    camera_hidden: impl Fn(&T) -> bool + Copy,
+) -> impl Iterator<Item = &T> {
+    rows.iter()
+        .filter(move |row| !camera_hidden(row))
+        .chain(rows.iter().filter(move |row| camera_hidden(row)))
+}
+
+/// A shadow-only row takes an object id only while one is left below the
+/// missile range. Visible rows are never refused here.
+fn shadow_only_row_fits(owners: usize) -> bool {
+    owners < SCRIPT_OBJECT_ID_SLOTS
+}
+
 fn script_scene_slot(scene: &render_scene::GfxScene, entnum: u32) -> ScriptSceneSlot<'_> {
     ScriptSceneSlot {
         skip: if scene.scene_ent_hidden(entnum) {
-            Some("scene_ent_hidden")
+            Some(SCENE_ENT_HIDDEN)
         } else if scene.scene_ent_surface_count(entnum) == Some(0) {
             Some("scene_ent_empty")
         } else {
@@ -568,6 +599,7 @@ fn pose_script_models(
         mut remap,
         lod_skinned,
         gfx_scene,
+        sun_volume,
     } = locals;
     live_assets.clear();
     live_ids.clear();
@@ -614,7 +646,8 @@ fn pose_script_models(
         let entnum = owner.gentity_number.map(u32::from);
 
         let slot = entnum.map(|entnum| script_scene_slot(&gfx_scene.scene, entnum));
-        if let Some(why) = slot.as_ref().and_then(|slot| slot.skip) {
+        let skip = slot.as_ref().and_then(|slot| slot.skip);
+        if let Some(why) = skip.filter(|&why| why != SCENE_ENT_HIDDEN) {
             if let Some(id) = focused_owner_id {
                 focus.refuse(id, &owner.current_model.0, why);
             }
@@ -622,11 +655,34 @@ fn pose_script_models(
         }
         let Some(skels) = presented_skels(&assets, &owner.dobj_state) else {
             if let Some(id) = focused_owner_id {
-                focus.refuse(id, &owner.current_model.0, "skeleton_unavailable");
+                focus.refuse(
+                    id,
+                    &owner.current_model.0,
+                    skip.unwrap_or("skeleton_unavailable"),
+                );
             }
             continue;
         };
         let origin = transform.translation.to_array();
+        let radius = skels
+            .first()
+            .and_then(|skel| skel.radius)
+            .unwrap_or(1.0)
+            .max(1.0);
+        let caster_bound = render_scene::XModelCasterBound { origin, radius };
+        // A model the camera walk hid can still throw its sun shadow into view,
+        // as the washing on Favela's lines does onto the wall below it while
+        // the line itself is above the top of the screen. It is posed as a
+        // shadow-only caster while its sphere touches a sun partition, the way
+        // world surfaces and static models cast from the sun views rather than
+        // from the camera view.
+        let shadow_only = skip == Some(SCENE_ENT_HIDDEN);
+        if shadow_only && !sun_volume.admits(caster_bound) {
+            if let Some(id) = focused_owner_id {
+                focus.refuse(id, &owner.current_model.0, SCENE_ENT_HIDDEN);
+            }
+            continue;
+        }
 
         if lod_culled(&skels, origin, eye, skinned_ramp) {
             if let Some(id) = focused_owner_id {
@@ -723,11 +779,6 @@ fn pose_script_models(
         };
         let box_half =
             crate::script_model_lighting_box_half(&assets, &owner.dobj_state.composition.models);
-        let radius = skels
-            .first()
-            .and_then(|skel| skel.radius)
-            .unwrap_or(1.0)
-            .max(1.0);
         product.rows.push(ScriptOwnerRow {
             entity,
             asset_index,
@@ -735,10 +786,10 @@ fn pose_script_models(
             model: owner.current_model.clone(),
             world_from_local: transform.to_matrix(),
             entnum,
-            camera_hidden: sphere_behind_frustum(origin, radius, &planes),
+            camera_hidden: shadow_only || sphere_behind_frustum(origin, radius, &planes),
             lighting_origin: owner.lighting_origin,
             lookup_fallback: atpoint.fallback(owner.lighting_origin, box_half),
-            caster_bound: render_scene::XModelCasterBound { origin, radius },
+            caster_bound,
         });
     }
     persist.by_id.retain(|id, _| live_ids.contains(id));
@@ -794,6 +845,7 @@ fn commit_script_model_draw_plan(
         mut product_to_plan,
         mut keep,
         mut remap,
+        mut object_ids_warned,
     } = locals;
     if product.producer_unavailable {
         plan.publish_no_rows();
@@ -889,7 +941,15 @@ fn commit_script_model_draw_plan(
     }
     retain_script_model_assets(&mut plan, &keep);
 
-    for row in &product.rows {
+    let mut shadow_only_refused = 0usize;
+    for row in camera_visible_first(&product.rows, |row| row.camera_hidden) {
+        if row.camera_hidden && !shadow_only_row_fits(owners.len()) {
+            shadow_only_refused += 1;
+            if let Some(id) = row.focused_owner_id {
+                focus.refuse(id, &row.model.0, "object_id_exhausted");
+            }
+            continue;
+        }
         let Some(&plan_index) = product_to_plan.get(row.asset_index) else {
             if let Some(id) = row.focused_owner_id {
                 focus.refuse(id, &row.model.0, "posed_asset_unavailable");
@@ -910,7 +970,7 @@ fn commit_script_model_draw_plan(
                 lookup_fallback: row.lookup_fallback,
             })
         });
-        let object_id = (owners.len() as u16).saturating_add(0x200);
+        let object_id = (owners.len() as u16).saturating_add(SCRIPT_OBJECT_ID_BASE);
         if let Some(id) = row.focused_owner_id {
             focus.frame = Some(RenderFocusFrame {
                 owner_id: id,
@@ -951,6 +1011,16 @@ fn commit_script_model_draw_plan(
                 caster_bound: Some(row.caster_bound),
             });
         }
+    }
+    if shadow_only_refused > 0 && !*object_ids_warned {
+        *object_ids_warned = true;
+        diag::warn!(
+            World,
+            "script model object ids exhausted: {} shadow-only casters dropped at {} owners (ids stop below missile id {:#x})",
+            shadow_only_refused,
+            owners.len(),
+            crate::XMODEL_OBJECT_ID_MISSILE_BASE,
+        );
     }
     plan.publish_frame_rows(&mut draws, &mut owners);
 }
@@ -1330,5 +1400,50 @@ fn publish_script_model_dobjs(
         {
             frame.publish(id, entity, persist.by_id[&id.to_wire()].dobj.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod object_id_tests {
+    use super::*;
+
+    #[test]
+    fn camera_visible_rows_number_first() {
+        // (name, camera_hidden) in pose order.
+        let rows = [
+            ("a", false),
+            ("b", true),
+            ("c", false),
+            ("d", true),
+            ("e", false),
+        ];
+        let order: Vec<&str> = camera_visible_first(&rows, |row| row.1)
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(order, ["a", "c", "e", "b", "d"]);
+    }
+
+    #[test]
+    fn a_shadow_only_row_coming_or_going_keeps_visible_ids() {
+        let ids = |rows: &[(&'static str, bool)]| -> Vec<(&'static str, usize)> {
+            camera_visible_first(rows, |row| row.1)
+                .enumerate()
+                .filter(|(_, row)| !row.1)
+                .map(|(id, row)| (row.0, id))
+                .collect()
+        };
+        let without = [("a", false), ("c", false)];
+        let with = [("a", false), ("hidden", true), ("c", false)];
+        assert_eq!(ids(&without), ids(&with));
+    }
+
+    #[test]
+    fn shadow_only_rows_stop_below_the_missile_ids() {
+        assert_eq!(SCRIPT_OBJECT_ID_SLOTS, 0x200);
+        assert!(shadow_only_row_fits(0));
+        assert!(shadow_only_row_fits(SCRIPT_OBJECT_ID_SLOTS - 1));
+        assert!(!shadow_only_row_fits(SCRIPT_OBJECT_ID_SLOTS));
+        let last = SCRIPT_OBJECT_ID_BASE + (SCRIPT_OBJECT_ID_SLOTS - 1) as u16;
+        assert!(last < crate::XMODEL_OBJECT_ID_MISSILE_BASE);
     }
 }

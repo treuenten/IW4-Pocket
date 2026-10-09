@@ -615,34 +615,77 @@ pub(crate) fn update_command_context_code_sources(
     if let Some(light) = dir_light.as_deref() {
         let _ = produce_sun_shadow_code_texture(&mut mat_frame.code_sources);
 
-        if let Some(scene) = scene.as_deref()
-            && let Some(bounds) = scene.world_bounds
+        if let Some(frame) = scene
+            .as_deref()
+            .and_then(|scene| sun_shadow_frame(&prepared, light, scene))
         {
-            let world_mid = [bounds[0], bounds[1], bounds[2]];
-            let world_half = [bounds[3], bounds[4], bounds[5]];
-            let shadow_forward = super::sun_shadow_forward_from_light_dir(light.direction);
-            let world = prepared.view_from_world.inverse();
-            let forward = world.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
-            let right = world.transform_vector3(Vec3::X).normalize_or_zero();
-            let up = world.transform_vector3(Vec3::Y).normalize_or_zero();
-            let (tx, ty) = super::tan_half_fov_from_clip(clip_from_view);
-            let frame = super::forced_fallback_frame(
-                shadow_forward,
-                super::SunShadowCamera {
-                    origin: eye.to_array(),
-                    forward: forward.to_array(),
-                    right: right.to_array(),
-                    up: up.to_array(),
-                    tan_half_fov_x: tx,
-                    tan_half_fov_y: ty,
-                    z_near: prepared.near,
-                },
-                world_mid,
-                world_half,
-                scene.sun_sample_size_near,
-            );
             produce_sun_shadow_receiver_constants(&mut mat_frame.code_sources, frame);
             mat_frame.sun_shadow = Some(frame);
         }
+    }
+}
+
+/// The sun-shadow frame for this view: both partitions' projections and the
+/// clip planes the sun pass culls its casters with. `None` when the world has
+/// no bounds to fit the shadow volume to.
+pub(crate) fn sun_shadow_frame(
+    prepared: &PreparedSceneView,
+    light: &MapDirPrimaryLight,
+    scene: &crate::prepare::scene::world::WorldScene,
+) -> Option<super::SunShadowForcedFrame> {
+    let bounds = scene.world_bounds?;
+    let world_mid = [bounds[0], bounds[1], bounds[2]];
+    let world_half = [bounds[3], bounds[4], bounds[5]];
+    let shadow_forward = super::sun_shadow_forward_from_light_dir(light.direction);
+    let world = prepared.view_from_world.inverse();
+    let forward = world.transform_vector3(Vec3::NEG_Z).normalize_or_zero();
+    let right = world.transform_vector3(Vec3::X).normalize_or_zero();
+    let up = world.transform_vector3(Vec3::Y).normalize_or_zero();
+    let (tx, ty) = super::tan_half_fov_from_clip(prepared.clip_from_view);
+    Some(super::forced_fallback_frame(
+        shadow_forward,
+        super::SunShadowCamera {
+            origin: prepared.eye.to_array(),
+            forward: forward.to_array(),
+            right: right.to_array(),
+            up: up.to_array(),
+            tan_half_fov_x: tx,
+            tan_half_fov_y: ty,
+            z_near: prepared.near,
+        },
+        world_mid,
+        world_half,
+        scene.sun_sample_size_near,
+    ))
+}
+
+/// Publishes this frame's sun-shadow partitions before any producer poses, so
+/// a model the camera walk hid can still be posed as a shadow caster when its
+/// shadow can land in view. It runs `sun_shadow_frame` on the same view, light
+/// and world that `update_command_context_code_sources` builds the shadow pass
+/// from this frame, so both see the same planes; a volume a frame old would
+/// drop a caster for a frame on a fast turn.
+pub(crate) fn publish_sun_shadow_caster_volume(
+    prepared: Res<PreparedSceneView>,
+    dir_light: Option<Res<MapDirPrimaryLight>>,
+    scene: Option<Res<crate::prepare::scene::world::WorldScene>>,
+    mut volume: ResMut<render_scene::SunShadowCasterVolume>,
+) {
+    // Mirrors the frame inputs above: a view that is not ready leaves last
+    // frame's sun shadow in place there, and here.
+    if !prepared.ready {
+        return;
+    }
+    let frame = dir_light.as_deref().and_then(|light| {
+        scene
+            .as_deref()
+            .and_then(|scene| sun_shadow_frame(&prepared, light, scene))
+    });
+    match frame {
+        Some(frame) => volume.set(
+            frame.partitions[0].clip_planes.as_slice(),
+            frame.partitions[1].clip_planes.as_slice(),
+        ),
+        None => volume.clear(),
     }
 }

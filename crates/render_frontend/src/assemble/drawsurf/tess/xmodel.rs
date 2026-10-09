@@ -176,6 +176,23 @@ fn scene_ent_admitted(scene: Option<&crate::GfxScene>, entnum: Option<u32>) -> b
     }
 }
 
+/// A script model's draw joins the merge when the camera walk admitted its
+/// entity, or when the producer kept it as a shadow-only caster (colour
+/// refused at the camera frustum) because its sun shadow can land in view
+/// while the model itself is off screen. The colour lane drops shadow-only
+/// draws, so admitting one adds a shadow and never a visible model. An entity
+/// that is gone, or whose scene entry has no surfaces, still stays out.
+#[must_use]
+fn script_draw_admitted(scene: Option<&crate::GfxScene>, draw: &XModelSurfaceDraw) -> bool {
+    if scene_ent_admitted(scene, draw.scene_entnum) {
+        return true;
+    }
+    draw.colour_refusal == Some(XModelColourRefusal::CameraFrustum)
+        && draw.scene_entnum.is_some_and(|n| {
+            scene.is_some_and(|s| s.scene_ent_live(n) && s.scene_ent_surface_count(n) != Some(0))
+        })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct XModelTopologyKey {
     generation: [u64; 8],
@@ -352,7 +369,7 @@ fn xmodel_merge_stamp(
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
     }
     for draw in scripts.draws() {
-        scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
+        script_draw_admitted(scene, draw).hash(&mut occupancy);
     }
     for draw in missiles.draws() {
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
@@ -591,7 +608,7 @@ pub fn merge_xmodel_draw_plan(
             .draws()
             .iter()
             .copied()
-            .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
+            .filter(|d| script_draw_admitted(scene, d)),
     );
 
     append_admitted_source(
@@ -1012,7 +1029,7 @@ fn refresh_concat_draws(
             .draws()
             .iter()
             .copied()
-            .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
+            .filter(|d| script_draw_admitted(scene, d)),
     );
     append_concat_owner_draws(
         merged,
@@ -1089,7 +1106,7 @@ fn admitted_mask(
     if scripts
         .draws()
         .iter()
-        .any(|d| scene_ent_admitted(scene, d.scene_entnum))
+        .any(|d| script_draw_admitted(scene, d))
     {
         admitted |= ADMIT_SCRIPT;
     }
@@ -1458,4 +1475,105 @@ pub(crate) fn apply_resolved_fx_model_lighting(
     mut plan: ResMut<FxModelDrawPlan>,
 ) {
     plan.finalize_lighting(&resolved);
+}
+
+#[cfg(test)]
+mod script_admission_tests {
+    use super::*;
+
+    const ENT: u32 = 40;
+
+    fn draw(entnum: Option<u32>, refusal: Option<XModelColourRefusal>) -> XModelSurfaceDraw {
+        XModelSurfaceDraw {
+            surface: 0,
+            material: 0,
+            world_from_local: Mat4::IDENTITY,
+            lighting_handle: 0,
+            pending_lighting: None,
+            colour_refusal: refusal,
+            object_id: 0x200,
+            scene_light_index: 0,
+            reflection_probe_index: 0,
+            packed_lighting: None,
+            is_scope: false,
+            scene_entnum: entnum,
+            body_client: None,
+            caster_bound: None,
+        }
+    }
+
+    /// A walked scene where `ENT` holds a scene dobj whose cull gate states
+    /// `surfaces` surfaces, marked visible by the walk or not.
+    fn scene(visible: bool, surfaces: u32) -> crate::GfxScene {
+        let mut scene = crate::GfxScene::default();
+        scene.clear();
+        scene.scene_ent_walked = true;
+        scene.scene_dobj_index[ENT as usize] = 0;
+        scene.scene_dobjs.push(crate::GfxSceneDobj {
+            origin: [0.0; 3],
+            lighting_origin: [0.0; 3],
+            radius: None,
+            info: 0,
+            quat: None,
+            cull_gate: dpvs_iw4::SCENE_DOBJ_GATE_SKINNED_BASE + surfaces,
+            posed_bounds: None,
+            lods: Vec::new(),
+            skinned_surfs: None,
+        });
+        if visible {
+            scene.mark_scene_ent_visible(ENT);
+        }
+        scene
+    }
+
+    const SHADOW_ONLY: Option<XModelColourRefusal> = Some(XModelColourRefusal::CameraFrustum);
+
+    #[test]
+    fn a_walk_visible_script_model_is_admitted() {
+        let scene = scene(true, 3);
+        assert!(script_draw_admitted(Some(&scene), &draw(Some(ENT), None)));
+        assert!(script_draw_admitted(
+            Some(&scene),
+            &draw(Some(ENT), SHADOW_ONLY)
+        ));
+    }
+
+    #[test]
+    fn a_walk_hidden_colour_draw_stays_out() {
+        let scene = scene(false, 3);
+        assert!(!script_draw_admitted(Some(&scene), &draw(Some(ENT), None)));
+    }
+
+    #[test]
+    fn a_walk_hidden_shadow_only_caster_is_admitted() {
+        let scene = scene(false, 3);
+        assert!(script_draw_admitted(
+            Some(&scene),
+            &draw(Some(ENT), SHADOW_ONLY)
+        ));
+    }
+
+    #[test]
+    fn a_shadow_only_caster_without_surfaces_stays_out() {
+        let scene = scene(false, 0);
+        assert!(!script_draw_admitted(
+            Some(&scene),
+            &draw(Some(ENT), SHADOW_ONLY)
+        ));
+    }
+
+    #[test]
+    fn a_shadow_only_caster_that_left_the_scene_stays_out() {
+        let scene = scene(false, 3);
+        assert!(!script_draw_admitted(
+            Some(&scene),
+            &draw(Some(ENT + 1), SHADOW_ONLY)
+        ));
+        assert!(!script_draw_admitted(None, &draw(Some(ENT), SHADOW_ONLY)));
+    }
+
+    #[test]
+    fn a_draw_without_an_entity_is_admitted_as_before() {
+        assert!(script_draw_admitted(None, &draw(None, None)));
+    }
 }

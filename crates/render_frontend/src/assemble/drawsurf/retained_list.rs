@@ -623,15 +623,13 @@ fn partition_dynamic_casters(
 /// A caster is kept unless its own sphere is wholly outside the partition.
 /// No planes and no bound both mean "kept": the partition that states nothing
 /// and the producer that states nothing each widen the volume rather than
-/// dropping a shadow.
+/// dropping a shadow. Producers ask `SunShadowCasterVolume` the same question
+/// before they decide to pose a model the camera does not see.
 fn dynamic_caster_kept(
     bound: Option<render_scene::XModelCasterBound>,
     planes: &[[f32; 4]],
 ) -> bool {
-    if planes.is_empty() {
-        return true;
-    }
-    bound.is_none_or(|bound| !bound.outside(planes))
+    render_scene::sun_partition_keeps(bound, planes)
 }
 
 pub(crate) fn merge_sun_shadow_caster_partitions(

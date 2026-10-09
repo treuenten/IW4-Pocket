@@ -75,6 +75,16 @@ impl Plugin for RenderAssemblePlugin {
                 .after(crate::prepare::scene::view_parms::stamp_prepared_scene_view)
                 .in_set(net::ClientSet::Present),
         );
+        // Producers pose models the camera walk hid when their shadow can land in
+        // view, so this frame's sun volume must be out before they pose.
+        app.add_systems(
+            Update,
+            crate::assemble::drawsurf::publish_sun_shadow_caster_volume
+                .after(crate::prepare::scene::view_parms::stamp_prepared_scene_view)
+                .after(crate::prepare::scene::sun_stage::update_active_sun_stage)
+                .before(frame::WorkerCmdSet::SkinModel)
+                .in_set(net::ClientSet::Present),
+        );
         app.add_systems(
             DrawLaneRebuild,
             (
