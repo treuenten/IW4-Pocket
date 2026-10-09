@@ -361,6 +361,15 @@ fn within_arcs(turret: &Turret, base: [f32; 3], dir: Vec3) -> bool {
     (-right..=left).contains(&yaw) && (-top..=bottom).contains(&pitch)
 }
 
+/// Automatic turrets pick only live players without Cold-Blooded. MW2's perk
+/// text reads "Undetectable by UAV, air support, sentries, and thermal"; the
+/// air-support half is checked in GSC (_helicopter.gsc, _harrier.gsc and
+/// _tank.gsc skip specialty_coldblooded targets), while sentry targets are
+/// picked by the engine, so the sentry half belongs here.
+fn turret_may_target(health: i32, perks: u32) -> bool {
+    health > 0 && perks & playerstate_iw4::PERK_COLDBLOODED == 0
+}
+
 fn acquire(world: &mut World, object: u64, turret: &Turret, from: [f32; 3]) -> Option<(u64, Vec3)> {
     if let Some((target, offset)) = turret.manual {
         return aim_point(world, target, offset).map(|at| (target, at));
@@ -384,7 +393,8 @@ fn acquire(world: &mut World, object: u64, turret: &Turret, from: [f32; 3]) -> O
             let frame = FrameWorld::from_world(world);
             frame
                 .player(ClientId(client))
-                .and_then(|ps| (ps.health > 0).then_some(ps.origin))
+                .filter(|ps| turret_may_target(ps.health, ps.perks[0]))
+                .map(|ps| ps.origin)
         };
         let Some(origin) = alive else { continue };
         if !hostile(world, turret, player) {
@@ -606,7 +616,15 @@ pub(crate) fn fire_bullet(
 
 #[cfg(test)]
 mod turret_tests {
-    use super::turret_hostile;
+    use super::{turret_hostile, turret_may_target};
+
+    #[test]
+    fn sentries_ignore_cold_blooded_and_dead_players() {
+        assert!(turret_may_target(100, 0));
+        assert!(!turret_may_target(100, playerstate_iw4::PERK_COLDBLOODED));
+        assert!(!turret_may_target(0, 0));
+        assert!(turret_may_target(30, playerstate_iw4::PERK_SCAVENGER));
+    }
 
     #[test]
     fn a_free_for_all_sentry_shoots_everyone() {
