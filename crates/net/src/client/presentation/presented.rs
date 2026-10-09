@@ -178,6 +178,12 @@ impl PresentedSnapshot {
         self.trajectory_time_ms.unwrap_or(render_time_ms)
     }
 
+    /// True for an archived (killcam seat) presentation, which samples
+    /// trajectories at its own delayed time rather than the render clock.
+    pub fn is_archived_replay(&self) -> bool {
+        self.trajectory_time_ms.is_some()
+    }
+
     /// The trajectory time and the next buffered snapshot for an archived
     /// (killcam seat) presentation; None for live play, which samples
     /// trajectories at the render clock.

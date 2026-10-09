@@ -55,6 +55,7 @@ fn remote_missile_link(
 #[derive(Default)]
 pub struct RemoteMissileView {
     held: Option<HeldMissileView>,
+    turn: MissileTurn,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,6 +63,80 @@ struct HeldMissileView {
     life: LifeSequence,
     projectile: ProjectileId,
     pose: WorldCameraPose,
+}
+
+/// The snapshots' link angles kept for one missile. The newest is the
+/// presented snapshot's and the camera looks a tick behind it; a clock that
+/// lags the snapshots by up to two ticks more still finds the pair around it.
+const TURN_SAMPLES: usize = 4;
+
+/// Which way the missile camera looks. The authority steers the missile once
+/// a tick, so the snapshots' link angles change in 20 Hz steps, and a camera
+/// that shows them as they come turns every third frame at 60 fps and stands
+/// still in between. As far as can be told without retail code, MW2 draws a
+/// linked camera from the entity's interpolated angles, between the two
+/// snapshots around the frame; this follows the same way, a tick behind the
+/// presentation clock, along the shortest arc between the snapshots. It never
+/// runs past the newest snapshot, so a missile that stops turning is shown
+/// stopping, not overshooting and swinging back.
+#[derive(Default)]
+struct MissileTurn {
+    missile: Option<(LifeSequence, ProjectileId)>,
+    /// Whether the samples came from a killcam seat's archived replay.
+    archived: bool,
+    /// (snapshot level time, link angles), oldest first.
+    samples: Vec<(i32, [f32; 3])>,
+}
+
+impl MissileTurn {
+    fn record(
+        &mut self,
+        missile: (LifeSequence, ProjectileId),
+        archived: bool,
+        snapshot_ms: i32,
+        angles: [f32; 3],
+    ) {
+        // The final killcam of the pilot's own kill replays the same missile
+        // of the same life. A seat stamps its snapshots with the live tick, so
+        // the replay's samples would follow the end of the flight in time and
+        // be blended with it; start over whenever the presentation changes.
+        if self.missile != Some(missile) || self.archived != archived {
+            self.missile = Some(missile);
+            self.archived = archived;
+            self.samples.clear();
+        }
+        match self.samples.last_mut() {
+            Some(last) if last.0 == snapshot_ms => last.1 = angles,
+            // Time ran backwards: nothing before it still applies.
+            Some(last) if last.0 > snapshot_ms => {
+                self.samples.clear();
+                self.samples.push((snapshot_ms, angles));
+            }
+            _ => {
+                if self.samples.len() == TURN_SAMPLES {
+                    self.samples.remove(0);
+                }
+                self.samples.push((snapshot_ms, angles));
+            }
+        }
+    }
+
+    /// The angles a tick behind `at_time`.
+    fn angles_at(&self, at_time: i32) -> Option<[f32; 3]> {
+        let shown = at_time.saturating_sub(AUTHORITY_MS);
+        let &(first_ms, first) = self.samples.first()?;
+        if shown <= first_ms {
+            return Some(first);
+        }
+        let Some(pair) = self.samples.windows(2).find(|pair| shown < pair[1].0) else {
+            return self.samples.last().map(|&(_, newest)| newest);
+        };
+        let ((from_ms, from), (to_ms, to)) = (pair[0], pair[1]);
+        let fraction = (shown - from_ms) as f32 / (to_ms - from_ms) as f32;
+        Some(std::array::from_fn(|i| {
+            from[i] + math_iw4::angle_subtract(to[i], from[i]) * fraction
+        }))
+    }
 }
 
 impl RemoteMissileView {
@@ -104,6 +179,7 @@ impl RemoteMissileView {
         let at_time = presented.trajectory_time_ms(render_time);
         let Some((link, life)) = remote_missile_link(presented, local) else {
             self.held = None;
+            self.turn = MissileTurn::default();
             return None;
         };
         self.held = self
@@ -121,9 +197,15 @@ impl RemoteMissileView {
             .flatten();
         let snapshot_ms = presented.tick().map_or(at_time, sim::level_time_ms);
         if let Some(missile) = flying {
+            self.turn.record(
+                (life, link.projectile),
+                presented.is_archived_replay(),
+                snapshot_ms,
+                link.angles,
+            );
             let pose = WorldCameraPose {
                 origin: missile_eye(missile, snapshot_ms, at_time, trace),
-                angles: link.angles,
+                angles: self.turn.angles_at(at_time).unwrap_or(link.angles),
             };
             self.held = Some(HeldMissileView {
                 life,
@@ -516,5 +598,213 @@ mod tests {
             view.camera_traced(&another, LOCAL, ms(TICK + 1), ground),
             None
         );
+    }
+
+    /// The pilot holds the stick over for six ticks from `TICK` and lets go:
+    /// the link angles the authority sends at `tick`, `step` degrees of yaw a
+    /// tick (a degree is the 20°/s full turn) and three quarters of that in
+    /// pitch, from `yaw` on.
+    fn steering(tick: u32, yaw: f32, step: f32) -> [f32; 3] {
+        let turned = tick.saturating_sub(TICK).min(6) as f32;
+        [
+            60.0 + 0.75 * step.abs() * turned,
+            (yaw + step * turned).rem_euclid(360.0),
+            0.0,
+        ]
+    }
+
+    /// The camera angles on 30 frames at 60 fps from `ms(TICK)` on. Live, a
+    /// frame draws the newest snapshot at or before its clock plus `lead` (a
+    /// snapshot that arrives before the clock reaches its time); a killcam
+    /// seat draws the archived one at or before the clock less its delay and
+    /// samples the flight there.
+    fn turn_frames(
+        angles: impl Fn(u32) -> [f32; 3],
+        lead: i32,
+        seat_delay: Option<i32>,
+    ) -> Vec<[f32; 3]> {
+        let mut view = RemoteMissileView::default();
+        (0..30)
+            .map(|frame| {
+                let now = ms(TICK) + seat_delay.unwrap_or(0) + (frame * 1000 + 30) / 60;
+                let behind = seat_delay.map(|delay| now - delay);
+                let drawn = behind.unwrap_or(now + lead);
+                let tick = u32::try_from(drawn.div_euclid(sim::MATCH_TICK_MS as i32)).unwrap();
+                let mut presented = presented(
+                    tick,
+                    Some(RemoteMissile {
+                        angles: angles(tick),
+                        ..link(None)
+                    }),
+                    1,
+                    Some(rocket()),
+                );
+                presented.set_trajectory_sample(behind, None);
+                view.camera_traced(&presented, LOCAL, now, open)
+                    .expect("the missile is flying")
+                    .angles
+            })
+            .collect()
+    }
+
+    /// Frame-to-frame turns, the short way round.
+    fn turns(frames: &[[f32; 3]]) -> Vec<[f32; 3]> {
+        frames
+            .windows(2)
+            .map(|pair| std::array::from_fn(|i| math_iw4::angle_subtract(pair[1][i], pair[0][i])))
+            .collect()
+    }
+
+    /// The camera a tick behind the clock: still until the clock is a tick
+    /// past `TICK` (frame 3), turning on every frame to frame 21 (the sixth
+    /// tick's angles, a tick behind), then still at the angles the pilot let
+    /// go at. Never more than a frame's share (17 ms of 50) of a tick's turn
+    /// in one frame, never past where the missile stopped.
+    #[track_caller]
+    fn assert_turns_every_frame(frames: &[[f32; 3]], step: f32, what: &str) {
+        let turns = turns(frames);
+        let most = step.abs() * 17.0 / 50.0 + 1e-3;
+        for (frame, turn) in turns.iter().enumerate().map(|(i, turn)| (i + 1, turn)) {
+            let [pitch, yaw, roll] = *turn;
+            assert_eq!(roll, 0.0, "{what}");
+            if (4..=21).contains(&frame) {
+                assert!(
+                    yaw * step.signum() > 0.0 && yaw.abs() <= most,
+                    "{what}, frame {frame}: turned {yaw} ({frames:?})"
+                );
+                assert!(
+                    pitch > 0.0 && pitch <= 0.75 * most,
+                    "{what}, frame {frame}: pitched {pitch} ({frames:?})"
+                );
+            } else {
+                assert!(
+                    yaw.abs() < 1e-4 && pitch.abs() < 1e-4,
+                    "{what}, frame {frame}: moved {turn:?} while the missile flew straight ({frames:?})"
+                );
+            }
+        }
+        let last = frames.last().unwrap();
+        let stopped = steering(TICK + 6, frames[0][1], step);
+        assert!(
+            math_iw4::angle_subtract(last[1], stopped[1]).abs() < 1e-3
+                && (last[0] - stopped[0]).abs() < 1e-3,
+            "{what}: ended at {last:?}, not {stopped:?}"
+        );
+    }
+
+    #[test]
+    fn a_steered_missile_turns_the_view_every_frame_and_stops_where_it_stops() {
+        // Snapshots that arrive as the clock reaches them, or ahead of it.
+        for lead in [0, 20, 45] {
+            let frames = turn_frames(|tick| steering(tick, 30.0, 1.0), lead, None);
+            assert_eq!(frames[0], steering(TICK, 30.0, 1.0), "lead {lead}");
+            assert_turns_every_frame(&frames, 1.0, &format!("lead {lead}"));
+        }
+    }
+
+    #[test]
+    fn the_view_turns_the_short_way_across_north() {
+        // 358° on through 0° to 4°, and 2° back through 0° to 356°.
+        for step in [1.0, -1.0] {
+            let yaw = if step > 0.0 { 358.0 } else { 2.0 };
+            let frames = turn_frames(|tick| steering(tick, yaw, step), 0, None);
+            assert_turns_every_frame(&frames, step, &format!("from {yaw}"));
+        }
+    }
+
+    #[test]
+    fn a_seated_replay_of_a_steered_missile_turns_every_frame() {
+        for delay in [50, 100, 250] {
+            let frames = turn_frames(|tick| steering(tick, 30.0, 1.0), 0, Some(delay));
+            assert_turns_every_frame(&frames, 1.0, &format!("delay {delay}"));
+        }
+    }
+
+    #[test]
+    fn a_replay_after_the_flight_starts_from_its_own_angles() {
+        let mut view = RemoteMissileView::default();
+        let at = |tick: u32, yaw: f32, behind: Option<i32>| {
+            let mut presented = presented(
+                tick,
+                Some(RemoteMissile {
+                    angles: [60.0, yaw, 0.0],
+                    ..link(None)
+                }),
+                1,
+                Some(rocket()),
+            );
+            presented.set_trajectory_sample(behind, None);
+            presented
+        };
+        // The live flight ends turned to 90°...
+        for tick in TICK + 10..TICK + 13 {
+            view.camera_traced(&at(tick, 90.0, None), LOCAL, ms(tick), open);
+        }
+        // ...and its killcam opens on the launch, still at 30°.
+        let behind = ms(TICK) + 10;
+        let seat = view
+            .camera_traced(&at(TICK, 30.0, Some(behind)), LOCAL, behind + 100, open)
+            .expect("the missile is flying");
+        assert_eq!(seat.angles, [60.0, 30.0, 0.0]);
+    }
+
+    /// The final killcam of the pilot's own Predator kill: the same missile of
+    /// the same life, replayed by a seat whose snapshots carry the live tick,
+    /// later than every sample of the flight.
+    fn own_kill_seat(tick: u32, yaw: f32) -> PresentedSnapshot {
+        let mut presented = presented(
+            tick,
+            Some(RemoteMissile {
+                angles: [60.0, yaw, 0.0],
+                ..link(None)
+            }),
+            1,
+            Some(rocket()),
+        );
+        presented.set_trajectory_sample(Some(ms(tick) + 10), None);
+        presented
+    }
+
+    fn live_flight_ending_at(view: &mut RemoteMissileView, yaw: f32) {
+        for tick in TICK..TICK + 3 {
+            let live = presented(
+                tick,
+                Some(RemoteMissile {
+                    angles: [60.0, yaw, 0.0],
+                    ..link(None)
+                }),
+                1,
+                Some(rocket()),
+            );
+            view.camera_traced(&live, LOCAL, ms(tick) + 40, open);
+        }
+    }
+
+    #[test]
+    fn the_final_killcam_after_the_unlink_starts_from_its_own_angles() {
+        let mut view = RemoteMissileView::default();
+        live_flight_ending_at(&mut view, 90.0);
+        // cameraunlink clears the link before the final killcam.
+        let unlinked = presented(TICK + 3, None, 1, None);
+        assert!(
+            view.camera_traced(&unlinked, LOCAL, ms(TICK + 3), open)
+                .is_none()
+        );
+        let seat = own_kill_seat(TICK + 40, 30.0);
+        let first = view
+            .camera_traced(&seat, LOCAL, ms(TICK + 40) + 110, open)
+            .expect("the missile is flying");
+        assert_eq!(first.angles, [60.0, 30.0, 0.0]);
+    }
+
+    #[test]
+    fn a_seat_that_follows_the_flight_directly_starts_over() {
+        let mut view = RemoteMissileView::default();
+        live_flight_ending_at(&mut view, 90.0);
+        let seat = own_kill_seat(TICK + 4, 30.0);
+        let first = view
+            .camera_traced(&seat, LOCAL, ms(TICK + 4) + 110, open)
+            .expect("the missile is flying");
+        assert_eq!(first.angles, [60.0, 30.0, 0.0]);
     }
 }
