@@ -390,10 +390,13 @@ pub fn sync_camera_from_presented(
         kick_angles[2] + bob_angles.roll,
     ];
     kick.refdef_view_angles = angles;
+    // The eye starts a step below the predicted origin and glides up to it
+    // (MW2's view-z smoothing); the floor clamp below still holds it at
+    // least 8 above the origin itself.
     let mut origin = [
         ps.origin[0] + offset[0],
         ps.origin[1] + offset[1],
-        ps.origin[2] + offset[2] + ps.view_height_current,
+        ps.origin[2] - presented.step_view_z() + offset[2] + ps.view_height_current,
     ];
     let bob = view_org_bob(org);
     origin[2] += bob.vertical;
