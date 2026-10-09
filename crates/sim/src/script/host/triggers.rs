@@ -871,6 +871,39 @@ fn toucher(runtime: &mut Runtime, frame: &FrameWorld, object: u64) -> ([f32; 3],
     (origin, origin)
 }
 
+/// Whether a player is where a trigger takes him: his hull touches its
+/// volume, and he looks into it when the script asked for that.
+fn reaches(
+    runtime: &mut Runtime,
+    frame: &FrameWorld,
+    volume: &Volume<'_>,
+    look_at: bool,
+    client: u32,
+    player: u64,
+) -> bool {
+    let (mins, maxs) = toucher(runtime, frame, player);
+    volume.touches(mins, maxs) && (!look_at || looks_into(frame, client, volume))
+}
+
+/// Whether a trigger_use_touch takes this player's Use press. MW2 offers one
+/// only to a player who touches it, so its hint and both press paths use the
+/// test that fires it. `None` for every other usable (and for a trigger with
+/// no volume), which a player reaches within the use radius.
+pub(crate) fn touch_use_reach(
+    runtime: &mut Runtime,
+    frame: &FrameWorld,
+    trigger: u64,
+    client: u32,
+    player: u64,
+) -> Option<bool> {
+    if runtime.entities.get(&trigger)?.classname.as_ref() != "trigger_use_touch" {
+        return None;
+    }
+    let volume = volume(runtime, frame, trigger)?;
+    let look_at = runtime.require_look_at.contains(&trigger);
+    Some(reaches(runtime, frame, &volume, look_at, client, player))
+}
+
 pub(crate) fn entity_bounds(world: &mut World, object: u64) -> ([f32; 3], [f32; 3]) {
     let runtime = world.resource::<Runtime>();
     if runtime.player_client(object).is_some() {
@@ -934,10 +967,11 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
             .map(|(client, _, _)| *client)
             .collect();
         for (client, player) in &pressed {
-            if let Some(usable) = runtime.use_selected.get(client)
-                && eligible(&runtime, &frame, *usable, *client, true)
+            if let Some(usable) = runtime.use_selected.get(client).copied()
+                && eligible(&runtime, &frame, usable, *client, true)
+                && touch_use_reach(&mut runtime, &frame, usable, *client, *player) != Some(false)
             {
-                raised.push((*usable, *player));
+                raised.push((usable, *player));
             }
         }
         let triggers: Vec<(u64, Fires)> = runtime
@@ -962,8 +996,7 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
                 if !eligible(&runtime, &frame, trigger, client, kind == Fires::Use) {
                     continue;
                 }
-                let (mins, maxs) = toucher(&mut runtime, &frame, player);
-                if !volume.touches(mins, maxs) || look_at && !looks_into(&frame, client, &volume) {
+                if !reaches(&mut runtime, &frame, &volume, look_at, client, player) {
                     continue;
                 }
                 raised.push((trigger, player));
