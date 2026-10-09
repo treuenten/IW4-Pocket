@@ -125,8 +125,16 @@ pub(crate) struct Hit {
     pub point: [f32; 3],
     pub dir: [f32; 3],
     pub hitloc: u8,
-    pub inflictor: Option<crate::ProjectileId>,
+    pub inflictor: Option<Inflictor>,
     pub commit: Option<DeathCommit>,
+}
+
+/// What GSC receives as eInflictor for a hit; the attacker when unset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Inflictor {
+    Projectile(crate::ProjectileId),
+    /// A script entity such as a sentry gun, by the model it presents.
+    Model(crate::ScriptModelId),
 }
 
 pub(crate) const IDFLAGS_RADIUS: i32 = 1;
@@ -206,7 +214,7 @@ pub(crate) fn damage(
         dir: normalized([0, 1, 2].map(|i| victim_origin[i] - from[i])),
         hitloc: intent.hitloc,
         inflictor: match intent.source {
-            DamageSource::Projectile(id) => Some(id),
+            DamageSource::Projectile(id) => Some(Inflictor::Projectile(id)),
             _ => None,
         },
         commit: Some(DeathCommit {

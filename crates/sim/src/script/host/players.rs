@@ -48,10 +48,15 @@ pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::s
         .get(usize::from(hit.hitloc))
         .copied()
         .unwrap_or("none");
-    let inflictor = hit
-        .inflictor
-        .and_then(|id| projectile_entity(world, id, hit))
-        .unwrap_or_else(|| attacker.clone());
+    let inflictor = match hit.inflictor {
+        Some(crate::script_player::Inflictor::Projectile(id)) => projectile_entity(world, id, hit),
+        Some(crate::script_player::Inflictor::Model(id)) => world
+            .resource::<Runtime>()
+            .presented_by(id)
+            .map(Value::Object),
+        None => None,
+    }
+    .unwrap_or_else(|| attacker.clone());
     let args = vec![
         inflictor,
         attacker,
