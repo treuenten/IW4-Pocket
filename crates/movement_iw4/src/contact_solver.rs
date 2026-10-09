@@ -304,10 +304,32 @@ fn land(
     if n[2] <= 0. || !(hit.walkable || n[2] >= threshold) {
         return None;
     }
+    // A move that started supported and is put down on walkable ground stays
+    // on that ground. `project` only removes the part of its velocity heading
+    // into the plane; a climb left over from a steeper contact earlier in the
+    // move (rising and leaving the plane) is dropped as well, or the end of
+    // move ground check reads it as a jump. Velocity that already heads down
+    // is kept: coming down stairs the snap puts the capsule on tread noses
+    // whose normals tilt the way it moves, and taking the part along such a
+    // normal strips most of the horizontal speed. Unsupported moves (jumps,
+    // falls) keep their climb.
+    let supported_on_walkable = s.ground.is_some() && (hit.walkable || n[2] >= WALKABLE_NORMAL_Z);
+    let velocity = if supported_on_walkable && m.velocity[2] > 0. && dot(m.velocity, n) > 0. {
+        tangent(m.velocity, n)
+    } else {
+        project(m.velocity, &[hit.normal])
+    };
     Some(Motion {
         origin: p,
-        velocity: project(m.velocity, &[hit.normal]),
+        velocity,
     })
+}
+/// The trace's own rule for walkable ground when no edge flag decides it.
+const WALKABLE_NORMAL_Z: f32 = 0.7;
+fn tangent(v: Vector, n: Vector) -> Vector {
+    let along = dot(v, n);
+    let out = core::array::from_fn(|i| (v[i] as f64 - along * n[i] as f64) as f32);
+    if finite(out) { out } else { [0.; 3] }
 }
 pub(crate) fn traverse(
     m: Motion,
@@ -418,5 +440,152 @@ pub(crate) fn project_ground(v: &mut Vector, n: &Vector) {
     ];
     if finite(out) {
         *v = out;
+    }
+}
+#[cfg(test)]
+mod landing_tests {
+    use super::*;
+
+    /// One infinite plane, `n · p = height`, solid on the side away from `n`.
+    fn plane(n: Vector, height: f32, walkable: bool) -> impl Fn(Vector, Vector) -> Contact {
+        let n = normal(n).expect("plane normal");
+        move |a: Vector, b: Vector| {
+            let side = |p: Vector| dot(p, n) - height as f64;
+            let (da, db) = (side(a), side(b));
+            if da < 0. || db >= 0. {
+                return Contact {
+                    fraction: 1.,
+                    end: b,
+                    normal: [0.; 3],
+                    blocked: false,
+                    walkable: false,
+                };
+            }
+            let fraction = (da / (da - db)) as f32;
+            Contact {
+                fraction,
+                end: core::array::from_fn(|i| a[i] + (b[i] - a[i]) * fraction),
+                normal: n,
+                blocked: false,
+                walkable,
+            }
+        }
+    }
+
+    fn settings(ground: Option<Vector>) -> Settings {
+        Settings {
+            dt: 0.033,
+            gravity: None,
+            ground,
+            step_height: 18.,
+            snap_down: 9.,
+            landing_normal_z: 0.3,
+        }
+    }
+
+    /// The tilted normal a capsule gets from resting on a tread's edge.
+    const EDGE: Vector = [-0.707_106_77, 0., 0.707_106_77];
+
+    fn close(a: Vector, b: Vector) -> bool {
+        (0..3).all(|i| libm::fabsf(a[i] - b[i]) < 1e-3)
+    }
+
+    #[test]
+    fn a_supported_landing_leaves_no_velocity_off_the_new_ground() {
+        let m = Motion {
+            origin: [0., 0., 4.],
+            velocity: [150., 0., 150.],
+        };
+        let floor = plane([0., 0., 1.], 0., true);
+        let landed = land(m, 9., settings(Some(EDGE)), &floor).expect("lands");
+        assert!(close(landed.origin, [0., 0., 0.]), "{:?}", landed.origin);
+        assert!(
+            close(landed.velocity, [150., 0., 0.]),
+            "{:?}",
+            landed.velocity
+        );
+    }
+
+    #[test]
+    fn a_supported_landing_on_a_slope_removes_only_the_part_along_its_normal() {
+        let m = Motion {
+            origin: [0., 0., 4.],
+            velocity: [120., 40., 90.],
+        };
+        let ramp = [0.2, -0.1, 0.9];
+        let n = normal(ramp).expect("ramp");
+        let landed = land(m, 9., settings(Some(EDGE)), &plane(ramp, 0., false)).expect("lands");
+        assert!(libm::fabs(dot(landed.velocity, n)) < 1e-3);
+        let removed: Vector = core::array::from_fn(|i| m.velocity[i] - landed.velocity[i]);
+        let along = dot(m.velocity, n) as f32;
+        assert!(close(removed, n.map(|x| x * along)), "{removed:?}");
+    }
+
+    #[test]
+    fn a_supported_landing_still_stops_motion_into_the_ground() {
+        let m = Motion {
+            origin: [0., 0., 4.],
+            velocity: [150., 0., -60.],
+        };
+        let floor = plane([0., 0., 1.], 0., true);
+        let landed = land(m, 9., settings(Some(EDGE)), &floor).expect("lands");
+        assert!(
+            close(landed.velocity, [150., 0., 0.]),
+            "{:?}",
+            landed.velocity
+        );
+    }
+
+    #[test]
+    fn a_supported_landing_heading_down_keeps_its_speed() {
+        // Coming down stairs the snap puts the capsule on a tread nose whose
+        // normal tilts the way it moves. The velocity already heads down and
+        // away from that plane; taking the part along the normal would cut
+        // the horizontal speed from 200 to 125.
+        let m = Motion {
+            origin: [0., 0., 4.],
+            velocity: [200., 0., -50.],
+        };
+        let nose = [0.707_106_77, 0., 0.707_106_77];
+        let landed =
+            land(m, 9., settings(Some([0., 0., 1.])), &plane(nose, 0., true)).expect("lands");
+        assert!(close(landed.velocity, m.velocity), "{:?}", landed.velocity);
+    }
+
+    #[test]
+    fn an_unsupported_landing_keeps_its_climb() {
+        // A jump that clears a step keeps its upward speed.
+        let m = Motion {
+            origin: [0., 0., 4.],
+            velocity: [150., 0., 150.],
+        };
+        let floor = plane([0., 0., 1.], 0., true);
+        let landed = land(m, 9., settings(None), &floor).expect("lands");
+        assert!(close(landed.velocity, m.velocity), "{:?}", landed.velocity);
+    }
+
+    #[test]
+    fn a_landing_on_steep_unwalkable_ground_is_unchanged() {
+        let m = Motion {
+            origin: [0., 0., 4.],
+            velocity: [150., 0., 150.],
+        };
+        // Too steep to count as walkable, and the velocity leaves it.
+        let steep = plane([0.8, 0., 0.6], 0., false);
+        let landed = land(m, 9., settings(Some(EDGE)), &steep).expect("lands");
+        assert!(close(landed.velocity, m.velocity), "{:?}", landed.velocity);
+    }
+
+    #[test]
+    fn a_snap_after_riding_a_tilted_edge_does_not_launch_the_player() {
+        // The move slides up the edge's tilted plane, then the snap puts it
+        // down on the flat tread below the end of the slide.
+        let m = Motion {
+            origin: [0., 0., 4.],
+            velocity: [150., 0., 150.],
+        };
+        let out = traverse(m, settings(Some(EDGE)), &plane([0., 0., 1.], 0., true));
+        assert!(libm::fabsf(out.origin[2]) < 1e-3, "{:?}", out.origin);
+        assert!(close(out.velocity, [150., 0., 0.]), "{:?}", out.velocity);
     }
 }

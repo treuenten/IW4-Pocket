@@ -4173,6 +4173,7 @@ dependencies = [
 name = "movement_iw4"
 version = "0.1.0"
 dependencies = [
+ "clipmap_iw4",
  "libm",
  "math_iw4",
  "playerstate_iw4",

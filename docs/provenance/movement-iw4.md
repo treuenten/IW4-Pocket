@@ -42,3 +42,23 @@ They have not been independently measured against retail IW4 in this task.
 Analytic fixtures validate geometry, bounded termination and determinism;
 they do not establish bitwise or gameplay parity with retail movement.
 This replacement does not resolve historical snapshots or audit other modules.
+
+## Later changes
+
+2026-10-09, landing velocity. When a move that starts on a ground plane is
+put down on walkable ground (by the supported snap or by a step) while its
+velocity is still rising, the part of that velocity leaving the ground is
+now removed as well, so the velocity lies in the new ground plane; the part
+heading into it was already removed. Moves without a ground plane (jumps,
+falls) keep it, and so does a velocity already heading down: coming down
+stairs the capsule lands on tread noses whose normals tilt the way it moves,
+and removing the part along such a normal cut the horizontal speed (single
+commands down Estate's upper flight fell to about 45 u/s). The rule was
+limited to rising velocity the same day, after a review measured that
+descent. The rule follows from the geometry of a supported landing, which
+ends on the ground. It was written against a measured failure (open mesh
+stair treads, where the capsule rides walkable tread edges and the kept
+climb read as a jump) and checked with analytic fixtures, a synthetic
+open-tread staircase climbed and descended, and a headless run over
+Estate's clipmap. No retail, Quake or CoD source and no source of the
+replaced module was consulted.
