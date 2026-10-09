@@ -157,6 +157,115 @@ pub mod pacing {
     pub static HOOKS: OnceLock<Hooks> = OnceLock::new();
 }
 
+/// Graphics-chip busy time for the IW4 Pocket health log (not upstream).
+/// Timestamp queries read nothing on Apple GPUs, so this reads each command
+/// buffer's own `GPUStartTime` / `GPUEndTime` instead. Off unless [`ENABLED`]
+/// is set (crates/bootstrap/src/health.rs); then `Queue::submit` adds one
+/// completed handler, a global block (no allocation), to every command buffer
+/// it commits: two property reads and two atomic updates. `Queue::present`
+/// adds another to its command buffer, which records the running total.
+///
+/// Overlap: command buffers on one queue start in commit order but may run at
+/// the same time (the next one's vertex work under this one's fragment work),
+/// so [`busy_ns`] is the union of the busy spans, not their sum. Each span adds
+/// only its part past the latest end counted so far. A span that completes out
+/// of order and ends before that point adds nothing, so the total can only
+/// read low, never count a moment twice.
+///
+/// Frames: the present's command buffer is committed after the frame's work
+/// on the same queue, so the total recorded when it completes holds that
+/// frame's work, and the difference between two presents is one frame's busy
+/// time, split on the graphics chip's own timeline rather than the CPU's.
+///
+/// [`ENABLED`]: gpu_time::ENABLED
+/// [`busy_ns`]: gpu_time::busy_ns
+pub mod gpu_time {
+    use core::ptr::NonNull;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use objc2::runtime::ProtocolObject;
+    use objc2_metal::{MTLCommandBuffer, MTLCommandBufferHandler};
+
+    /// Read on every `Queue::submit` and `Queue::present`; false leaves the
+    /// upstream path.
+    pub static ENABLED: AtomicBool = AtomicBool::new(false);
+    /// How many recent presents [`busy_at_present`] remembers.
+    pub const PRESENTS_KEPT: usize = 256;
+    static BUSY_NS: AtomicU64 = AtomicU64::new(0);
+    static COUNTED_UNTIL_NS: AtomicU64 = AtomicU64::new(0);
+    static PRESENTS_DONE: AtomicU64 = AtomicU64::new(0);
+    static BUSY_AT_PRESENT: [AtomicU64; PRESENTS_KEPT] =
+        [const { AtomicU64::new(0) }; PRESENTS_KEPT];
+
+    /// Union of the graphics chip's busy spans since [`ENABLED`] was set, in
+    /// nanoseconds. A running total: callers take differences.
+    pub fn busy_ns() -> u64 {
+        BUSY_NS.load(Ordering::Relaxed)
+    }
+
+    /// Presents whose command buffer has completed since [`ENABLED`] was set.
+    pub fn presents_done() -> u64 {
+        PRESENTS_DONE.load(Ordering::Acquire)
+    }
+
+    /// [`busy_ns`] when present `n` (from 0) completed. Holds for the last
+    /// [`PRESENTS_KEPT`] presents; older slots have been reused.
+    pub fn busy_at_present(n: u64) -> u64 {
+        BUSY_AT_PRESENT[n as usize % PRESENTS_KEPT].load(Ordering::Relaxed)
+    }
+
+    /// Count one command buffer's span, given in host seconds. A buffer that
+    /// never ran (an error) reports zeros and is skipped.
+    fn note_span(start_s: f64, end_s: f64) {
+        if !(start_s > 0.0 && end_s > start_s) {
+            return;
+        }
+        let (start, end) = ((start_s * 1e9) as u64, (end_s * 1e9) as u64);
+        let counted = COUNTED_UNTIL_NS.fetch_max(end, Ordering::Relaxed);
+        let from = start.max(counted);
+        if end > from {
+            BUSY_NS.fetch_add(end - from, Ordering::Relaxed);
+        }
+    }
+
+    // Both handlers are global blocks, which `addCompletedHandler:` uses as
+    // they are: nothing is allocated or retained per command buffer.
+    block2::global_block! {
+        static SPAN_HANDLER = |command_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            // Untyped like `presentedTime`: the typed getters return a
+            // CFTimeInterval, behind objc2-metal's "objc2-core-foundation"
+            // feature, which is off.
+            let command_buffer = unsafe { command_buffer.as_ref() };
+            let start: f64 = unsafe { objc2::msg_send![command_buffer, GPUStartTime] };
+            let end: f64 = unsafe { objc2::msg_send![command_buffer, GPUEndTime] };
+            note_span(start, end);
+        };
+    }
+
+    block2::global_block! {
+        static PRESENT_HANDLER = |_command_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            // One present completes at a time (Metal runs a queue's completion
+            // handlers in order), so this is the only writer.
+            let n = PRESENTS_DONE.load(Ordering::Relaxed);
+            BUSY_AT_PRESENT[n as usize % PRESENTS_KEPT]
+                .store(BUSY_NS.load(Ordering::Relaxed), Ordering::Relaxed);
+            PRESENTS_DONE.store(n + 1, Ordering::Release);
+        };
+    }
+
+    /// The completed handler for each submitted command buffer, added before `commit`.
+    pub(super) fn span_handler() -> MTLCommandBufferHandler {
+        let block: &block2::Block<_> = &SPAN_HANDLER;
+        core::ptr::from_ref(block).cast_mut()
+    }
+
+    /// The completed handler for a present's command buffer, added before `commit`.
+    pub(super) fn present_handler() -> MTLCommandBufferHandler {
+        let block: &block2::Block<_> = &PRESENT_HANDLER;
+        core::ptr::from_ref(block).cast_mut()
+    }
+}
+
 pub struct Instance {}
 
 impl Instance {
@@ -608,7 +717,12 @@ impl crate::Queue for Queue {
                 }
             };
 
+            // IW4 Pocket: graphics-chip busy time (see `gpu_time`), off by default.
+            let time_gpu = gpu_time::ENABLED.load(atomic::Ordering::Relaxed);
             for cmd_buffer in command_buffers {
+                if time_gpu {
+                    unsafe { cmd_buffer.raw.addCompletedHandler(gpu_time::span_handler()) };
+                }
                 cmd_buffer.raw.commit();
                 // One command buffer per `end_encoding` call moves from the
                 // "created but not yet submitted" bucket into the submitted
@@ -681,6 +795,10 @@ impl crate::Queue for Queue {
                 }
             }
 
+            // IW4 Pocket: graphics-chip busy time per frame (see `gpu_time`).
+            if gpu_time::ENABLED.load(atomic::Ordering::Relaxed) {
+                unsafe { command_buffer.addCompletedHandler(gpu_time::present_handler()) };
+            }
             command_buffer.commit();
 
             if let Some((hook, id, started)) = submitted {

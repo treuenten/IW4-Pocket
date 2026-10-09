@@ -8,8 +8,10 @@
 //!   on a phone without a rebuild
 //! * log rotation and a noise filter, so `iw4l-boot.log` stays readable
 
-#[cfg(target_os = "ios")]
-mod apple {
+/// `task_info(TASK_VM_INFO)` on every Apple platform: [`footprint_bytes`] on the
+/// phone, and the health log's `footprint_mb` (see `health`) on the Mac too.
+#[cfg(target_vendor = "apple")]
+pub(crate) mod task_vm {
     #[repr(C)]
     #[derive(Default)]
     pub struct TaskVmInfo {
@@ -35,6 +37,28 @@ mod apple {
         pub phys_footprint: u64,
     }
 
+    /// The footprint the kernel enforces (GPU-backed and compressed memory included).
+    pub(crate) fn phys_footprint() -> Option<u64> {
+        const TASK_VM_INFO: libc::c_int = 22;
+        let mut info = TaskVmInfo::default();
+        let mut count =
+            (size_of::<TaskVmInfo>() / size_of::<u32>()) as libc::mach_msg_type_number_t;
+        // SAFETY: the struct mirrors the kernel's task_vm_info prefix; `count` bounds the write.
+        #[allow(deprecated)]
+        let kr = unsafe {
+            libc::task_info(
+                libc::mach_task_self(),
+                TASK_VM_INFO as _,
+                (&raw mut info).cast(),
+                &raw mut count,
+            )
+        };
+        (kr == 0).then_some(info.phys_footprint)
+    }
+}
+
+#[cfg(target_os = "ios")]
+mod apple {
     #[repr(C)]
     #[derive(Default)]
     pub struct MallocStats {
@@ -103,21 +127,7 @@ mod apple {
 pub fn footprint_bytes() -> Option<u64> {
     #[cfg(target_os = "ios")]
     {
-        const TASK_VM_INFO: libc::c_int = 22;
-        let mut info = apple::TaskVmInfo::default();
-        let mut count =
-            (size_of::<apple::TaskVmInfo>() / size_of::<u32>()) as libc::mach_msg_type_number_t;
-        // SAFETY: the struct mirrors the kernel's task_vm_info prefix; `count` bounds the write.
-        #[allow(deprecated)]
-        let kr = unsafe {
-            libc::task_info(
-                libc::mach_task_self(),
-                TASK_VM_INFO as _,
-                (&raw mut info).cast(),
-                &raw mut count,
-            )
-        };
-        (kr == 0).then_some(info.phys_footprint)
+        task_vm::phys_footprint()
     }
     #[cfg(not(target_os = "ios"))]
     {

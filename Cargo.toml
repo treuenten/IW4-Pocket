@@ -9,8 +9,10 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 # compressed instead of expanding them to RGBA8. It also carries the iOS frame
 # pacing hook (`metal::pacing` in src/metal/mod.rs: presentDrawable
 # afterMinimumDuration and presented-time callbacks, both off unless
-# crates/bootstrap/src/frame_pace.rs sets them). Remove once on wgpu 30+, after
-# re-applying the pacing hook there.
+# crates/bootstrap/src/frame_pace.rs sets them) and the graphics-chip busy time
+# for the health log (`metal::gpu_time`: a completed handler reading each command
+# buffer's GPUStartTime/GPUEndTime, off unless crates/bootstrap/src/health.rs
+# sets it). Remove once on wgpu 30+, after re-applying both hooks there.
 wgpu-hal = { path = "vendor/wgpu-hal" }
 # winit 0.30 has no UIScene support, and iOS 27 won't launch apps built with the iOS 27 SDK
 # without it. vendor/winit is 0.30.13 plus a scene delegate (see

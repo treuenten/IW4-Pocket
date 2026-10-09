@@ -31,9 +31,10 @@ pub use authority::inbox::{
 };
 pub use authority::runtime::{
     AuthorityInputGate, AuthorityLoadHold, AuthorityPhaseCensus, AuthorityPhaseTrace,
-    AuthorityWorld, ClientShotSamples, DumpConfigurationChangeLog, DumpDeathLog, DumpGiveLog,
-    FixedUpdateCensus, ListenFanoutCensus, NetDiagnostics, PendingAcks, PendingAuthorityInput,
-    PendingStepResult, ServerTick, ServerTickData, authority_bookkeeping, authority_should_tick,
+    AuthorityTickTiming, AuthorityWorld, ClientShotSamples, DumpConfigurationChangeLog,
+    DumpDeathLog, DumpGiveLog, FixedUpdateCensus, ListenFanoutCensus, NetDiagnostics, PendingAcks,
+    PendingAuthorityInput, PendingStepResult, ServerTick, ServerTickData, authority_bookkeeping,
+    authority_should_tick,
 };
 pub use client::frame_census::{ClientPhaseCensus, HUD_STAGE_N, UpdatePhaseCensus};
 pub use client::frame_clock::{FrameClock, GameActive, GameJoinCensus};

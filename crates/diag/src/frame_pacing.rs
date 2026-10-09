@@ -501,7 +501,7 @@ pub struct Summary {
 }
 
 /// Nearest rank on a sorted slice.
-fn percentile(sorted: &[f32], q: f32) -> Option<f32> {
+pub(crate) fn percentile(sorted: &[f32], q: f32) -> Option<f32> {
     let last = sorted.len().checked_sub(1)?;
     sorted.get(((last as f32) * q).round() as usize).copied()
 }

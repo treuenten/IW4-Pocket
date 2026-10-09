@@ -2,6 +2,7 @@ mod alloc_count;
 pub mod exit;
 pub mod frame_pacing;
 pub mod gap;
+pub mod health;
 pub mod memtrack;
 pub mod memory_settings;
 pub mod ios_env;

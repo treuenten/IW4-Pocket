@@ -6,7 +6,9 @@
 //! [`PacingStats`] and every [`LOG_EVERY`] presents logs one `frame pacing:`
 //! line: the on-screen interval mix in 120 Hz vsyncs, dropped drawables, the
 //! frame time step against the interval it was shown for, the drawable wait
-//! and the present call. Nothing is logged per frame.
+//! and the present call. Nothing is logged per frame. With the health log on
+//! (`IW4L_HEALTH_LOG`, see [`super::health`]) the line ends with the memory,
+//! thermal, Low Power Mode, main-thread CPU and graphics-chip fields.
 //!
 //! The time step is matched to the drawable through [`FRAME_DT_NS`], set after
 //! the main world's time update and read by the present in the same
@@ -20,6 +22,8 @@ use bevy::prelude::*;
 use bevy::time::TimeSystems;
 use bevy::window::{Monitor, PrimaryMonitor};
 use diag::frame_pacing::{FramePace, LOG_EVERY, PacingStats, PresentRecord, PresentRing};
+
+use super::health::FrameHealthLog;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static RING: Mutex<PresentRing> = Mutex::new(PresentRing::new());
@@ -82,8 +86,15 @@ fn store_frame_dt(time: Res<Time<Real>>) {
     FRAME_DT_NS.store(ns, Ordering::Relaxed);
 }
 
-fn log_frame_pacing(mut log: ResMut<PacingLog>, monitors: Query<(&Monitor, Has<PrimaryMonitor>)>) {
+fn log_frame_pacing(
+    mut log: ResMut<PacingLog>,
+    mut health: Option<ResMut<FrameHealthLog>>,
+    monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
+) {
     let log = &mut *log;
+    if let Some(health) = health.as_deref_mut() {
+        health.note_frame();
+    }
     if let Ok(mut ring) = RING.lock() {
         ring.drain_into(&mut log.stats);
     }
@@ -95,6 +106,10 @@ fn log_frame_pacing(mut log: ResMut<PacingLog>, monitors: Query<(&Monitor, Has<P
         .max_by_key(|(_, primary)| *primary)
         .and_then(|(monitor, _)| monitor.refresh_rate_millihertz)
         .map(|mhz| (mhz + 500) / 1000);
-    diag::info!(World, "{}", log.stats.line(log.pace, screen_max_fps));
+    let line = log.stats.line(log.pace, screen_max_fps);
+    match health.as_deref_mut() {
+        Some(health) => diag::info!(World, "{line} | {}", health.take_fields()),
+        None => diag::info!(World, "{line}"),
+    }
     log.stats.reset_window();
 }

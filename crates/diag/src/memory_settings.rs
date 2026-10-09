@@ -203,6 +203,10 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_CHEAT_MENU" => matches!(value, "0" | "1"),
         // Keep the last 45 s of snapshots for the console `clip` command (off on iOS).
         "IW4L_CLIP_RING" => matches!(value, "0" | "1"),
+        // Health fields in the logs: memory, thermal state, Low Power Mode,
+        // main-thread CPU, graphics-chip time, sim tick timing and memory
+        // warnings (see crate::health). On by default; 0 turns all of it off.
+        crate::health::HEALTH_LOG_ENV => matches!(value, "0" | "1"),
         // Personal build only: console lines run when the first match starts
         // (e.g. `bot add 5`). Not for upstream, which excludes engine controls.
         "IW4L_CMDS" => !value.contains('\0'),
@@ -322,6 +326,9 @@ mod tests {
         assert!(valid_file_setting("IW4L_CLIP_RING", "0"));
         assert!(valid_file_setting("IW4L_CLIP_RING", "1"));
         for v in ["on", "off", "2", "", "1\0"] { assert!(!valid_file_setting("IW4L_CLIP_RING", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_HEALTH_LOG", "0"));
+        assert!(valid_file_setting("IW4L_HEALTH_LOG", "1"));
+        for v in ["on", "off", "false", "2", "", " 0", "0\0"] { assert!(!valid_file_setting("IW4L_HEALTH_LOG", v), "{v:?}"); }
         for name in ["IW4L_DT_SNAP", "IW4L_FRAME_STATS"] {
             assert!(valid_file_setting(name, "0"));
             assert!(valid_file_setting(name, "1"));

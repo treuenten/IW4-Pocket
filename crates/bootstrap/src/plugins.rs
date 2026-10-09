@@ -48,6 +48,8 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
         .add_plugins(SessionPlugin);
     // iOS present pacing, dt snap and frame timing stats; nothing elsewhere.
     crate::frame_pace::register(app);
+    // Memory, thermal, CPU, graphics-chip and server tick fields in the logs.
+    crate::health::register(app);
     // iOS: ask a 120 Hz display for its full refresh during matches.
     crate::promotion::register(app);
     // iOS: no auto-lock while a map loads or a match runs.

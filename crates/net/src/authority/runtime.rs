@@ -119,7 +119,54 @@ fn sum_named_fixed(values: &[Option<u64>; frame::AUTHORITY_TOC.len()]) -> Option
     any.then_some(sum)
 }
 
-fn stamp_authority_edge<const EDGE: u8>(mut census: ResMut<AuthorityPhaseCensus>) {
+/// The `sim timing:` line (`IW4L_HEALTH_LOG`): Ingress, Step and Fanout times
+/// from the phase seams, and the QoS class of the thread that ran Step.
+/// Bootstrap inserts it when the health log is on; without it the seams and
+/// the step read no clock.
+#[derive(Resource, Debug, Default)]
+pub struct AuthorityTickTiming {
+    timing: diag::health::TickTiming,
+    /// The last seam stamped this tick, and when.
+    last_edge: Option<(u8, std::time::Instant)>,
+}
+
+impl AuthorityTickTiming {
+    /// Seam `edge` ends phase `edge - 1` (timed only from seam `edge - 1`) and
+    /// begins phase `edge`; the last seam closes the tick.
+    fn stamp(&mut self, edge: u8) {
+        let now = std::time::Instant::now();
+        if let Some((last, at)) = self.last_edge
+            && last + 1 == edge
+        {
+            let phase = match frame::AUTHORITY_TOC[last as usize] {
+                AuthoritySet::Ingress => Some(diag::health::TickPhase::Ingress),
+                AuthoritySet::Step => Some(diag::health::TickPhase::Step),
+                AuthoritySet::Fanout => Some(diag::health::TickPhase::Fanout),
+                _ => None,
+            };
+            if let Some(phase) = phase {
+                let ms = now.duration_since(at).as_secs_f64() * 1000.0;
+                self.timing.note_phase(phase, ms as f32);
+            }
+        }
+        if (edge as usize) < frame::AUTHORITY_TOC.len() {
+            self.last_edge = Some((edge, now));
+            return;
+        }
+        self.last_edge = None;
+        if let Some(line) = self.timing.end_tick() {
+            diag::info!(Sim, "{line}");
+        }
+    }
+}
+
+fn stamp_authority_edge<const EDGE: u8>(
+    mut census: ResMut<AuthorityPhaseCensus>,
+    timing: Option<ResMut<AuthorityTickTiming>>,
+) {
+    if let Some(mut timing) = timing {
+        timing.stamp(EDGE);
+    }
     let alloc = diag::process_allocations();
     if EDGE > 0 {
         let slot = EDGE as usize - 1;
@@ -717,8 +764,14 @@ fn step_authority(
     mut pending_svc: ResMut<crate::PendingSvcSounds>,
     mut exit_level: MessageWriter<ExitLevelCalled>,
     trace: Option<ResMut<AuthorityPhaseTrace>>,
+    timing: Option<ResMut<AuthorityTickTiming>>,
 ) {
     push_phase(trace, "Step");
+    if let Some(mut timing) = timing {
+        timing
+            .timing
+            .note_step_thread(diag::health::thread_qos(), diag::health::on_main_thread());
+    }
     pending_svc.occupy_cs(&mut world.0);
     let Some(input) = pending.0.take() else {
         return;
