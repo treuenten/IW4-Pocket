@@ -19,6 +19,10 @@ vendor/wgpu-hal is wgpu-hal 29.0.4 (MIT OR Apache-2.0, licences included in that
 directory) with ONE modified file, src/metal/adapter.rs (6 lines, marked in the file),
 backported from gfx-rs/wgpu#9656.
 
+vendor/wgpu-core is wgpu-core 29.0.4 (MIT OR Apache-2.0, licences included in that
+directory) with two modified files, src/pipeline.rs and src/device/resource.rs (the
+IW4L_LEAN_SHADERS switch, marked "IW4 Pocket patch" in both).
+
 
 --------------------------------------------------------------------------------
 Third-party material bundled with this repository

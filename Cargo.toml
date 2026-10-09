@@ -14,6 +14,12 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 # buffer's GPUStartTime/GPUEndTime, off unless crates/bootstrap/src/health.rs
 # sets it). Remove once on wgpu 30+, after re-applying both hooks there.
 wgpu-hal = { path = "vendor/wgpu-hal" }
+# vendor/wgpu-core is 29.0.4 plus IW4L_LEAN_SHADERS (off by default, Apple only): a
+# render pipeline does not keep its shader modules alive, so each module's naga IR
+# (~745 MiB over Estate's exact-colour shaders) is freed once render_gpu drops it.
+# One function in src/pipeline.rs (`lean_shaders`) and one branch in
+# src/device/resource.rs create_render_pipeline. Remove with wgpu-hal on wgpu 30+.
+wgpu-core = { path = "vendor/wgpu-core" }
 # winit 0.30 has no UIScene support, and iOS 27 won't launch apps built with the iOS 27 SDK
 # without it. vendor/winit is 0.30.13 plus a scene delegate (see
 # vendor/winit/src/platform_impl/ios/scene_delegate.rs); ios/Info.plist names it.
