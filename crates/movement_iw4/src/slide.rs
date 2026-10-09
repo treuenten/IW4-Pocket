@@ -93,9 +93,12 @@ const STEP_VIEW_MIN_CHANGE: f32 = 0.5;
 /// Moves the player, stepping up ledges and snapping down to the ground.
 /// Returns the move's step for the client's first-person step smoothing:
 /// how far its final height is from where its plain slide ended, so a step
-/// up or the supported snap down, but not travel along a slope. Only a move
-/// that started on the ground, off a ladder and alive reports one, and only
-/// past half a unit; otherwise 0.
+/// up or the supported snap down, but not travel along a slope. It is held
+/// to the move's own height change, same sign and no larger: a snap that only
+/// takes back part of a climb made earlier in the same move (riding a tilted
+/// tread edge) is no drop the eye should hide. Only a move that started on
+/// the ground, off a ladder and alive reports one, and only past half a
+/// unit; otherwise 0.
 pub fn step_slide_move<C: CollisionBackend>(
     ps: &mut PlayerState,
     pml: &Pml,
@@ -110,6 +113,7 @@ pub fn step_slide_move<C: CollisionBackend>(
     if ladder || (pml.ground_plane == 0 && ps.pm_time != 0) {
         jump::clear_state(ps);
     }
+    let start_z = ps.origin[2];
     let motion = Motion {
         origin: ps.origin,
         velocity: ps.velocity,
@@ -121,7 +125,8 @@ pub fn step_slide_move<C: CollisionBackend>(
     );
     ps.origin = result.motion.origin;
     ps.velocity = result.motion.velocity;
-    let change = result.motion.origin[2] - result.slide_z;
+    let moved = result.motion.origin[2] - start_z;
+    let change = (result.motion.origin[2] - result.slide_z).clamp(moved.min(0.0), moved.max(0.0));
     if started_on_ground && ps.pm_type < PM_TYPE_DEAD && change.abs() > STEP_VIEW_MIN_CHANGE {
         change
     } else {

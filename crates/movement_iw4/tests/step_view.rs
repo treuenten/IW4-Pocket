@@ -189,6 +189,38 @@ fn walking_down_a_ramp_reports_nothing() {
 }
 
 #[test]
+fn walking_over_the_top_of_a_ramp_reports_nothing() {
+    // A 45 degree ramp up to a flat top at z 40. The move that crosses the
+    // top slides on up the ramp's plane past the edge, and the snap puts it
+    // down on the top: below where its slide ended, but higher than where the
+    // move started, so there is no drop to hide.
+    let (sin, cos) = 45.0_f32.to_radians().sin_cos();
+    let n = [-sin, 0.0, cos];
+    let world = Brushes::floor().with_box(
+        [0.0, -200.0, -64.0],
+        [1000.0, 200.0, 40.0],
+        &[[n[0], n[1], n[2], 0.0]],
+    );
+    // From three starting points, so one of them crosses the top late in a
+    // move and slides well past the edge.
+    for x in [0.0, 1.5, 3.0] {
+        let start = world.settle([x, 0.0, 20.0]);
+        let mut ps = player(start, [190.0 * cos, 0.0, 190.0 * sin], true);
+        let mut changes = Vec::new();
+        for _ in 0..20 {
+            let ground = if ps.origin[2] < 39.0 { n } else { FLAT };
+            changes.push(step(&world, &mut ps, Some(ground)).0);
+        }
+        assert!(
+            (ps.origin[2] - 40.0).abs() < 0.5,
+            "from x {x} the player ended on the top: {:?}",
+            ps.origin
+        );
+        assert_eq!(changes, vec![0.0; 20], "from x {x}");
+    }
+}
+
+#[test]
 fn walking_off_a_five_unit_ledge_reports_the_snap_down() {
     // The ledge ends at x 0; the player's box leaves it during the move and
     // the snap puts it on the ground below.
