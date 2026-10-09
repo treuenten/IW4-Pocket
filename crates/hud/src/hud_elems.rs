@@ -151,21 +151,70 @@ fn elem_text(
     Some(combine_label(label, body))
 }
 
+/// Height of a waypoint that follows a player, above the player's origin, by stance.
+/// MW2 has `waypointPlayerOffsetStand` / `Crouch` / `Prone` dvars for this; the values
+/// here are estimates, not read from the game.
+const WAYPOINT_PLAYER_OFFSET_STAND: f32 = 74.0;
+const WAYPOINT_PLAYER_OFFSET_CROUCH: f32 = 56.0;
+const WAYPOINT_PLAYER_OFFSET_PRONE: f32 = 30.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaypointTarget {
+    number: i32,
+    e_type: i32,
+    e_flags: u32,
+    origin: [f32; 3],
+}
+
+/// World anchor of a waypoint hud elem. Without a target entity, x/y/z are a world
+/// position. With one, the waypoint follows the entity; for a player it sits a stance
+/// height above the origin and x/y/z are not added (MW2's `_gameobjects` keeps writing
+/// absolute world coordinates there after `SetTargetEnt`). A waypoint on the entity
+/// whose eyes the view uses is not drawn.
+fn waypoint_anchor(elem: &HudElem, target: Option<WaypointTarget>, eyes: i32) -> Option<Vec3> {
+    let offset = Vec3::new(elem.x, elem.y, elem.z);
+    if elem.target_ent_num == playerstate_iw4::ENTITYNUM_NONE {
+        return Some(offset);
+    }
+    let target = target.filter(|t| t.number == elem.target_ent_num)?;
+    if target.number == eyes {
+        return None;
+    }
+    let origin = Vec3::from_array(target.origin);
+    if target.e_type != entity_iw4::ET_PLAYER {
+        return Some(origin + offset);
+    }
+    let height = if target.e_flags & playerstate_iw4::eflags::PRONE != 0 {
+        WAYPOINT_PLAYER_OFFSET_PRONE
+    } else if target.e_flags & playerstate_iw4::eflags::DUCK != 0 {
+        WAYPOINT_PLAYER_OFFSET_CROUCH
+    } else {
+        WAYPOINT_PLAYER_OFFSET_STAND
+    };
+    Some(origin + Vec3::Z * height)
+}
+
 fn place_waypoint(
     elem: &HudElem,
     camera: (&Camera, &GlobalTransform),
     entities: &Query<(&CEntity, &CEntityRuntime)>,
     surface: &crate::surface::Hud2dSurface,
+    eyes: i32,
 ) -> Option<(Vec2, f32)> {
-    let offset = Vec3::new(elem.x, elem.y, elem.z);
-    let world = if elem.target_ent_num == playerstate_iw4::ENTITYNUM_NONE {
-        offset
-    } else {
-        let (_, runtime) = entities.iter().find(|(entity, runtime)| {
-            i32::from(entity.number()) == elem.target_ent_num && runtime.in_next_snap()
-        })?;
-        Vec3::from_array(runtime.origin) + offset
-    };
+    let target = (elem.target_ent_num != playerstate_iw4::ENTITYNUM_NONE)
+        .then(|| {
+            entities.iter().find(|(entity, runtime)| {
+                i32::from(entity.number()) == elem.target_ent_num && runtime.in_next_snap()
+            })
+        })
+        .flatten()
+        .map(|(entity, runtime)| WaypointTarget {
+            number: i32::from(entity.number()),
+            e_type: runtime.next_state.e_type,
+            e_flags: runtime.next_state.e_flags,
+            origin: runtime.origin,
+        });
+    let world = waypoint_anchor(elem, target, eyes)?;
     let (camera, transform) = camera;
     let eye = transform.translation();
     let forward = *transform.forward();
@@ -226,6 +275,7 @@ pub(crate) fn update_hud_elems(
     mut ui_sound: MessageWriter<UiPlaySound>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     entities: Query<(&CEntity, &CEntityRuntime)>,
+    view: Option<Res<frame::ViewSubject>>,
 ) {
     if !surface.is_ready() {
         hide(&mut pass);
@@ -266,6 +316,12 @@ pub(crate) fn update_hud_elems(
     };
 
     let cg_time = cg_clock.time();
+    let eyes = match view.as_deref() {
+        Some(frame::ViewSubject::Seat {
+            focus: Some(focus), ..
+        }) => i32::try_from(*focus).unwrap_or(-1),
+        _ => i32::try_from(local.0.0).unwrap_or(-1),
+    };
     let mut layers: [Vec<Draw2dCmd>; 2] = Default::default();
     let mut fonts = HashMap::new();
     for (index, elem) in elems.iter().enumerate() {
@@ -309,7 +365,8 @@ pub(crate) fn update_hud_elems(
                 let Some(camera) = cameras.iter().find(|(c, _)| c.is_active) else {
                     continue;
                 };
-                let Some((at, size)) = place_waypoint(elem, camera, &entities, &surface) else {
+                let Some((at, size)) = place_waypoint(elem, camera, &entities, &surface, eyes)
+                else {
                     continue;
                 };
                 hud_iw4::HudElemPlacement {
@@ -450,4 +507,70 @@ pub(crate) fn update_hud_elems(
     });
     pass.hud_elems_back = back;
     pass.hud_elems = front;
+}
+
+#[cfg(test)]
+mod waypoint_anchor_tests {
+    use super::*;
+
+    fn elem(x: f32, y: f32, z: f32, target: i32) -> HudElem {
+        HudElem {
+            elem_type: HE_TYPE_WAYPOINT,
+            x,
+            y,
+            z,
+            target_ent_num: target,
+            ..HudElem::default()
+        }
+    }
+
+    fn player(number: i32, origin: [f32; 3], e_flags: u32) -> WaypointTarget {
+        WaypointTarget {
+            number,
+            e_type: entity_iw4::ET_PLAYER,
+            e_flags,
+            origin,
+        }
+    }
+
+    #[test]
+    fn untargeted_waypoint_is_a_world_position() {
+        let e = elem(-1184.0, -2302.0, 339.0, playerstate_iw4::ENTITYNUM_NONE);
+        assert_eq!(
+            waypoint_anchor(&e, None, 0),
+            Some(Vec3::new(-1184.0, -2302.0, 339.0))
+        );
+    }
+
+    #[test]
+    fn carrier_escort_ignores_the_absolute_xyz_gameobjects_writes() {
+        // _gameobjects: objPoint.x/y/z = carrier.origin + (0,0,75), then SetTargetEnt(carrier).
+        let e = elem(-1184.0, -2302.0, 339.0, 3);
+        let at = waypoint_anchor(&e, Some(player(3, [-1180.0, -2300.0, 264.0], 0)), 0);
+        assert_eq!(at, Some(Vec3::new(-1180.0, -2300.0, 264.0 + 74.0)));
+    }
+
+    #[test]
+    fn player_waypoint_height_follows_stance() {
+        let e = elem(0.0, 0.0, 0.0, 3);
+        let at = |flags| {
+            waypoint_anchor(&e, Some(player(3, [0.0; 3], flags)), 0)
+                .unwrap()
+                .z
+        };
+        assert_eq!(at(playerstate_iw4::eflags::DUCK), 56.0);
+        assert_eq!(at(playerstate_iw4::eflags::PRONE), 30.0);
+    }
+
+    #[test]
+    fn waypoint_on_the_viewers_own_entity_is_not_drawn() {
+        let e = elem(-1184.0, -2302.0, 339.0, 0);
+        assert_eq!(waypoint_anchor(&e, Some(player(0, [0.0; 3], 0)), 0), None);
+    }
+
+    #[test]
+    fn missing_target_entity_draws_nothing() {
+        let e = elem(1.0, 2.0, 3.0, 5);
+        assert_eq!(waypoint_anchor(&e, None, 0), None);
+    }
 }
