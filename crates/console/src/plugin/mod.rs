@@ -31,7 +31,9 @@ mod dispatch_state;
 mod state;
 
 pub use dispatch_state::{ConsoleCommandQueue, ConsoleDispatch, WaitMovePose};
-use dispatch_state::{WAIT_WORLD_TIMEOUT_SECS, WaitKind, parse_wait_args};
+use dispatch_state::{
+    WAIT_ARGS_HINT, WAIT_WORLD_TIMEOUT_SECS, WaitKind, parse_wait_args, wait_alive_settled,
+};
 pub use state::{ConsoleFont, ConsoleSettings, ConsoleState};
 
 const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/FiraMono-Regular.ttf");
@@ -1840,6 +1842,12 @@ fn dispatch_console_command(
     } else {
         scene.as_ref().is_some_and(|s| s.spawned)
     };
+    let local_alive = presented
+        .as_deref()
+        .zip(local.as_deref())
+        .is_some_and(|(presented, local)| crate::debug_move::alive(presented, local.0));
+    let presented_tick = presented.as_deref().and_then(|p| p.tick()).map(|t| t.0);
+    let clock_tick = clock.as_deref().map(|c| c.tick);
 
     let waiting = dispatch.paused
         || dispatch.wait_world
@@ -1851,6 +1859,7 @@ fn dispatch_console_command(
         || dispatch.wait_playing
         || dispatch.wait_tick.is_some()
         || dispatch.wait_alive.is_some()
+        || dispatch.wait_local_alive
         || dispatch.wait_remaining > 0.0;
     if waiting
         && let Some(index) = queue.0.iter().position(|cmd| {
@@ -2067,6 +2076,34 @@ fn dispatch_console_command(
             }
         }
     }
+    if dispatch.wait_local_alive {
+        if local_alive
+            && wait_alive_settled(dispatch.wait_local_alive_since, presented_tick, clock_tick)
+        {
+            dispatch.wait_local_alive = false;
+            dispatch.wait_local_alive_since = None;
+            diag::info!(
+                Console,
+                "wait alive: Alive after {:.1}s",
+                dispatch.wait_local_alive_elapsed
+            );
+        } else {
+            dispatch.wait_local_alive_elapsed += time.delta_secs();
+            if dispatch.wait_local_alive_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
+                dispatch.wait_local_alive = false;
+                dispatch.wait_local_alive_since = None;
+                abort_script_on_wait_timeout(
+                    "wait alive",
+                    "local player not Alive",
+                    &mut queue,
+                    &mut console,
+                    capacity,
+                );
+            } else {
+                return;
+            }
+        }
+    }
     if let Some(until) = dispatch.wait_tick {
         let now = clock.as_ref().map(|c| c.tick);
         if now.is_some_and(|now| now.wrapping_sub(until) < u32::MAX / 2) {
@@ -2196,6 +2233,22 @@ fn dispatch_console_command(
                         diag::info!(Console, "wait spawn: until AppScreen::InGame");
                     }
                 }
+                WaitKind::Alive => {
+                    if local_alive && wait_alive_settled(clock_tick, presented_tick, clock_tick) {
+                        diag::info!(Console, "wait alive: already Alive");
+                    } else {
+                        dispatch.wait_local_alive = true;
+                        dispatch.wait_local_alive_since = clock_tick;
+                        dispatch.wait_local_alive_elapsed = 0.0;
+                        let after = clock_tick
+                            .map(|tick| format!(" after tick {tick}"))
+                            .unwrap_or_default();
+                        diag::info!(
+                            Console,
+                            "wait alive: until the local player is Alive{after}"
+                        );
+                    }
+                }
                 WaitKind::Torn => {
                     if world_is_torn(has_world.as_deref(), scene.as_deref()) {
                         diag::info!(Console, "wait torn: already hold");
@@ -2229,6 +2282,11 @@ fn dispatch_console_command(
                 WaitKind::Seconds(secs) => {
                     dispatch.wait_remaining = secs;
                     diag::info!(Console, "wait: {secs:.1}s");
+                }
+                WaitKind::Invalid(word) => {
+                    let msg = format!("wait: unknown `{word}` — use {WAIT_ARGS_HINT}; not holding");
+                    diag::warn!(Console, "{msg}");
+                    console.echo(msg, capacity);
                 }
             }
             return;

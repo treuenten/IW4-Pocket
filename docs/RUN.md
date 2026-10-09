@@ -45,7 +45,16 @@ until its own fact — `map`/`demo`/`play` until the swap plus GPU-ready
 `WorldScene::spawned`, `spawn` until `AppScreen::InGame`, `move`/`look`/`tp`
 until a matching presented pose, `force_match_start` until `Playing`,
 `disconnect` until the hold is torn down. `wait Ns` remains, for pacing and
-observation windows. The `&` suffix is a loud refusal to wait (`map mp_rust &`),
+observation windows; a bare `wait` is one second, and a word after `wait` that
+is neither a number nor a known hold is an error that does not hold.
+`wait spawn` passes once the map's first life is shown and stays passed after a
+death; `wait alive` holds until the local player is shown alive again, through
+death and killcam, so it is the hold to put before `god`, `give`, `move` or
+`damage` in a startup script
+(`bot add 10; wait spawn; wait alive; god; give killstreak/predator_missile`).
+On a host it only trusts a snapshot stepped after the wait began, so
+`kill; wait alive` holds through that death instead of passing on the old life.
+The `&` suffix is a loud refusal to wait (`map mp_rust &`),
 `!` jumps the queue (in bash write `disconnect !`, or history expansion bites).
 The 120 s gate timeout aborts the rest with an echo; parsing is
 `crates/console/src/`. Hand-typed `dump`/`clip`/`screenshot` pass through any
@@ -69,7 +78,7 @@ with no map installed. `bot` is
 on host and clients — the host records authority, a client the snapshots it
 received plus its own presented state; `demo LATEST` plays it back.
 
-* `god` toggles invincibility for a live player; repeat it to turn protection off. It blocks damage while cheats are enabled; `kill` still forces death.
+* `god` toggles invincibility for a live player; repeat it to turn protection off. It blocks damage while cheats are enabled; `kill` still forces death. It is refused while dead or in the killcam, so scripts write `wait alive; god`.
 * `player_sustainAmmo [0|1]` is MW2's dvar as a verb: while on, firing does not spend the magazine (a bare call toggles). Turning it on also fills the magazine and reserve of every weapon held. The flag lives in the replicated client dvars, so prediction agrees with the host.
 * ADS is `hold +speed_throw`, not `+speed`;
 * Hold Shift (`+breath_sprint`) or bind `+holdbreath` to steady eligible sights
