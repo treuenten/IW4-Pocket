@@ -35,8 +35,22 @@ pub(crate) struct StepRequest {
     output: Option<TickResult>,
 }
 
+/// Step on the calling thread (bevy's single-threaded executor) instead of
+/// handing each system to a pool thread; off by default. Every system here is
+/// chained, so the multi-threaded executor only moves them between threads.
+/// Bootstrap reads the same switch for the app's fixed-step schedules.
+pub const TICK_ON_MAIN_ENV: &str = "IW4L_TICK_ON_MAIN";
+
+fn tick_on_main() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| perf::switch(TICK_ON_MAIN_ENV))
+}
+
 pub(crate) fn schedule() -> Schedule {
     let mut schedule = Schedule::default();
+    if tick_on_main() {
+        schedule.set_executor(bevy_ecs::schedule::SingleThreadedExecutor::new());
+    }
     schedule.add_systems(
         (
             advance_time_system,

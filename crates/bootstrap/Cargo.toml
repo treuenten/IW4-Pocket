@@ -59,6 +59,8 @@ objc2-game-controller = "0.3"
 # not re-export the hal. Same features wgpu enables.
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu-hal = { version = "29.0.4", default-features = false, features = ["metal"] }
+# Thread QoS classes (`thread_qos`).
+libc = "0.2"
 
 [lints]
 workspace = true

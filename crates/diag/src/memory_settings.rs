@@ -205,6 +205,9 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_CLIP_RING" => matches!(value, "0" | "1"),
         // Effect randomness from a 64-bit integer mixer instead of BLAKE3 (off by default).
         "IW4L_FX_FAST_RANDOM" => matches!(value, "0" | "1"),
+        // Top priority for the tick and render threads; the server tick on the
+        // main thread (both off by default).
+        "IW4L_THREAD_QOS" | "IW4L_TICK_ON_MAIN" => matches!(value, "0" | "1"),
         // Health fields in the logs: memory, thermal state, Low Power Mode,
         // main-thread CPU, graphics-chip time, sim tick timing and memory
         // warnings (see crate::health). On by default; 0 turns all of it off.
@@ -334,6 +337,11 @@ mod tests {
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "0"));
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "1"));
         for v in ["on", "off", "false", "2", "", " 0", "0\0"] { assert!(!valid_file_setting("IW4L_HEALTH_LOG", v), "{v:?}"); }
+        for name in ["IW4L_THREAD_QOS", "IW4L_TICK_ON_MAIN"] {
+            assert!(valid_file_setting(name, "0"));
+            assert!(valid_file_setting(name, "1"));
+            for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting(name, v), "{name}={v:?}"); }
+        }
         for name in ["IW4L_DT_SNAP", "IW4L_FRAME_STATS"] {
             assert!(valid_file_setting(name, "0"));
             assert!(valid_file_setting(name, "1"));

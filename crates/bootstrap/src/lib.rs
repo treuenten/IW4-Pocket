@@ -9,6 +9,8 @@ mod ios_input;
 mod launch;
 mod plugins;
 mod promotion;
+#[cfg(target_vendor = "apple")]
+mod thread_qos;
 #[cfg(any(target_os = "ios", test))]
 mod touch_controls;
 

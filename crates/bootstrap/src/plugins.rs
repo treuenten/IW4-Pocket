@@ -1,6 +1,8 @@
 use assets::AssetPlugin;
 use audio::AudioPlugin;
 use bevy::{
+    app::FixedMain,
+    ecs::schedule::ScheduleLabel,
     log::LogPlugin,
     prelude::*,
     render::{
@@ -78,6 +80,23 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
     app.edit_schedule(Last, |schedule| {
         schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
     });
+    if tick_on_main() {
+        // Bevy already runs the first two single-threaded; set here as well so
+        // the whole fixed tick is in one place.
+        for label in [
+            RunFixedMainLoop.intern(),
+            FixedMain.intern(),
+            FixedFirst.intern(),
+            FixedPreUpdate.intern(),
+            FixedUpdate.intern(),
+            FixedPostUpdate.intern(),
+            FixedLast.intern(),
+        ] {
+            app.edit_schedule(label, |schedule| {
+                schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            });
+        }
+    }
 
     if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
         render_app.edit_schedule(bevy::render::renderer::RenderGraph, |schedule| {
@@ -162,6 +181,14 @@ pub fn default_plugins_with_quiet_log(mut window: WindowPlugin) -> bevy::app::Pl
         });
     #[cfg(target_os = "ios")]
     let plugins = plugins.add(crate::ios_input::IosInputPlugin);
+    #[cfg(target_vendor = "apple")]
+    let plugins = if thread_qos() {
+        plugins
+            .set(crate::thread_qos::task_pool_plugin())
+            .add(crate::thread_qos::ThreadQosPlugin)
+    } else {
+        plugins
+    };
     if pipelined_rendering() {
         plugins
     } else {
@@ -187,6 +214,38 @@ fn pipelined_rendering() -> bool {
         None => !cfg!(any(target_os = "macos", target_os = "ios")),
         Some(_) => perf::switch(PIPELINED_RENDERING_ENV),
     }
+}
+
+const THREAD_QOS_ENV: &str = "IW4L_THREAD_QOS";
+
+/// Raise Bevy's compute pool threads and the render thread to User Interactive
+/// and the async compute pool to User Initiated (see `thread_qos`). macOS and
+/// iOS only.
+///
+/// Off by default. The 20 Hz server tick runs on compute pool threads, which
+/// start at Default, and iOS put some of them on the efficiency cores (phone
+/// report of 10-09) while the main thread waited for the tick. On the Mac,
+/// pushing the pool down to Background made FixedUpdate 3.7x slower (9.6 ->
+/// 35.9 ms, 17 bots), so the class the pool runs at does reach the frame.
+/// `IW4L_THREAD_QOS=1` in iw4l-env.txt turns it on for the phone.
+#[cfg(target_vendor = "apple")]
+fn thread_qos() -> bool {
+    perf::switch(THREAD_QOS_ENV)
+}
+
+/// Run the server tick on the main thread: the fixed-step schedules above
+/// and the sim's own Step schedule (`sim::step`) get the single-threaded
+/// executor, like every other main-app schedule here. The same switch is read
+/// in `sim`.
+///
+/// Off by default. The multi-threaded executor hands each tick system (bot
+/// thinking, scripts, movement) to a pool thread at Default priority while the
+/// main thread, User Interactive, blocks until the tick is done: 27.7% of the
+/// Mac main thread's samples with 17 bots were that wait. The authority
+/// phases are chained, so there is little overlap to lose.
+/// `IW4L_TICK_ON_MAIN=1` in iw4l-env.txt turns it on for the phone.
+fn tick_on_main() -> bool {
+    perf::switch(sim::TICK_ON_MAIN_ENV)
 }
 
 const FX_FAST_RANDOM_ENV: &str = "IW4L_FX_FAST_RANDOM";

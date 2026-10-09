@@ -105,6 +105,7 @@ pub use input::{
     SpawnPick, TickInput, action_request_id, menu_response_field, menu_response_text,
 };
 pub use mantle_xanim::MantleXAnimBind;
+pub use step::TICK_ON_MAIN_ENV;
 
 pub const CONSTANT_RADAR_DVAR: &str = "scr_game_constantradar";
 pub const ENEMY_BOTS_DVAR: &str = "scr_game_enemybots";
