@@ -7,8 +7,10 @@ mod idle_timer;
 #[cfg(target_os = "ios")]
 mod ios_input;
 mod launch;
+mod log_forward;
 mod plugins;
 mod promotion;
+mod render_error;
 #[cfg(target_vendor = "apple")]
 mod thread_qos;
 #[cfg(any(target_os = "ios", test))]

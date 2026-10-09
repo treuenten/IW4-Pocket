@@ -173,12 +173,16 @@ pub fn default_plugins_with_quiet_log(mut window: WindowPlugin) -> bevy::app::Pl
         .set(LogPlugin {
             filter: "warn,iw4l=info".into(),
             level: bevy::log::Level::WARN,
+            // iOS: Bevy and wgpu warnings and errors into the boot and per-run logs.
+            custom_layer: crate::log_forward::diag_layer,
             ..default()
         })
         .set(BevyRenderPlugin {
             render_creation: RenderCreation::Automatic(Box::new(wgpu)),
             ..default()
-        });
+        })
+        // Quit on a graphics error as Bevy does, after writing down which one.
+        .add_after::<BevyRenderPlugin>(crate::render_error::RenderErrorRecordPlugin);
     #[cfg(target_os = "ios")]
     let plugins = plugins.add(crate::ios_input::IosInputPlugin);
     #[cfg(target_vendor = "apple")]

@@ -372,6 +372,29 @@ pub fn write_event(
         let short: String = msg.chars().take(300).collect();
         boot_crumb(&format!("[{}/{}] {short}", ch.as_str(), lvl.as_str()));
     }
+    write_sink(ch, lvl, msg, ev, fields);
+}
+
+/// An error the app does not survive, such as the graphics error Bevy quits on: whole
+/// in iw4l-boot.log on iOS (an ordinary line keeps only its first 300 characters
+/// there) and at error level in the per-run log and on stderr.
+pub fn fatal(ch: Channel, msg: &str) {
+    #[cfg(target_os = "ios")]
+    boot_crumb(&format!(
+        "[{}/{}] {msg}",
+        ch.as_str(),
+        Level::Error.as_str()
+    ));
+    write_sink(ch, Level::Error, msg, None, None);
+}
+
+fn write_sink(
+    ch: Channel,
+    lvl: Level,
+    msg: &str,
+    ev: Option<&str>,
+    fields: Option<&serde_json::Value>,
+) {
     let Some(sink) = SINK.get() else {
         eprintln!("{}  {}  {msg}", ch.as_str(), lvl.as_str());
         return;
@@ -585,6 +608,22 @@ mod tests {
             written,
             b"1 main entered, sandbox ready\n\nPANIC on thread\n  0: frame\nmem: 41 MiB\n"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The only test here that opens the per-run log (it is set once per process).
+    #[test]
+    fn a_fatal_line_reaches_the_per_run_log_whole() {
+        let dir = std::env::temp_dir().join(format!("iw4l-fatal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = init_log(&dir);
+        let reason = format!(
+            "GRAPHICS ERROR (wgpu Validation), quitting: In Device::create_buffer\n  {}\n  caused by: too big",
+            "x".repeat(400)
+        );
+        fatal(Channel::Launch, &reason);
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains(&format!("launch  error  {reason}\n")), "{log}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

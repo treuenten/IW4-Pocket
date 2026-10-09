@@ -2035,6 +2035,7 @@ dependencies = [
  "fx_iw4",
  "hud",
  "libc",
+ "log",
  "master_protocol",
  "net",
  "objc2 0.6.4",
@@ -2049,6 +2050,7 @@ dependencies = [
  "session",
  "sha2",
  "sim",
+ "tracing-log",
  "ui",
  "wgpu-hal",
 ]

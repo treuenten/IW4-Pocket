@@ -62,5 +62,10 @@ wgpu-hal = { version = "29.0.4", default-features = false, features = ["metal"] 
 # Thread QoS classes (`thread_qos`).
 libc = "0.2"
 
+[dev-dependencies]
+# log_forward's test hands its layer `log` records the way bevy_log's LogTracer does.
+log = "0.4"
+tracing-log = { version = "0.2", default-features = false }
+
 [lints]
 workspace = true
