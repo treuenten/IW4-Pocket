@@ -97,6 +97,36 @@ pub(crate) fn advance(world: &mut World) {
     update(world, true);
 }
 
+/// A player watching an archived killcam is a spectator until it ends, so its
+/// body does not walk, fire or switch weapons meanwhile. Only the end-of-match
+/// killcam seats players who are still alive; the others have no body to move.
+/// Script button reads (`useButtonPressed` and the like) see the raw command.
+pub(crate) fn hold_killcam_viewer(
+    world: &mut World,
+    client: ClientId,
+    cmd: &mut playerstate_iw4::UserCmd,
+) {
+    let seated = world
+        .get_resource::<Runtime>()
+        .and_then(|runtime| runtime.players.get(&client.0))
+        .is_some_and(|slot| {
+            &*slot.sessionstate == "spectator"
+                && slot.seat.archive_ms > 0
+                && slot.spectator.target.is_some()
+        });
+    if !seated {
+        return;
+    }
+    use playerstate_iw4::buttons;
+    let held = FrameWorld::from_world(world)
+        .player(client)
+        .map_or(0, |ps| ps.weapon);
+    cmd.forwardmove = 0;
+    cmd.rightmove = 0;
+    cmd.buttons &= buttons::PRONE | buttons::CROUCH | buttons::STANCE_HELD;
+    cmd.weapon = held as u16;
+}
+
 fn update(world: &mut World, input: bool) {
     let mut runtime = std::mem::take(&mut *world.resource_mut::<Runtime>());
     let clients: Vec<u32> = runtime.players.keys().copied().collect();
@@ -147,7 +177,13 @@ fn update(world: &mut World, input: bool) {
             && !archived
             && pressed & (playerstate_iw4::buttons::ATTACK | playerstate_iw4::buttons::ADS) != 0;
         if let Some(forced) = forced {
-            slot.spectator.target = allowed.contains(&forced).then_some(forced);
+            // A killcam replays the archive, so it may follow the viewer's own
+            // past view: the end-of-match killcam forces every player onto the
+            // attacker, the attacker included. Live spectating never targets
+            // yourself.
+            let own_replay =
+                archived && forced == client && targets.iter().any(|(id, ..)| *id == client);
+            slot.spectator.target = (own_replay || allowed.contains(&forced)).then_some(forced);
             slot.spectator.free = false;
         } else if input
             && pressed & playerstate_iw4::buttons::USE != 0
@@ -242,5 +278,127 @@ fn update(world: &mut World, input: bool) {
             "spectating_cycle",
             Vec::new(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::script::host::players::{PlayerSlot, script_seats};
+
+    /// Clients 0 and 1, both alive; client 1 plays and client 0 is a
+    /// spectator forced onto `forced` (-1: not forced) with `archive_ms` of
+    /// look-back.
+    fn seated(forced: i32, archive_ms: i32) -> crate::SimWorld {
+        let mut sim = crate::SimWorld::default();
+        let mut frame = sim.frame();
+        for client in [ClientId(0), ClientId(1)] {
+            frame.ensure_player(client);
+            frame.client_meta_mut(client).lifecycle = ClientLifecycle::Alive;
+        }
+        let mut runtime = frame.ecs().resource_mut::<Runtime>();
+        for client in [0, 1] {
+            runtime
+                .players
+                .insert(client, PlayerSlot::new(100 + u64::from(client)));
+        }
+        runtime.players.get_mut(&1).unwrap().sessionstate = "playing".into();
+        let slot = runtime.players.get_mut(&0).unwrap();
+        slot.sessionstate = "spectator".into();
+        slot.seat.spectator_client = forced;
+        slot.seat.archive_ms = archive_ms;
+        sim
+    }
+
+    fn target(sim: &mut crate::SimWorld) -> Option<u32> {
+        let mut frame = sim.frame();
+        update(frame.ecs(), false);
+        frame.ecs().resource::<Runtime>().players[&0]
+            .spectator
+            .target
+    }
+
+    #[test]
+    fn the_winner_is_seated_on_his_own_archived_view() {
+        let mut sim = seated(0, 10_050);
+        assert_eq!(target(&mut sim), Some(0));
+        let mut frame = sim.frame();
+        let seats = script_seats(frame.ecs());
+        assert_eq!(seats.len(), 1);
+        assert_eq!(seats[0].0, ClientId(0));
+        assert_eq!(seats[0].1.spectator_client, 0);
+        assert_eq!(seats[0].1.archive_ms, 10_050);
+        assert!(!seats[0].1.final_kill);
+    }
+
+    #[test]
+    fn live_spectating_never_follows_yourself() {
+        let mut sim = seated(0, 0);
+        assert_eq!(target(&mut sim), None);
+        let mut sim = seated(-1, 0);
+        assert_eq!(target(&mut sim), Some(1));
+        let mut sim = seated(1, 0);
+        assert_eq!(target(&mut sim), Some(1));
+        let mut sim = seated(1, 10_050);
+        assert_eq!(target(&mut sim), Some(1));
+    }
+
+    #[test]
+    fn a_seat_read_during_the_final_killcam_is_marked_final() {
+        let mut sim = seated(1, 10_050);
+        let mut frame = sim.frame();
+        update(frame.ecs(), false);
+        let mut runtime = frame.ecs().resource_mut::<Runtime>();
+        runtime
+            .dynamic_symbols
+            .insert("showingfinalkillcam".into(), 7);
+        runtime
+            .objects
+            .entry(0)
+            .or_default()
+            .insert(7, Value::Int(1));
+        let seats = script_seats(frame.ecs());
+        assert_eq!(seats.len(), 1);
+        assert!(seats[0].1.final_kill);
+        frame
+            .ecs()
+            .resource_mut::<Runtime>()
+            .objects
+            .get_mut(&0)
+            .unwrap()
+            .insert(7, Value::Int(0));
+        assert!(!script_seats(frame.ecs())[0].1.final_kill);
+    }
+
+    #[test]
+    fn a_seated_body_stands_still_until_the_killcam_ends() {
+        use playerstate_iw4::buttons;
+        let pressed = playerstate_iw4::UserCmd {
+            forwardmove: 127,
+            rightmove: -127,
+            buttons: buttons::ATTACK | buttons::JUMP | buttons::CROUCH,
+            weapon: 9,
+            ..Default::default()
+        };
+        let mut sim = seated(0, 10_050);
+        let mut frame = sim.frame();
+        update(frame.ecs(), false);
+        frame.player_mut(ClientId(0)).unwrap().weapon = 4;
+        let mut cmd = pressed;
+        hold_killcam_viewer(frame.ecs(), ClientId(0), &mut cmd);
+        assert_eq!((cmd.forwardmove, cmd.rightmove), (0, 0));
+        assert_eq!(cmd.buttons, buttons::CROUCH);
+        assert_eq!(cmd.weapon, 4);
+
+        let mut cmd = pressed;
+        hold_killcam_viewer(frame.ecs(), ClientId(1), &mut cmd);
+        assert_eq!(cmd, pressed);
+
+        let mut sim = seated(1, 0);
+        let mut frame = sim.frame();
+        update(frame.ecs(), false);
+        let mut cmd = pressed;
+        hold_killcam_viewer(frame.ecs(), ClientId(0), &mut cmd);
+        assert_eq!(cmd, pressed);
     }
 }

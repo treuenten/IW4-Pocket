@@ -192,9 +192,12 @@ pub fn snapshot_override_for_viewer(
         .then(|| snapshot_for_viewer(archive, seats, live, viewer, now_ms))
 }
 
+/// A seat replaces the view of a viewer who is not alive. The end-of-match
+/// killcam is the exception: it replays the archive to every player, so it
+/// also covers the survivors (the winner watching his own winning kill).
 fn seat_applies(seats: &ActiveKillcams, live: &Snapshot, viewer: ClientId) -> bool {
     seats.get(viewer).is_some_and(|session| {
-        session.final_kill
+        (session.final_kill && session.killcamoffset_ms > 0)
             || !live
                 .meta
                 .for_client(viewer)
@@ -261,6 +264,13 @@ fn seat_snapshot(
     };
     let sample = apply_seat_to_snapshot(archive, &mut out, viewer, session, now_ms);
     let archived = lookup.tick.and_then(|tick| archive.frame(tick));
+    overlay_archived_cameras(
+        &mut out,
+        live,
+        archived.map(|f| &f.snapshot),
+        viewer,
+        session.focus_client,
+    );
     overlay_killcam_hud(
         &mut out,
         live,
@@ -327,6 +337,35 @@ fn overlay_archived_world(
     let delta_ms = sim::level_time_ms(live.tick).wrapping_sub(sim::level_time_ms(archived.tick));
     rebase_archived_world(&mut out, viewer, delta_ms);
     out
+}
+
+/// Remote cameras are per-client rows, not player state: the AC-130 and Chopper
+/// Gunner weapon-view link and the Predator missile link. The replay must look
+/// through the focus's archived camera, and the viewer's own live links must
+/// not leak into it (the winner's gunship is gone by the end-of-match killcam).
+fn overlay_archived_cameras(
+    out: &mut Snapshot,
+    live: &Snapshot,
+    archived: Option<&Snapshot>,
+    viewer: ClientId,
+    focus: ClientId,
+) {
+    let focus_row = archived.and_then(|snap| snap.meta.for_client(focus));
+    let delta_ms = archived.map_or(0, |snap| {
+        sim::level_time_ms(live.tick).wrapping_sub(sim::level_time_ms(snap.tick))
+    });
+    let linked_weapon_view = focus_row.and_then(|meta| meta.linked_weapon_view);
+    let remote_missile =
+        focus_row
+            .and_then(|meta| meta.remote_missile)
+            .map(|link| sim::RemoteMissile {
+                unlink_at_ms: link.unlink_at_ms.map(|ms| ms.wrapping_add(delta_ms)),
+                ..link
+            });
+    if let Some((_, meta)) = out.meta.clients.iter_mut().find(|(id, _)| *id == viewer) {
+        meta.linked_weapon_view = linked_weapon_view;
+        meta.remote_missile = remote_missile;
+    }
 }
 
 fn rebase_entity_state(es: &mut entity_iw4::EntityState, delta_ms: i32) {
@@ -408,4 +447,172 @@ pub const fn killcam_seconds_to_ms(seconds: f32) -> i32 {
     let ms = seconds * 1000.0;
     let ticks = (ms / (AUTHORITY_MS as f32) + 0.5) as i32;
     ticks.saturating_mul(AUTHORITY_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sim::ClientLifecycle::{Alive, Dead};
+    use sim::{ClientSnapshotMeta, LinkedWeaponView, RemoteMissile, Tick};
+
+    const LIVE_TICK: u32 = 300;
+    const ARCHIVE_MS: i32 = 10_050;
+
+    fn snapshot(tick: u32, clients: &[(u32, ClientLifecycle)]) -> Snapshot {
+        let mut snapshot = Snapshot::unpublished(Tick(tick));
+        for &(id, lifecycle) in clients {
+            snapshot.players.push((ClientId(id), PlayerState::ZERO));
+            snapshot.meta.clients.push((
+                ClientId(id),
+                ClientSnapshotMeta {
+                    lifecycle,
+                    ..Default::default()
+                },
+            ));
+        }
+        snapshot
+    }
+
+    fn row(snapshot: &mut Snapshot, id: u32) -> &mut ClientSnapshotMeta {
+        &mut snapshot
+            .meta
+            .clients
+            .iter_mut()
+            .find(|(client, _)| client.0 == id)
+            .unwrap()
+            .1
+    }
+
+    fn gunship(tick: u32) -> LinkedWeaponView {
+        LinkedWeaponView {
+            entity_num: 132,
+            origin: [-5993.0, 2264.0, 4916.0 + tick as f32],
+            angles: [48.3, 355.9, 0.0],
+        }
+    }
+
+    fn missile(unlink_at_ms: i32) -> RemoteMissile {
+        RemoteMissile {
+            entnum: 140,
+            unlink_at_ms: Some(unlink_at_ms),
+            ..Default::default()
+        }
+    }
+
+    /// Ticks before `LIVE_TICK`, with `camera` filling in the focus's
+    /// remote cameras for each one.
+    fn archive(focus: u32, camera: impl Fn(u32, &mut ClientSnapshotMeta)) -> FrameArchive {
+        let mut archive = FrameArchive::new();
+        for tick in 0..LIVE_TICK {
+            let mut frame = snapshot(tick, &[(0, Alive), (1, Alive)]);
+            camera(tick, row(&mut frame, focus));
+            archive.push_snapshot(&frame, &[]);
+        }
+        archive
+    }
+
+    fn session(focus: u32, final_kill: bool) -> KillcamSession {
+        KillcamSession {
+            archivetime_ms: ARCHIVE_MS,
+            focus_client: ClientId(focus),
+            focus: SeatFocus::hitscan(focus as i32),
+            ends_at_ms: i32::MAX,
+            final_kill,
+            started_at_ms: 0,
+            killcamoffset_ms: ARCHIVE_MS,
+            predelay_ms: 0,
+            postdelay_ms: 0,
+            recalc_pending: false,
+            entity_focus: None,
+        }
+    }
+
+    fn seated(viewer: u32, session: KillcamSession) -> ActiveKillcams {
+        let mut seats = ActiveKillcams::new();
+        seats.arm(ClientId(viewer), session);
+        seats
+    }
+
+    #[test]
+    fn the_final_killcam_reaches_a_viewer_who_is_still_alive() {
+        let live = snapshot(LIVE_TICK, &[(0, Alive), (1, Alive)]);
+        let dead = snapshot(LIVE_TICK, &[(0, Dead), (1, Alive)]);
+        let viewer = ClientId(0);
+        assert!(!seat_applies(&seated(0, session(1, false)), &live, viewer));
+        assert!(seat_applies(&seated(0, session(1, true)), &live, viewer));
+        assert!(seat_applies(&seated(0, session(1, false)), &dead, viewer));
+        let live_follow = KillcamSession {
+            killcamoffset_ms: 0,
+            ..session(1, true)
+        };
+        assert!(!seat_applies(&seated(0, live_follow), &live, viewer));
+
+        let archive = archive(1, |_, _| {});
+        let now_ms = sim::level_time_ms(live.tick);
+        let (out, sample) = snapshot_and_sample_for_viewer(
+            &archive,
+            &seated(0, session(1, true)),
+            &live,
+            viewer,
+            now_ms,
+        );
+        let sample = sample.expect("the final seat applies to the survivor");
+        let (_, ps) = out.players.iter().find(|(id, _)| *id == viewer).unwrap();
+        assert!(!ps.is_live_frame());
+        assert_eq!(ps.kill_cam_client_num, 1);
+        assert_eq!(*ps, sample.player_state);
+    }
+
+    #[test]
+    fn the_replay_looks_through_the_focus_archived_camera() {
+        // The winner watching himself, and anyone else watching the winner.
+        for (viewer, focus) in [(0, 0), (1, 0)] {
+            let archive = archive(focus, |tick, meta| {
+                meta.linked_weapon_view = Some(gunship(tick));
+                meta.remote_missile = Some(missile(sim::level_time_ms(Tick(tick))));
+            });
+            let archived = archive.lookup(ARCHIVE_MS).tick.unwrap();
+            let mut live = snapshot(LIVE_TICK, &[(0, Alive), (1, Alive)]);
+            row(&mut live, viewer).linked_weapon_view = Some(gunship(LIVE_TICK));
+            row(&mut live, viewer).score = 7;
+            let now_ms = sim::level_time_ms(live.tick);
+            let out = snapshot_for_viewer(
+                &archive,
+                &seated(viewer, session(focus, true)),
+                &live,
+                ClientId(viewer),
+                now_ms,
+            );
+            let meta = out.meta.for_client(ClientId(viewer)).unwrap();
+            assert_eq!(meta.linked_weapon_view, Some(gunship(archived.0)));
+            assert_eq!(meta.remote_missile, Some(missile(now_ms)));
+            // The rest of the row stays the viewer's live one.
+            assert_eq!(meta.score, 7);
+        }
+    }
+
+    #[test]
+    fn a_replay_without_a_remote_camera_drops_the_viewer_live_one() {
+        let archive = archive(1, |_, _| {});
+        let mut live = snapshot(LIVE_TICK, &[(0, Alive), (1, Alive)]);
+        row(&mut live, 0).linked_weapon_view = Some(gunship(LIVE_TICK));
+        row(&mut live, 0).remote_missile = Some(missile(0));
+        let now_ms = sim::level_time_ms(live.tick);
+        let viewer = ClientId(0);
+        let out = snapshot_for_viewer(
+            &archive,
+            &seated(0, session(1, true)),
+            &live,
+            viewer,
+            now_ms,
+        );
+        let meta = out.meta.for_client(viewer).unwrap();
+        assert_eq!(meta.linked_weapon_view, None);
+        assert_eq!(meta.remote_missile, None);
+
+        let out = snapshot_for_viewer(&archive, &ActiveKillcams::new(), &live, viewer, now_ms);
+        let meta = out.meta.for_client(viewer).unwrap();
+        assert_eq!(meta.linked_weapon_view, Some(gunship(LIVE_TICK)));
+        assert_eq!(meta.remote_missile, Some(missile(0)));
+    }
 }
