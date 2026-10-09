@@ -64,9 +64,11 @@ impl CEntityRuntime {
             return;
         };
         if !self.in_next_snap()
-            || !matches!(self.pose_e_type as i32, ET_PLAYER | ET_PLAYER_CORPSE)
-            || previous.pos.tr_type != TR_INTERPOLATE
-            || self.current.pos.tr_type != TR_INTERPOLATE
+            || !lerps_between_snapshots(
+                self.pose_e_type as i32,
+                previous.pos.tr_type,
+                self.current.pos.tr_type,
+            )
         {
             return;
         }
@@ -90,6 +92,25 @@ impl CEntityRuntime {
         self.current = lerp_from_entity_state(&self.next_state);
         self.pose_e_type = u8::try_from(self.next_state.e_type).unwrap_or(0);
     }
+}
+
+// A player is drawn between two snapshots only while both are plain
+// positions. A corpse is drawn between its two snapshot positions whatever
+// its trajectory: each is already where the body was at that snapshot, so a
+// falling or sliding body moves every frame instead of in 20 Hz jumps.
+fn lerps_between_snapshots(e_type: i32, previous_tr_type: i32, current_tr_type: i32) -> bool {
+    match e_type {
+        ET_PLAYER_CORPSE => true,
+        ET_PLAYER => previous_tr_type == TR_INTERPOLATE && current_tr_type == TR_INTERPOLATE,
+        _ => false,
+    }
+}
+
+// The corpse slot behind an entity number is reused; another death there is
+// another body, never drawn sliding over from where the old one lay.
+fn another_body(current: &EntityState, next: &EntityState) -> bool {
+    next.e_type == ET_PLAYER_CORPSE
+        && (current.time2 != next.time2 || current.client_num != next.client_num)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,8 +267,9 @@ pub fn apply_existing(rt: &mut CEntityRuntime, next: EntityState, at_time_ms: i3
     let was_in = rt.in_next_snap();
     let e_type_changed = rt.next_state.e_type != next.e_type;
     let teleport = (rt.next_state.e_flags ^ next.e_flags) & EFLAGS_TELEPORT != 0;
-    if !was_in || e_type_changed || teleport {
-        let new_entity = !was_in || e_type_changed;
+    let other_body = another_body(&rt.next_state, &next);
+    if !was_in || e_type_changed || teleport || other_body {
+        let new_entity = !was_in || e_type_changed || other_body;
         reset_entity(rt, next, at_time_ms, new_entity);
         return;
     }
@@ -352,4 +374,78 @@ pub fn corpse_slot_to_entity_state(slot: &PlayerCorpseSlot) -> EntityState {
 
     es.ground_entity_num = slot.ground_entity_num;
     es
+}
+
+#[cfg(test)]
+mod corpse_presentation_tests {
+    use super::*;
+    use entity_iw4::TR_GRAVITY;
+
+    fn corpse(time2: i32, tr_type: i32, tr_time: i32, tr_base: [f32; 3]) -> EntityState {
+        EntityState {
+            number: 1001,
+            e_type: ET_PLAYER_CORPSE,
+            time2,
+            client_num: 3,
+            tr_type,
+            tr_time,
+            tr_base,
+            apos_tr_type: TR_INTERPOLATE,
+            ..Default::default()
+        }
+    }
+
+    fn presented(first: EntityState, next: EntityState, at_time_ms: i32) -> [f32; 3] {
+        let mut rt = CEntityRuntime::default();
+        reset_entity(&mut rt, first, 1000, true);
+        apply_existing(&mut rt, next, 1050);
+        rt.present_pose(at_time_ms);
+        rt.origin
+    }
+
+    #[test]
+    fn a_falling_corpse_is_drawn_between_its_two_snapshot_positions() {
+        let falling = corpse(1000, TR_GRAVITY, 1000, [0.0, 0.0, 100.0]);
+        let origin = presented(falling, falling, 1025);
+        assert_eq!([origin[0], origin[1]], [0.0, 0.0]);
+        assert!((origin[2] - 99.5).abs() < 1e-3, "{origin:?}");
+    }
+
+    #[test]
+    fn a_corpse_that_starts_to_fall_is_drawn_between_snapshots_too() {
+        let resting = corpse(1000, TR_INTERPOLATE, 0, [0.0, 0.0, 50.0]);
+        let falling = corpse(1000, TR_GRAVITY, 1050, [10.0, 0.0, 50.0]);
+        assert_eq!(presented(resting, falling, 1025), [5.0, 0.0, 50.0]);
+    }
+
+    #[test]
+    fn a_new_body_in_a_reused_corpse_slot_does_not_slide_from_the_old_one() {
+        let old = corpse(1000, TR_INTERPOLATE, 0, [0.0, 0.0, 0.0]);
+        let new = corpse(1050, TR_INTERPOLATE, 0, [500.0, 0.0, 0.0]);
+        assert_eq!(presented(old, new, 1025), [500.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn players_are_still_drawn_between_snapshots_only_as_plain_positions() {
+        assert!(lerps_between_snapshots(
+            ET_PLAYER,
+            TR_INTERPOLATE,
+            TR_INTERPOLATE
+        ));
+        assert!(!lerps_between_snapshots(
+            ET_PLAYER,
+            TR_INTERPOLATE,
+            TR_GRAVITY
+        ));
+        assert!(lerps_between_snapshots(
+            ET_PLAYER_CORPSE,
+            TR_GRAVITY,
+            TR_INTERPOLATE
+        ));
+        assert!(!lerps_between_snapshots(
+            entity_iw4::ET_MISSILE,
+            TR_INTERPOLATE,
+            TR_INTERPOLATE
+        ));
+    }
 }
