@@ -1437,6 +1437,8 @@ fn objective_utility(obs: &BotObservation, obj: ModeObjective, route_length: Opt
 /// the script's progress, so it would set the whole defuse time against a fuse
 /// that has been running down alongside the hold, and let go just short of
 /// the end. MW2 runs a defuse that began with the defuse time left to the end.
+/// `interaction_ms` is the whole time from the press, the putaway of the
+/// weapon in hand included, so a bot does not start a defuse it cannot finish.
 fn too_late_to_defuse(obj: &ModeObjective, linked: bool, travel_ms: f32) -> bool {
     if obj.action != ObjectiveAction::Defuse
         || obj.role != TeamRole::Actor

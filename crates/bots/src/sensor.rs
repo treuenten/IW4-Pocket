@@ -125,7 +125,11 @@ pub fn observe_focused(
             }
         }
     }
-    let objectives = public_objectives(snapshot, bot, team);
+    let held_drop_ms = inventory
+        .iter()
+        .find(|slot| slot.weapon == self_state.weapon)
+        .map_or(0, |slot| slot.facts.drop_time_ms);
+    let objectives = public_objectives(snapshot, bot, team, bomb_use_ms(held_drop_ms));
     Some(BotObservation {
         tick: snapshot.tick.0,
         time_ms: snapshot.tick.0 as i32 * 50,
@@ -245,7 +249,12 @@ fn probe_visible(
     }
 }
 
-fn public_objectives(snapshot: &Snapshot, bot: ClientId, team: i32) -> Vec<ModeObjective> {
+fn public_objectives(
+    snapshot: &Snapshot,
+    bot: ClientId,
+    team: i32,
+    use_ms: u32,
+) -> Vec<ModeObjective> {
     let Some(side) = gamemode_iw4::Team::from_packed_u8(team as u8) else {
         return Vec::new();
     };
@@ -286,7 +295,7 @@ fn public_objectives(snapshot: &Snapshot, bot: ClientId, team: i32) -> Vec<ModeO
     // (setGameEndTime(gettime() + bombTimer)); before a plant it is the round clock.
     let now_ms = snapshot.tick.0.saturating_mul(sim::MATCH_TICK_MS) as i32;
     let remaining_ms = (state.game_end_time > 0).then(|| state.time_left_ms(now_ms).max(0) as u32);
-    objectives_from_compass(&markers, bot, feet, &mates, remaining_ms)
+    objectives_from_compass(&markers, bot, feet, &mates, remaining_ms, use_ms)
 }
 
 /// A compass marker the bot's team is shown: the 2D icon the gametype gave
@@ -337,8 +346,25 @@ fn icon_role(icon: &str) -> IconRole {
     }
 }
 
-/// sd.gsc, sab.gsc and dd.gsc default planttime and defusetime to 5 seconds.
+/// MW2's match config (default_xboxlive.cfg) sets defusetime to 5 seconds in
+/// sd, sab and dd, as the scripts' own defaults do. planttime is 5 seconds too
+/// except in Sabotage (2.5), but only a defuse is ever checked against the fuse.
 const BOMB_USE_MS: u32 = 5_000;
+/// The frames a plant or a defuse spends past the use time and the putaway,
+/// at most one each: the press reaching the script, the putaway ending on a
+/// frame boundary, and useHoldThinkLoop's first pass with the briefcase up,
+/// which adds no progress because useRate is still 0.
+const BOMB_USE_FRAMES_MS: u32 = 3 * sim::MATCH_TICK_MS;
+
+/// How long a plant or a defuse takes from the press, holding a weapon with
+/// this dropTime. `_gameobjects::useHoldThinkLoop` counts curProgress only
+/// while getCurrentWeapon() is the briefcase, and that holds once the weapon
+/// in hand has been put away and the briefcase starts to come up. So the use
+/// time runs after the held weapon's putaway, not from the press.
+fn bomb_use_ms(held_drop_ms: i32) -> u32 {
+    BOMB_USE_MS + held_drop_ms.max(0) as u32 + BOMB_USE_FRAMES_MS
+}
+
 /// How far the escort marker may sit from the carrier it rides on. Player
 /// hulls cannot overlap, so the nearest teammate this close is the carrier.
 const CARRIER_XY: f32 = 32.0;
@@ -356,6 +382,7 @@ fn objectives_from_compass(
     feet: [f32; 3],
     mates: &[Mate],
     remaining_ms: Option<u32>,
+    use_ms: u32,
 ) -> Vec<ModeObjective> {
     let carrier = markers
         .iter()
@@ -399,7 +426,7 @@ fn objectives_from_compass(
                 },
                 active_user: claimant(),
                 remaining_ms,
-                interaction_ms: BOMB_USE_MS,
+                interaction_ms: use_ms,
                 touching: use_touching(feet, m.origin),
                 use_button: actor == Some(me),
                 ..base
@@ -477,7 +504,23 @@ mod tests {
 
     fn goals(markers: &[Marker], me: u32, mates: &[Mate]) -> Vec<ModeObjective> {
         let feet = mates.iter().find(|m| m.id.0 == me).unwrap().origin;
-        objectives_from_compass(markers, ClientId(me), feet, mates, Some(30_000))
+        objectives_from_compass(
+            markers,
+            ClientId(me),
+            feet,
+            mates,
+            Some(30_000),
+            bomb_use_ms(HELD_DROP_MS),
+        )
+    }
+
+    const HELD_DROP_MS: i32 = 500;
+
+    #[test]
+    fn a_bomb_use_runs_from_the_putaway() {
+        assert_eq!(bomb_use_ms(HELD_DROP_MS), 5_650);
+        assert_eq!(bomb_use_ms(0), BOMB_USE_MS + BOMB_USE_FRAMES_MS);
+        assert_eq!(bomb_use_ms(-1), bomb_use_ms(0));
     }
 
     #[test]
@@ -518,7 +561,7 @@ mod tests {
         assert!(own.iter().all(|g| g.action == ObjectiveAction::Plant
             && g.role == TeamRole::Actor
             && g.use_button
-            && g.interaction_ms == BOMB_USE_MS));
+            && g.interaction_ms == bomb_use_ms(HELD_DROP_MS)));
         let other = goals(&markers, 4, &mates);
         assert_eq!(other.len(), 2, "{other:?}");
         assert!(other.iter().all(|g| g.action == ObjectiveAction::Plant

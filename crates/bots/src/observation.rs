@@ -226,6 +226,7 @@ pub struct ModeObjective {
     pub role: TeamRole,
     pub active_user: Option<ClientId>,
     pub remaining_ms: Option<u32>,
+    /// Milliseconds the interaction takes from the press to the end.
     pub interaction_ms: u32,
     pub progress: f32,
     pub origin: [f32; 3],
