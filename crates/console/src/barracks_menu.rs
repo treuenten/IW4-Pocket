@@ -11,6 +11,42 @@ pub(crate) struct BarracksMenuState {
     reward_hover: usize,
     rewards: Vec<u32>,
     status: String,
+    /// What the card and reward dvars were last written from; `None` until they
+    /// are written, and whenever they have to be written again.
+    published: Option<BarracksInputs>,
+}
+
+/// Everything the card and reward dvars are worked out from besides the menu
+/// state above, which only a barracks command changes. While none of it moves
+/// and no command comes in, the dvars already hold what this frame would write.
+#[derive(Debug, PartialEq)]
+struct BarracksInputs {
+    selection: sim::PlayerProfile,
+    player_name: String,
+    catalog: bevy::ecs::change_detection::Tick,
+    loc: bevy::ecs::change_detection::Tick,
+}
+
+impl BarracksInputs {
+    fn matches(
+        &self,
+        selection: sim::PlayerProfile,
+        player_name: &str,
+        catalog: bevy::ecs::change_detection::Tick,
+        loc: bevy::ecs::change_detection::Tick,
+    ) -> bool {
+        self.selection == selection
+            && self.player_name == player_name
+            && self.catalog == catalog
+            && self.loc == loc
+    }
+}
+
+/// A console `set` can write any dvar, ours included, and the frontend route
+/// that applies it may run before or after this one: the dvars are written this
+/// frame and the next, as they used to be every frame.
+pub(crate) fn writes_any_dvar(command: &ConsoleCommand) -> bool {
+    matches!(command.name.as_str(), "set" | "seta" | "setfromdvar")
 }
 
 pub(crate) fn register(registry: &mut ConsoleRegistry) {
@@ -45,13 +81,30 @@ pub(crate) fn route(
 ) {
     if !profile.loaded {
         commands.read().for_each(drop);
+        state.published = None;
+        return;
+    }
+    let commands: Vec<&ConsoleCommand> = commands.read().collect();
+    let dvar_writes = commands.iter().any(|command| writes_any_dvar(command));
+    let barracks: Vec<&ConsoleCommand> = commands
+        .into_iter()
+        .filter(|command| command.name.starts_with("ui_barracks_"))
+        .collect();
+    if barracks.is_empty()
+        && !dvar_writes
+        && state.published.as_ref().is_some_and(|published| {
+            published.matches(
+                profile.selection,
+                &settings.player_name,
+                catalog.last_changed(),
+                loc.last_changed(),
+            )
+        })
+    {
         return;
     }
     let rows = reward_rows(&catalog);
-    for command in commands
-        .read()
-        .filter(|command| command.name.starts_with("ui_barracks_"))
-    {
+    for command in barracks {
         let arg = command.args.first().map(String::as_str).unwrap_or("");
         let index = arg.parse::<usize>().ok();
         let table_name = if state.emblems {
@@ -281,6 +334,12 @@ pub(crate) fn route(
         format!("{} / 3 rewards selected", state.rewards.len()),
     );
     dvars.set("ui_barracks_status", &state.status);
+    state.published = (!dvar_writes).then(|| BarracksInputs {
+        selection: profile.selection,
+        player_name: settings.player_name.clone(),
+        catalog: catalog.last_changed(),
+        loc: loc.last_changed(),
+    });
 }
 
 pub(crate) fn sync_profile(
@@ -333,5 +392,191 @@ pub(crate) fn sync_profile(
         );
     } else {
         *sent = Some(next);
+    }
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+    use asset_game::{CapturedStringTable, LocalizeCatalog, MenuCatalog};
+    use std::collections::BTreeMap;
+
+    fn table(
+        name: &str,
+        columns: usize,
+        rows: usize,
+        cell: impl Fn(usize, usize) -> String,
+    ) -> CapturedStringTable {
+        CapturedStringTable {
+            name: name.to_owned(),
+            columns,
+            rows,
+            cells: (0..rows)
+                .flat_map(|row| (0..columns).map(move |col| (row, col)))
+                .map(|(row, col)| cell(row, col))
+                .collect(),
+        }
+    }
+
+    fn catalog() -> MenuCatalog {
+        let mut catalog = MenuCatalog::default();
+        for (name, columns, rows) in [
+            ("mp/cardTitleTable.csv", 3, 31),
+            ("mp/cardIconTable.csv", 2, 57),
+        ] {
+            catalog.string_tables.insert(
+                name.to_owned(),
+                table(name, columns, rows, |row, col| {
+                    format!("{name}:{row}:{col}")
+                }),
+            );
+        }
+        let names = [
+            "none",
+            "uav",
+            "airdrop",
+            "sentry",
+            "predator_missile",
+            "harrier",
+            "nuke",
+        ];
+        catalog.string_tables.insert(
+            "mp/killstreakTable.csv".to_owned(),
+            table(
+                "mp/killstreakTable.csv",
+                15,
+                names.len(),
+                |row, col| match col {
+                    1 => names[row].to_owned(),
+                    4 => ((row * 7) % 26).to_string(),
+                    _ => format!("ks{row}:{col}"),
+                },
+            ),
+        );
+        catalog
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        let mut profile = BarracksProfile::default();
+        profile.loaded = true;
+        app.add_message::<ConsoleCommand>()
+            .insert_resource(catalog())
+            .init_resource::<LocalizeCatalog>()
+            .insert_resource(frame::GameSettings::default())
+            .insert_resource(profile)
+            .init_resource::<UiMenuDvars>()
+            .add_systems(Update, route);
+        app
+    }
+
+    fn dvars(app: &App) -> BTreeMap<String, String> {
+        app.world()
+            .resource::<UiMenuDvars>()
+            .iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    type Change = fn(&mut World);
+
+    #[test]
+    fn skipped_frames_leave_the_dvars_every_frame_would_have_written() {
+        // `written` only rewrites the dvars when something changed; `every`
+        // gets a console `set` each frame, which makes the route write them
+        // every frame as it used to (nothing here applies the `set` itself).
+        let mut written = app();
+        let mut every = app();
+        let frames: Vec<(&[&str], Option<Change>)> = vec![
+            (&[], None),
+            (&[], None),
+            (&["ui_barracks_open titles"], None),
+            (&["ui_barracks_hover 5"], None),
+            (&[], None),
+            (&["ui_barracks_page 1"], None),
+            (
+                &[],
+                Some(|world| world.resource_mut::<BarracksProfile>().selection.title = 3),
+            ),
+            (&[], None),
+            (
+                &[],
+                Some(|world| {
+                    world.resource_mut::<frame::GameSettings>().player_name = "Soap".into()
+                }),
+            ),
+            (&[], None),
+            (
+                &[],
+                Some(|world| {
+                    let mut catalog = world.resource_mut::<MenuCatalog>();
+                    let table = catalog
+                        .string_tables
+                        .get_mut("mp/cardTitleTable.csv")
+                        .expect("titles");
+                    table.cells[3 * 3 + 2] = "renamed".into();
+                }),
+            ),
+            (&["ui_barracks_open emblems", "ui_barracks_pick 4"], None),
+            (&[], None),
+            (
+                &[
+                    "ui_barracks_open killstreaks",
+                    "ui_barracks_reward 2",
+                    "ui_barracks_reward 4",
+                ],
+                None,
+            ),
+            (
+                &["ui_barracks_reward 1", "ui_barracks_reward_hover 3"],
+                None,
+            ),
+            (&["ui_barracks_apply"], None),
+            (&[], None),
+            (
+                &[],
+                Some(|world| world.insert_resource(LocalizeCatalog::default())),
+            ),
+            (&[], None),
+            (
+                &[],
+                Some(|world| world.resource_mut::<BarracksProfile>().loaded = false),
+            ),
+            (&["ui_barracks_hover 2"], None),
+            (
+                &[],
+                Some(|world| world.resource_mut::<BarracksProfile>().loaded = true),
+            ),
+            (&[], None),
+            (&["set ui_card_title mine"], None),
+            (&[], None),
+            (&[], None),
+        ];
+        let mut skipped = 0;
+        for (at, (lines, change)) in frames.into_iter().enumerate() {
+            for (app, force) in [(&mut written, false), (&mut every, true)] {
+                if let Some(change) = change {
+                    change(app.world_mut());
+                }
+                for line in lines
+                    .iter()
+                    .copied()
+                    .chain(force.then_some("set iw4l_test_force 1"))
+                {
+                    app.world_mut()
+                        .write_message(ConsoleCommand::parse(line).expect("command"));
+                }
+                let before = app.world().resource_ref::<UiMenuDvars>().last_changed();
+                app.update();
+                if !force && app.world().resource_ref::<UiMenuDvars>().last_changed() == before {
+                    skipped += 1;
+                }
+            }
+            assert_eq!(dvars(&written), dvars(&every), "frame {at}");
+        }
+        assert!(dvars(&written).len() > 200);
+        // The quiet frames really were skipped (unloaded frames write nothing
+        // either way).
+        assert!(skipped >= 10, "skipped {skipped}");
     }
 }

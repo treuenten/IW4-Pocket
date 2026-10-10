@@ -26,6 +26,34 @@ pub(crate) struct FrontendState {
     lobby_password: String,
     rules_seeded: bool,
     reopen_lobby: Option<u16>,
+    /// What the member, map and browser rows were last written from; `None`
+    /// until they are written, and whenever they have to be written again.
+    shown_members: Option<Vec<String>>,
+    shown_maps: Option<MapRows>,
+    shown_adverts: Option<AdvertRows>,
+}
+
+type Tick = bevy::ecs::change_detection::Tick;
+
+/// Everything the map rows and pack tabs are worked out from. While none of it
+/// moves and no command came in, their dvars already hold what this frame
+/// would write. (The map previews also depend on which UI images the zones
+/// have loaded so far, so they are written every frame.)
+#[derive(Debug, PartialEq)]
+struct MapRows {
+    map_pack: usize,
+    map_page: usize,
+    maps: Tick,
+    presentation: Option<Tick>,
+    localize: Option<Tick>,
+}
+
+/// Everything the lobby browser rows are worked out from.
+#[derive(Debug, PartialEq)]
+struct AdvertRows {
+    adverts: Vec<net::MasterAdvert>,
+    presentation: Option<Tick>,
+    localize: Option<Tick>,
 }
 
 /// MW2 sends the host of a private match back to its lobby, setup kept, when the
@@ -241,7 +269,9 @@ pub(crate) fn route(
         state.rules_seeded = true;
     }
     let mut browser_page_changed = false;
+    let mut commands_seen = false;
     for command in events.read() {
+        commands_seen = true;
         if command.name.starts_with("ui_browser") || command.name.starts_with("ui_join_lobby") {
             state.browser_notice = None;
         }
@@ -665,16 +695,19 @@ pub(crate) fn route(
     } else {
         dvars.set("ui_lobby_players", "PLAYERS: 1 / 18");
     }
-    for row in 0..18 {
-        let name = lobby_names.get(row);
-        dvars.set(
-            &format!("ui_lobby_member_{row}"),
-            name.map(String::as_str).unwrap_or(""),
-        );
-        dvars.set(
-            &format!("ui_lobby_member_{row}_visible"),
-            if name.is_some() { "1" } else { "0" },
-        );
+    if commands_seen || state.shown_members.as_ref() != Some(&lobby_names) {
+        for row in 0..18 {
+            let name = lobby_names.get(row);
+            dvars.set(
+                &format!("ui_lobby_member_{row}"),
+                name.map(String::as_str).unwrap_or(""),
+            );
+            dvars.set(
+                &format!("ui_lobby_member_{row}_visible"),
+                if name.is_some() { "1" } else { "0" },
+            );
+        }
+        state.shown_members = Some(lobby_names);
     }
     dvars.set("ui_lobby_host", if party.is_host { "1" } else { "0" });
     let private_host = party.in_lobby && party.is_host && !state.public;
@@ -739,31 +772,41 @@ pub(crate) fn route(
         "ui_map_preview",
         hovered_map.map_or_else(String::new, |map| preview_image(map)),
     );
-    for row in 0..PAGE_SIZE {
-        dvars.set(
-            &format!("ui_map_{row}"),
-            pack.get(state.map_page * PAGE_SIZE + row)
-                .map(|map| label(map))
-                .unwrap_or_default(),
-        );
-    }
-    let pages = map_pages(&maps);
-    for slot in 0..PACK_SLOTS {
-        let page = pages.get(slot);
-        dvars.set(
-            &format!("ui_map_pack_{slot}"),
-            page.map_or("", |(_, _, label)| label.as_str()),
-        );
-        dvars.set(
-            &format!("ui_map_pack_tint_{slot}"),
-            if page
-                .is_some_and(|(pack, page, _)| *pack == state.map_pack && *page == state.map_page)
-            {
-                "1"
-            } else {
-                "0.45"
-            },
-        );
+    let map_rows = MapRows {
+        map_pack: state.map_pack,
+        map_page: state.map_page,
+        maps: maps.last_changed(),
+        presentation: presentation.as_ref().map(|p| p.last_changed()),
+        localize: localize.as_ref().map(|l| l.last_changed()),
+    };
+    if commands_seen || state.shown_maps.as_ref() != Some(&map_rows) {
+        for row in 0..PAGE_SIZE {
+            dvars.set(
+                &format!("ui_map_{row}"),
+                pack.get(state.map_page * PAGE_SIZE + row)
+                    .map(|map| label(map))
+                    .unwrap_or_default(),
+            );
+        }
+        let pages = map_pages(&maps);
+        for slot in 0..PACK_SLOTS {
+            let page = pages.get(slot);
+            dvars.set(
+                &format!("ui_map_pack_{slot}"),
+                page.map_or("", |(_, _, label)| label.as_str()),
+            );
+            dvars.set(
+                &format!("ui_map_pack_tint_{slot}"),
+                if page.is_some_and(|(pack, page, _)| {
+                    *pack == state.map_pack && *page == state.map_page
+                }) {
+                    "1"
+                } else {
+                    "0.45"
+                },
+            );
+        }
+        state.shown_maps = Some(map_rows);
     }
     if let Some(browser) = services.browser.as_ref() {
         let snapshot = browser.snapshot();
@@ -861,77 +904,92 @@ pub(crate) fn route(
             );
         }
     }
-    for row in 0..PAGE_SIZE {
-        let advert = state.adverts.get(row);
-        dvars.set(
-            &format!("ui_browser_{row}_visible"),
-            if advert.is_some() { "1" } else { "0" },
-        );
-        dvars.set(
-            &format!("ui_browser_{row}_id"),
-            advert
-                .map(|advert| advert.id.to_string())
-                .unwrap_or_default(),
-        );
-        let cells = advert
-            .map(|advert| {
-                let status = if advert.locked {
-                    "CLOSED".into()
-                } else if !advert.missing.is_empty() {
-                    format!(
-                        "NEEDS {}",
-                        net::content_names(advert.missing).to_uppercase()
-                    )
-                } else if advert.players >= advert.max_players {
-                    "FULL".into()
-                } else if advert.in_match {
-                    "IN MATCH".into()
-                } else if advert.password_protected {
-                    "PASSWORD".into()
-                } else {
-                    "OPEN".into()
-                };
-                let mode = sim::HostGameModeSelection::from_token(&advert.mode)
-                    .map_or(advert.mode.as_str(), |mode| mode.display_name());
-                let map_key = advert
-                    .map
-                    .split_once(':')
-                    .filter(|(pack, _)| *pack == "iw4")
-                    .map(|(_, name)| {
+    let presentation_tick = presentation.as_ref().map(|p| p.last_changed());
+    let localize_tick = localize.as_ref().map(|l| l.last_changed());
+    let adverts_shown = !commands_seen
+        && state.shown_adverts.as_ref().is_some_and(|shown| {
+            shown.adverts == state.adverts
+                && shown.presentation == presentation_tick
+                && shown.localize == localize_tick
+        });
+    if !adverts_shown {
+        for row in 0..PAGE_SIZE {
+            let advert = state.adverts.get(row);
+            dvars.set(
+                &format!("ui_browser_{row}_visible"),
+                if advert.is_some() { "1" } else { "0" },
+            );
+            dvars.set(
+                &format!("ui_browser_{row}_id"),
+                advert
+                    .map(|advert| advert.id.to_string())
+                    .unwrap_or_default(),
+            );
+            let cells = advert
+                .map(|advert| {
+                    let status = if advert.locked {
+                        "CLOSED".into()
+                    } else if !advert.missing.is_empty() {
                         format!(
-                            "MPUI_{}",
-                            name.trim_start_matches("mp_").to_ascii_uppercase()
+                            "NEEDS {}",
+                            net::content_names(advert.missing).to_uppercase()
                         )
-                    });
-                let fallback_map = label(&advert.map);
-                let map = map_key
-                    .as_ref()
-                    .and_then(|key| localize.as_ref()?.text(key))
-                    .unwrap_or(&fallback_map);
-                let assets = net::content_names(master_protocol::ContentFlags(
-                    advert.available.0 & !net::CONTENT_IW4,
-                ))
-                .to_uppercase();
-                [
-                    browser_cell(&advert.name, 22),
-                    browser_cell(map, 18),
-                    browser_cell(mode, 20),
-                    format!("{}/{}", advert.players, advert.max_players),
-                    if assets.is_empty() {
-                        "—".into()
+                    } else if advert.players >= advert.max_players {
+                        "FULL".into()
+                    } else if advert.in_match {
+                        "IN MATCH".into()
+                    } else if advert.password_protected {
+                        "PASSWORD".into()
                     } else {
-                        assets
-                    },
-                    status,
-                ]
-            })
-            .unwrap_or_default();
-        for (key, value) in ["host", "map", "mode", "players", "assets", "state"]
-            .into_iter()
-            .zip(cells)
-        {
-            dvars.set(&format!("ui_browser_{row}_{key}"), value);
+                        "OPEN".into()
+                    };
+                    let mode = sim::HostGameModeSelection::from_token(&advert.mode)
+                        .map_or(advert.mode.as_str(), |mode| mode.display_name());
+                    let map_key = advert
+                        .map
+                        .split_once(':')
+                        .filter(|(pack, _)| *pack == "iw4")
+                        .map(|(_, name)| {
+                            format!(
+                                "MPUI_{}",
+                                name.trim_start_matches("mp_").to_ascii_uppercase()
+                            )
+                        });
+                    let fallback_map = label(&advert.map);
+                    let map = map_key
+                        .as_ref()
+                        .and_then(|key| localize.as_ref()?.text(key))
+                        .unwrap_or(&fallback_map);
+                    let assets = net::content_names(master_protocol::ContentFlags(
+                        advert.available.0 & !net::CONTENT_IW4,
+                    ))
+                    .to_uppercase();
+                    [
+                        browser_cell(&advert.name, 22),
+                        browser_cell(map, 18),
+                        browser_cell(mode, 20),
+                        format!("{}/{}", advert.players, advert.max_players),
+                        if assets.is_empty() {
+                            "—".into()
+                        } else {
+                            assets
+                        },
+                        status,
+                    ]
+                })
+                .unwrap_or_default();
+            for (key, value) in ["host", "map", "mode", "players", "assets", "state"]
+                .into_iter()
+                .zip(cells)
+            {
+                dvars.set(&format!("ui_browser_{row}_{key}"), value);
+            }
         }
+        state.shown_adverts = Some(AdvertRows {
+            adverts: state.adverts.clone(),
+            presentation: presentation_tick,
+            localize: localize_tick,
+        });
     }
 }
 
@@ -963,6 +1021,111 @@ fn map_pages(maps: &ui::MenuMapList) -> Vec<(usize, usize, String)> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod row_publish_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn maps(extra: usize) -> ui::MenuMapList {
+        ui::MenuMapList(vec![
+            asset_transport::MapPack {
+                label: "MW2".into(),
+                maps: (0..14 + extra).map(|i| format!("iw4:mp_map{i}")).collect(),
+            },
+            asset_transport::MapPack {
+                label: "DLC".into(),
+                maps: vec!["iw4:mp_dlc0".into(), "iw4:mp_dlc1".into()],
+            },
+        ])
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_message::<ConsoleCommand>()
+            .add_message::<frame::ReturnedToMenu>()
+            .add_message::<UiMenuRequest>()
+            .init_resource::<UiMenuDvars>()
+            .init_resource::<UiPartyState>()
+            .init_resource::<session::SessionSwapRequest>()
+            .insert_resource(maps(0))
+            .insert_resource(frame::GameSettings::default())
+            .init_resource::<asset_game::LocalizeCatalog>()
+            .init_resource::<crate::ConsoleState>()
+            .init_resource::<crate::ConsoleSettings>()
+            .init_resource::<crate::ConsoleLine>()
+            .add_systems(Update, route);
+        app
+    }
+
+    fn dvars(app: &App) -> BTreeMap<String, String> {
+        app.world()
+            .resource::<UiMenuDvars>()
+            .iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    type Change = fn(&mut World);
+
+    #[test]
+    fn skipped_rows_leave_the_dvars_every_frame_would_have_written() {
+        // `every` gets a command each frame (one nothing answers), which makes
+        // the route write every row as it used to.
+        let mut written = app();
+        let mut every = app();
+        let frames: Vec<(&[&str], Option<Change>)> = vec![
+            (&[], None),
+            (&[], None),
+            (&["ui_maps"], None),
+            (&[], None),
+            (&["ui_map_pack 1"], None),
+            (&[], None),
+            (&["ui_map_hover 3"], None),
+            (&[], None),
+            (&[], Some(|world| world.insert_resource(maps(7)))),
+            (&[], None),
+            (
+                &[],
+                Some(|world| {
+                    world.resource_mut::<frame::GameSettings>().player_name = "Ghost".into()
+                }),
+            ),
+            (&[], None),
+            (
+                &[],
+                Some(|world| world.insert_resource(asset_game::LocalizeCatalog::default())),
+            ),
+            (&[], None),
+            (&["ui_create_lobby"], None),
+            (&[], None),
+            (&["set ui_lobby_member_0 someone"], None),
+            (&[], None),
+            (&["ui_map_pack 0", "ui_map_hover 1"], None),
+            (&[], None),
+            (&[], None),
+        ];
+        for (at, (lines, change)) in frames.into_iter().enumerate() {
+            for (app, force) in [(&mut written, false), (&mut every, true)] {
+                if let Some(change) = change {
+                    change(app.world_mut());
+                }
+                for line in lines
+                    .iter()
+                    .copied()
+                    .chain(force.then_some("iw4l_test_noop"))
+                {
+                    app.world_mut()
+                        .write_message(ConsoleCommand::parse(line).expect("command"));
+                }
+                app.update();
+            }
+            assert_eq!(dvars(&written), dvars(&every), "frame {at}");
+        }
+        assert!(dvars(&written).contains_key("ui_lobby_member_17_visible"));
+        assert!(dvars(&written).contains_key("ui_browser_9_state"));
+    }
 }
 
 #[cfg(test)]

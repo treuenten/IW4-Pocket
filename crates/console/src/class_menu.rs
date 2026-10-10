@@ -17,6 +17,22 @@ pub(crate) struct ClassMenuState {
     attachments: bool,
     camo: bool,
     hover: usize,
+    /// What the class dvars were last written from; `None` until they are
+    /// written, and whenever they have to be written again.
+    published: Option<ClassMenuInputs>,
+}
+
+/// Everything the class dvars are worked out from besides the menu state
+/// above, which only a class command changes. The status dvar is read back by
+/// the write (a class that cannot be used fills an empty status) and a menu
+/// script can clear it, so its value is one of the inputs.
+#[derive(Debug, PartialEq)]
+struct ClassMenuInputs {
+    store: bevy::ecs::change_detection::Tick,
+    catalog: bevy::ecs::change_detection::Tick,
+    shell_loc: bevy::ecs::change_detection::Tick,
+    prepared_loc: Option<bevy::ecs::change_detection::Tick>,
+    status: Option<String>,
 }
 
 fn camo_names(catalog: &ClassLoadoutCatalog, weapon: &str) -> Vec<String> {
@@ -201,10 +217,27 @@ pub(crate) fn route(
     let loc = prepared_loc
         .as_ref()
         .map_or(&*shell_loc, |strings| &strings.0);
-    for command in events
-        .read()
+    let commands: Vec<&ConsoleCommand> = events.read().collect();
+    let dvar_writes = commands
+        .iter()
+        .any(|command| crate::barracks_menu::writes_any_dvar(command));
+    let class_commands: Vec<&ConsoleCommand> = commands
+        .into_iter()
         .filter(|command| command.name.starts_with("ui_class_"))
+        .collect();
+    if class_commands.is_empty()
+        && !dvar_writes
+        && state.published.as_ref().is_some_and(|published| {
+            published.store == store.last_changed()
+                && published.catalog == catalog.last_changed()
+                && published.shell_loc == shell_loc.last_changed()
+                && published.prepared_loc == prepared_loc.as_ref().map(|loc| loc.last_changed())
+                && published.status.as_deref() == dvars.get("ui_class_status")
+        })
     {
+        return;
+    }
+    for command in class_commands {
         let result = (|| -> Result<(), String> {
             match command.name.as_str() {
                 "ui_class_hover" => state.hover = index(command)?.min(PAGE_SIZE - 1),
@@ -866,4 +899,135 @@ pub(crate) fn route(
             choices.len().max(1).div_ceil(PAGE_SIZE)
         ),
     );
+    state.published = (!dvar_writes).then(|| ClassMenuInputs {
+        store: store.last_changed(),
+        catalog: catalog.last_changed(),
+        shell_loc: shell_loc.last_changed(),
+        prepared_loc: prepared_loc.as_ref().map(|loc| loc.last_changed()),
+        status: dvars.get("ui_class_status").map(str::to_owned),
+    });
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn app() -> App {
+        let mut app = App::new();
+        let store = SessionClassStore {
+            slots: ui::showcase_classes()
+                .iter()
+                .map(ui::ClassSlotState::from_preset)
+                .collect(),
+            equipped: None,
+            selected: 0,
+        };
+        app.add_message::<ConsoleCommand>()
+            .add_message::<UiMenuRequest>()
+            .insert_resource(store)
+            .init_resource::<ClassLoadoutCatalog>()
+            .init_resource::<asset_game::LocalizeCatalog>()
+            .init_resource::<UiMenuDvars>()
+            .init_resource::<crate::ConsoleState>()
+            .init_resource::<crate::ConsoleSettings>()
+            .init_resource::<crate::ConsoleLine>()
+            .add_systems(Update, route);
+        app
+    }
+
+    fn dvars(app: &App) -> BTreeMap<String, String> {
+        app.world()
+            .resource::<UiMenuDvars>()
+            .iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    type Change = fn(&mut World);
+
+    #[test]
+    fn skipped_frames_leave_the_dvars_every_frame_would_have_written() {
+        // As in the barracks test: `every` gets a console `set` each frame,
+        // which makes the route write its dvars every frame as it used to.
+        let mut written = app();
+        let mut every = app();
+        let frames: Vec<(&[&str], Option<Change>)> = vec![
+            (&[], None),
+            (&[], None),
+            (&["ui_class_preview_slot 2"], None),
+            (&[], None),
+            (&["ui_class_slot 1"], None),
+            (&["ui_class_edit 0"], None),
+            (&["ui_class_hover 3"], None),
+            (&[], None),
+            (&["ui_class_page 1"], None),
+            (&["ui_class_pick 1"], None),
+            (&[], None),
+            (&["ui_class_edit 5"], None),
+            (&[], None),
+            (
+                &[],
+                Some(|world| world.resource_mut::<SessionClassStore>().selected = 3),
+            ),
+            (&[], None),
+            (
+                &[],
+                Some(|world| {
+                    world.resource_mut::<SessionClassStore>().slots[3].lock_reason =
+                        Some("test lock".into());
+                }),
+            ),
+            (&[], None),
+            // A menu script clears the status; the next write fills it again.
+            (
+                &[],
+                Some(|world| {
+                    world
+                        .resource_mut::<UiMenuDvars>()
+                        .set("ui_class_status", "")
+                }),
+            ),
+            (&[], None),
+            (
+                &[],
+                Some(|world| world.insert_resource(ClassLoadoutCatalog::default())),
+            ),
+            (&[], None),
+            (
+                &[],
+                Some(|world| world.insert_resource(asset_game::LocalizeCatalog::default())),
+            ),
+            (&[], None),
+            (&["ui_class_rename"], None),
+            (&[], None),
+            (&["set ui_class_title mine"], None),
+            (&[], None),
+            (&[], None),
+        ];
+        let mut skipped = 0;
+        for (at, (lines, change)) in frames.into_iter().enumerate() {
+            for (app, force) in [(&mut written, false), (&mut every, true)] {
+                if let Some(change) = change {
+                    change(app.world_mut());
+                }
+                for line in lines
+                    .iter()
+                    .copied()
+                    .chain(force.then_some("set iw4l_test_force 1"))
+                {
+                    app.world_mut()
+                        .write_message(ConsoleCommand::parse(line).expect("command"));
+                }
+                let before = app.world().resource_ref::<UiMenuDvars>().last_changed();
+                app.update();
+                if !force && app.world().resource_ref::<UiMenuDvars>().last_changed() == before {
+                    skipped += 1;
+                }
+            }
+            assert_eq!(dvars(&written), dvars(&every), "frame {at}");
+        }
+        assert!(dvars(&written).len() > 100);
+        assert!(skipped >= 8, "skipped {skipped}");
+    }
 }
