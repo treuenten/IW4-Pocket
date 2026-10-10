@@ -593,6 +593,32 @@ pub(crate) fn is_use_trigger(classname: &str) -> bool {
     fires(classname) == Some(Fires::Use)
 }
 
+/// What one Use press acts on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PressTarget {
+    /// The hint offered a dropped weapon: the item code takes the press.
+    Item,
+    /// The usable select_usables chose, whose hint the player saw.
+    Usable(u64),
+    /// Nothing was offered: the use triggers the player's hull touches.
+    Touched,
+}
+
+/// A player sees one cursor hint, and a press acts on that one thing.
+/// _gameobjects.gsc useHoldThink relies on it: it keeps the weapon held at
+/// the press as lastWeapon and switches back to it when the bar fills, so a
+/// weapon swap on the same press leaves the player holding the empty
+/// briefcase. The press follows the hint shown when it came (`cursor_hint`,
+/// set last frame), in the HUD's order: an item first, then the usable
+/// select_usables chose.
+fn press_target(cursor_hint: i32, selected: Option<u64>) -> PressTarget {
+    if crate::item::hints_item(cursor_hint) {
+        PressTarget::Item
+    } else {
+        selected.map_or(PressTarget::Touched, PressTarget::Usable)
+    }
+}
+
 fn volume<'f>(runtime: &mut Runtime, frame: &'f FrameWorld, object: u64) -> Option<Volume<'f>> {
     let entity = runtime.entities.get(&object)?;
     let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
@@ -966,12 +992,22 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
             .filter(|(_, _, held)| *held)
             .map(|(client, _, _)| *client)
             .collect();
+        let mut touch_pressed = Vec::new();
         for (client, player) in &pressed {
-            if let Some(usable) = runtime.use_selected.get(client).copied()
-                && eligible(&runtime, &frame, usable, *client, true)
-                && touch_use_reach(&mut runtime, &frame, usable, *client, *player) != Some(false)
-            {
-                raised.push((usable, *player));
+            let hint = frame
+                .player(crate::ClientId(*client))
+                .map_or(0, |ps| ps.cursor_hint);
+            match press_target(hint, runtime.use_selected.get(client).copied()) {
+                PressTarget::Item => {}
+                PressTarget::Usable(usable) => {
+                    if eligible(&runtime, &frame, usable, *client, true)
+                        && touch_use_reach(&mut runtime, &frame, usable, *client, *player)
+                            != Some(false)
+                    {
+                        raised.push((usable, *player));
+                    }
+                }
+                PressTarget::Touched => touch_pressed.push((*client, *player)),
             }
         }
         let triggers: Vec<(u64, Fires)> = runtime
@@ -985,7 +1021,7 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
                 continue;
             };
             let candidates: Vec<(u32, u64)> = match kind {
-                Fires::Use => pressed.clone(),
+                Fires::Use => touch_pressed.clone(),
                 Fires::Touch | Fires::Once => players
                     .iter()
                     .map(|(client, object, _)| (*client, *object))
@@ -1017,5 +1053,37 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
             "trigger",
             vec![Value::Object(player)],
         );
+    }
+}
+
+#[cfg(test)]
+mod press_tests {
+    use super::*;
+
+    #[test]
+    fn a_press_goes_to_the_one_thing_hinted() {
+        let site = 42;
+        let weapon_hint = 186 + 4;
+        assert_eq!(press_target(weapon_hint, Some(site)), PressTarget::Item);
+        assert_eq!(press_target(weapon_hint, None), PressTarget::Item);
+        let hint_activate = 2;
+        assert_eq!(
+            press_target(hint_activate, Some(site)),
+            PressTarget::Usable(site)
+        );
+        let hint_none = 0;
+        assert_eq!(
+            press_target(hint_none, Some(site)),
+            PressTarget::Usable(site)
+        );
+        assert_eq!(press_target(hint_none, None), PressTarget::Touched);
+    }
+
+    #[test]
+    fn script_hints_are_not_items() {
+        for cursor in 0..=4 {
+            assert!(!crate::item::hints_item(cursor), "{cursor}");
+        }
+        assert!(crate::item::hints_item(5));
     }
 }

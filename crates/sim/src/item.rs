@@ -31,6 +31,17 @@ pub const ITEM_MAXS: [f32; 3] = [1.0, 1.0, 1.0];
 
 pub const ITEM_USE_HOLD_MS: i32 = 250;
 
+/// A weapon's cursor hint is its index plus this; the script hints
+/// (HINT_NONE to HINT_FRIENDLY) sit at or below it.
+const WEAPON_HINT_BASE: i32 = 4;
+
+/// Whether the player's cursor hint offers an item to pick up. The HUD shows
+/// one hint, and a Use press acts on that one thing: an item hint gives the
+/// press to the item code and no use trigger takes it.
+pub(crate) fn hints_item(cursor_hint: i32) -> bool {
+    cursor_hint > WEAPON_HINT_BASE
+}
+
 pub const PLAYER_DROP_Z: f32 = (PLAYER_MAXS[2] - PLAYER_MINS[2]) * 0.5;
 
 /// The riot shield's world model stands upright, as it is carried, with its
@@ -1057,7 +1068,10 @@ pub(crate) fn phase_use_items(
         if !held || selected.is_none() || selected_ref != meta.item_use_entity {
             meta.item_use_entity = None;
         }
-        if pressed {
+        // `ps` still holds the hint the player saw when he pressed. A press
+        // made while a script usable (or nothing) was hinted is not for an
+        // item, even if one came into reach this tick.
+        if pressed && hints_item(ps.cursor_hint) {
             meta.item_use_entity = selected_ref;
             meta.item_use_press_ms = now;
         }
@@ -1089,7 +1103,7 @@ pub(crate) fn phase_use_items(
                 || gsc_give_weapon_is_akimbo(world.weapon_script_name(item.weapon))
         });
         if let Some(ps) = world.player_mut(id) {
-            ps.cursor_hint = selected.map_or(0, |item| item.weapon as i32 + 4);
+            ps.cursor_hint = selected.map_or(0, |item| item.weapon as i32 + WEAPON_HINT_BASE);
             ps.cursor_hint_ent_index = selected.map_or(ENTITYNUM_NONE, |item| item.number);
             ps.cursor_hint_string = -1;
             ps.cursor_hint_dual_wield = i32::from(dual);
@@ -1103,7 +1117,10 @@ mod dropped_item_tests {
 
     #[test]
     fn a_dropped_shield_lies_on_its_back_and_guns_stay_level() {
-        assert_eq!(dropped_angles("riotshield_mp", 90.0), [SHIELD_DROP_PITCH, 90.0, 0.0]);
+        assert_eq!(
+            dropped_angles("riotshield_mp", 90.0),
+            [SHIELD_DROP_PITCH, 90.0, 0.0]
+        );
         assert_eq!(dropped_angles("m4_reflex_mp", 45.0), [0.0, 45.0, 0.0]);
     }
 
