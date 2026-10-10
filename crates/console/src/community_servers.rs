@@ -38,6 +38,12 @@ pub(crate) fn community_server_menu(
                     );
                 } else if !choice.is_empty() && *choice != servers.selected {
                     match servers.restart(choice) {
+                        Ok(()) if !ui::CommunityServers::RESTARTS_ITSELF => {
+                            *restarting = true;
+                            echo.write(
+                                "Community server saved. Close and reopen the app to use it.",
+                            );
+                        }
                         Ok(()) => {
                             *restarting = true;
                             diag::lifecycle_boundary("quit_requested", " via=community_switch");
@@ -70,12 +76,20 @@ pub(crate) fn community_server_menu(
     dvars.set("ui_community_current", format!("Current server: {current}"));
     let hint = if let Some(error) = error.as_deref() {
         error
+    } else if *restarting && !ui::CommunityServers::RESTARTS_ITSELF {
+        "Saved. Close and reopen the app to use this server."
     } else if party.in_lobby {
         "Leave your lobby before switching servers."
     } else if servers.choices.iter().all(|(_, value)| value.is_empty()) {
-        "Add .iw4l-server files beside the game, then restart."
-    } else {
+        if ui::CommunityServers::RESTARTS_ITSELF {
+            "Add .iw4l-server files beside the game, then restart."
+        } else {
+            "Copy a .iw4l-server file into the app's folder in Files, then reopen the app."
+        }
+    } else if ui::CommunityServers::RESTARTS_ITSELF {
         "Applying a server restarts the game and checks its updates."
+    } else {
+        "Applying a server saves it; reopen the app to use it."
     };
     dvars.set("ui_community_hint", hint);
 }

@@ -58,6 +58,10 @@ impl Default for CommunityServers {
 }
 
 impl CommunityServers {
+    /// Whether applying a server restarts the game; on iOS the choice is
+    /// saved and used the next time the app is opened.
+    pub const RESTARTS_ITSELF: bool = updater::RESTARTS_ITSELF;
+
     pub fn restart(&self, choice: &str) -> Result<(), String> {
         let entry = choice
             .parse::<usize>()

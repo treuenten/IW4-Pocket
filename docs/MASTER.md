@@ -64,6 +64,13 @@ ca_pem = """
 """
 ```
 
+On iOS the descriptor goes in the app's Documents folder (the app's folder in
+the Files app), beside `iw4l-env.txt`, not in the signed app bundle. One
+descriptor there is chosen at launch. With several, the main menu's choice is
+saved there and takes effect the next time the app is opened: an iOS app cannot
+restart itself. A master given as an IPv4 literal may not be reachable on an
+IPv6-only mobile network; a host name with an AAAA record is.
+
 Both TCP and UDP allocations must be open. `serve --updates PATH` selects the
 static update directory; its default is `./updates`. Upload the release blob
 before atomically replacing `manifest.toml`; see [`DEPLOY.md`](DEPLOY.md).

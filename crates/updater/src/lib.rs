@@ -29,6 +29,26 @@ struct CommunityFiles {
     selected: Option<PathBuf>,
 }
 
+/// Whether applying another community restarts the game by itself. iOS runs
+/// one process that cannot start another: there the choice is saved and takes
+/// effect the next time the app is opened.
+pub const RESTARTS_ITSELF: bool = !cfg!(target_os = "ios");
+
+/// Where `.iw4l-server` descriptors and the saved choice live: beside the
+/// executable, or on iOS in the app's Documents folder, which the Files app
+/// can reach (the app bundle itself is signed and read-only).
+fn community_root() -> Result<PathBuf> {
+    #[cfg(target_os = "ios")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join("Documents"));
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    Ok(exe
+        .parent()
+        .ok_or("executable has no directory")?
+        .to_path_buf())
+}
+
 pub fn communities() -> &'static [CommunityFile] {
     COMMUNITIES.get().map_or(&[], |files| &files.entries)
 }
@@ -104,8 +124,7 @@ pub fn restart_with_community(path: &Path) -> Result<()> {
         return Err("community is not in the installed server list".into());
     }
     read_community(path)?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let root = exe.parent().ok_or("executable has no directory")?;
+    let root = &community_root()?;
     let selection = root.join(SELECTION_FILE);
     let previous = match fs::read(&selection) {
         Ok(bytes) => Some(bytes),
@@ -115,6 +134,10 @@ pub fn restart_with_community(path: &Path) -> Result<()> {
     let payload =
         serde_json::to_vec(path.strip_prefix(root).unwrap_or(path)).map_err(|e| e.to_string())?;
     save_selection(root, &payload)?;
+    if !RESTARTS_ITSELF {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     if let Err(error) = Command::new(&exe)
         .arg("menu")
         .env("IW4L_COMMUNITY", path)
@@ -247,9 +270,8 @@ pub fn startup() -> Result<Option<Vec<OsString>>> {
     if restarted {
         args.remove(0);
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let root = exe.parent().ok_or("executable has no directory")?;
-    let files = discover_communities(root, std::env::var_os("IW4L_COMMUNITY").map(PathBuf::from))?;
+    let root = community_root()?;
+    let files = discover_communities(&root, std::env::var_os("IW4L_COMMUNITY").map(PathBuf::from))?;
     let descriptor = files.selected.clone();
     COMMUNITIES
         .set(files)
@@ -264,6 +286,8 @@ pub fn startup() -> Result<Option<Vec<OsString>>> {
             .map_err(|_| "community already selected")?;
         return Ok(Some(args));
     }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let root = root.as_path();
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
