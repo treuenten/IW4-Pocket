@@ -12,6 +12,10 @@ const MAX_PITCH_ACCEL_DEG_PER_MS2: f32 = 0.01;
 const FIRE_CONE_DEG: f32 = 8.0;
 const ARRIVE_IN: f32 = 24.0;
 const PITCH_LIMIT: f32 = 70.0;
+/// A human taps a semi-automatic trigger every 150 to 250 ms. Each bot gets its
+/// own gap in that band; the weapon's fire time is the floor.
+const TAP_MIN_MS: i32 = 150;
+const TAP_SPREAD_MS: i32 = 100;
 
 #[derive(Clone, Debug)]
 pub struct Motor {
@@ -24,6 +28,30 @@ pub struct Motor {
     acquire_yaw: f32,
     last_look: Option<[f32; 3]>,
     armed: Option<sim::LifeSequence>,
+    trigger: Trigger,
+    tap_ms: i32,
+}
+
+/// The fire button over successive commands. A single-shot weapon fires once
+/// per press (weapon_iw4 resets its shot count only while the button is up),
+/// so it is pressed for one command, let go, and pressed again after the gap.
+/// Full-auto and burst weapons keep firing while it is held.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Trigger {
+    down: bool,
+    next_ms: i32,
+}
+
+impl Trigger {
+    /// Whether the trigger is down on the command for `now_ms`.
+    fn pull(&mut self, want: bool, semi_auto: bool, now_ms: i32, gap_ms: i32) -> bool {
+        let pull = want && (!semi_auto || (!self.down && now_ms >= self.next_ms));
+        if pull && semi_auto {
+            self.next_ms = now_ms.saturating_add(gap_ms);
+        }
+        self.down = pull;
+        pull
+    }
 }
 
 impl Motor {
@@ -42,6 +70,8 @@ impl Motor {
             acquire_yaw: 0.0,
             last_look: None,
             armed: None,
+            trigger: Trigger::default(),
+            tap_ms: TAP_MIN_MS + (((seed >> 24) & 0xff) as i32 * TAP_SPREAD_MS) / 255,
         }
     }
 
@@ -83,6 +113,7 @@ impl Motor {
             self.yaw = obs.self_state.viewangles[1];
             self.pitch = angle_subtract(obs.self_state.viewangles[0], 0.0);
             self.armed = Some(obs.self_state.life_sequence);
+            self.trigger = Trigger::default();
         }
         let dt = dt_ms.max(1) as f32;
         if let Some(at) = intent.look_at {
@@ -144,8 +175,21 @@ impl Motor {
             weapon_mapped: weapon,
             ..UserCmd::default()
         };
-        if intent.fire && self.weapon_on_target(obs, intent) {
+        let held = obs.held();
+        let want_fire = intent.fire && self.weapon_on_target(obs, intent);
+        let gap_ms = self
+            .tap_ms
+            .max(held.map_or(0, |slot| slot.facts.fire_time_ms));
+        let semi_auto = held.is_some_and(|slot| slot.facts.semi_auto);
+        if self.trigger.pull(want_fire, semi_auto, obs.time_ms, gap_ms) {
             cmd.buttons |= buttons::ATTACK;
+            // With an akimbo pair the attack button fires the left gun and the
+            // throw button the right one (weapon_iw4 get_weapon_fire_button).
+            // Throw only ever goes with akimbo: on any other weapon it is a
+            // second barrel or a detonator.
+            if obs.self_state.akimbo {
+                cmd.buttons |= buttons::THROW;
+            }
         }
         if intent.use_button {
             cmd.buttons |= buttons::USE;
@@ -234,4 +278,47 @@ fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
     dx * dx + dy * dy + dz * dz
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Presses over consecutive 50 ms commands with fire wanted throughout.
+    fn presses(semi_auto: bool, gap_ms: i32, commands: i32) -> Vec<bool> {
+        let mut trigger = Trigger::default();
+        (0..commands)
+            .map(|i| trigger.pull(true, semi_auto, i * 50, gap_ms))
+            .collect()
+    }
+
+    #[test]
+    fn a_single_shot_weapon_is_tapped_at_the_gap() {
+        assert_eq!(
+            presses(true, 150, 8),
+            [true, false, false, true, false, false, true, false]
+        );
+        // A gap shorter than a command still lets go for one command.
+        assert_eq!(presses(true, 0, 4), [true, false, true, false]);
+        // A long fire time (a bolt-action rifle) spaces the presses out.
+        assert_eq!(presses(true, 1000, 22).iter().filter(|p| **p).count(), 2);
+    }
+
+    #[test]
+    fn full_auto_and_burst_hold_the_trigger() {
+        assert!(presses(false, 150, 6).iter().all(|p| *p));
+    }
+
+    #[test]
+    fn letting_go_of_fire_releases_the_trigger() {
+        let mut trigger = Trigger::default();
+        assert!(trigger.pull(true, false, 0, 150));
+        assert!(!trigger.pull(false, false, 50, 150));
+        assert!(!trigger.down);
+        // A semi-automatic press is not repeated early after a pause either.
+        assert!(trigger.pull(true, true, 100, 150));
+        assert!(!trigger.pull(false, true, 150, 150));
+        assert!(!trigger.pull(true, true, 200, 150));
+        assert!(trigger.pull(true, true, 250, 150));
+    }
 }

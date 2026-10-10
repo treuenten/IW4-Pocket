@@ -54,6 +54,12 @@ magazines of an akimbo pair count. A launcher is neither raised nor fired with
 an enemy inside 300 units (or 1.5 times its blast), where it would kill the bot
 too.
 
+The motor taps the trigger of a single-shot weapon (pistols, bolt and lever
+actions, the AT4): down for one command, then up, pressed again after a gap of
+150 to 250 ms per bot and never sooner than the weapon's fire time, since the
+weapon fires once per press. Full-auto and burst weapons hold it. An akimbo
+pair gets both buttons: attack fires the left gun, throw the right one.
+
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a
 running match, which is where bot behaviour is judged: `make map mp_boneyard`
