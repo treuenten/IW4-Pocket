@@ -34,6 +34,18 @@ menu. Off by default. On the phone put the line in `iw4l-env.txt`; on the deskto
 is an ordinary environment variable. The row is offered only to the host of a match
 with cheats on, never for a joined client, a public lobby or a master room.
 
+**Off-screen shadow casters.** `IW4L_OFFSCREEN_SHADOWS=1` keeps posing
+animated script models the camera has culled, such as the washing on Favela's lines,
+as shadow-only casters while they are inside the sun shadow volume. Their sun shadows
+then stay on the wall when the cloth leaves the top or side of the screen, instead of
+dropping out one piece at a time. It poses those models and draws their shadows every
+frame (about 37 more posed models and 50 more sun-shadow draws under Favela's
+courtyard line), so it is off by default until that is measured on the phone. Off,
+script models cast sun shadows only while the camera sees them, as before. On the
+phone put the line in `iw4l-env.txt`; on the desktop it is an ordinary environment
+variable. The startup log says `offscreen shadow casters: on` or `off`, and
+`iw4l-memory-settings.txt` lists the value.
+
 **GSC controls the start freeze.** `freezecontrols` constrains authority movement;
 snapshots carry the same constraints into client prediction and command replay.
 Wait for the loaded mode's countdown, or use the debug command:

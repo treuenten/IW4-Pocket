@@ -54,5 +54,5 @@ pub use view_parms::{
 pub use world_instances::{WorldDynEntInstance, WorldScriptModelInstance};
 pub use xmodel_draw::{
     SunShadowCasterVolume, XModelCasterBound, XModelColourRefusal, XModelSurfaceDraw,
-    sun_partition_keeps,
+    offscreen_shadow_casters, sun_partition_keeps,
 };

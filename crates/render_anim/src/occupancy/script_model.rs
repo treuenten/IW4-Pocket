@@ -168,6 +168,13 @@ fn camera_visible_first<T>(
         .chain(rows.iter().filter(move |row| camera_hidden(row)))
 }
 
+/// Whether commit numbers a row after the camera-visible ones and caps it below
+/// the missile ids: a camera-hidden row, and only with IW4L_OFFSCREEN_SHADOWS=1.
+/// Off, every row is numbered in pose order with no cap, as before the switch.
+fn numbered_after_visible(offscreen_shadows: bool, camera_hidden: bool) -> bool {
+    offscreen_shadows && camera_hidden
+}
+
 /// A shadow-only row takes an object id only while one is left below the
 /// missile range. Visible rows are never refused here.
 fn shadow_only_row_fits(owners: usize) -> bool {
@@ -625,6 +632,8 @@ fn pose_script_models(
         .ok()
         .map(|(xf, _, _)| xf.translation().to_array());
     let skinned_ramp = lod_skinned.args();
+    // Off (the default), a model the walk hid is skipped here as it always was.
+    let offscreen_shadows = render_scene::offscreen_shadow_casters();
     for (entity, owner, transform, visibility) in &owners {
         if is_weapon_camera_vehicle(owner, &presented, local.0) {
             continue;
@@ -647,7 +656,7 @@ fn pose_script_models(
 
         let slot = entnum.map(|entnum| script_scene_slot(&gfx_scene.scene, entnum));
         let skip = slot.as_ref().and_then(|slot| slot.skip);
-        if let Some(why) = skip.filter(|&why| why != SCENE_ENT_HIDDEN) {
+        if let Some(why) = skip.filter(|&why| !offscreen_shadows || why != SCENE_ENT_HIDDEN) {
             if let Some(id) = focused_owner_id {
                 focus.refuse(id, &owner.current_model.0, why);
             }
@@ -675,7 +684,8 @@ fn pose_script_models(
         // the line itself is above the top of the screen. It is posed as a
         // shadow-only caster while its sphere touches a sun partition, the way
         // world surfaces and static models cast from the sun views rather than
-        // from the camera view.
+        // from the camera view. Only with IW4L_OFFSCREEN_SHADOWS=1; off, a
+        // hidden model never gets this far.
         let shadow_only = skip == Some(SCENE_ENT_HIDDEN);
         if shadow_only && !sun_volume.admits(caster_bound) {
             if let Some(id) = focused_owner_id {
@@ -941,9 +951,12 @@ fn commit_script_model_draw_plan(
     }
     retain_script_model_assets(&mut plan, &keep);
 
+    let offscreen_shadows = render_scene::offscreen_shadow_casters();
+    let numbered_last =
+        move |row: &ScriptOwnerRow| numbered_after_visible(offscreen_shadows, row.camera_hidden);
     let mut shadow_only_refused = 0usize;
-    for row in camera_visible_first(&product.rows, |row| row.camera_hidden) {
-        if row.camera_hidden && !shadow_only_row_fits(owners.len()) {
+    for row in camera_visible_first(&product.rows, numbered_last) {
+        if numbered_last(row) && !shadow_only_row_fits(owners.len()) {
             shadow_only_refused += 1;
             if let Some(id) = row.focused_owner_id {
                 focus.refuse(id, &row.model.0, "object_id_exhausted");
@@ -1421,6 +1434,23 @@ mod object_id_tests {
             .map(|row| row.0)
             .collect();
         assert_eq!(order, ["a", "c", "e", "b", "d"]);
+    }
+
+    #[test]
+    fn rows_number_in_pose_order_with_the_switch_off() {
+        let rows = [("a", false), ("b", true), ("c", false), ("d", true)];
+        let order: Vec<&str> =
+            camera_visible_first(&rows, |row| numbered_after_visible(false, row.1))
+                .map(|row| row.0)
+                .collect();
+        assert_eq!(order, ["a", "b", "c", "d"]);
+        let order: Vec<&str> =
+            camera_visible_first(&rows, |row| numbered_after_visible(true, row.1))
+                .map(|row| row.0)
+                .collect();
+        assert_eq!(order, ["a", "c", "b", "d"]);
+        assert!(!numbered_after_visible(false, true));
+        assert!(!numbered_after_visible(true, false));
     }
 
     #[test]

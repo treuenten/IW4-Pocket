@@ -40,7 +40,8 @@ GPU modules live in `render_gpu/src/drawsurf/colour_submit/`:
 change and publishes `PublishedRenderFrame` each frame. `d3d9_decl`, `d3d9_sm3`
 and `d3d9_state` describe D3D9 semantics; GPU adapters convert them to wgpu.
 `session` installs matches; `assets` supplies bytes. Runtime switches use env
-variables (`IW4L_SINGLE_CELL`, `IW4L_SUN_SHADOW_*`); observation uses
+variables (`IW4L_SINGLE_CELL`, `IW4L_SUN_SHADOW_*`, `IW4L_OFFSCREEN_SHADOWS`
+in [`RUN.md`](RUN.md)); observation uses
 [`PERF.md`](PERF.md).
 
 Film vision presets come from map/common fastfiles. Console `visionSetNaked`

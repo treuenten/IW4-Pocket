@@ -75,16 +75,30 @@ impl Plugin for RenderAssemblePlugin {
                 .after(crate::prepare::scene::view_parms::stamp_prepared_scene_view)
                 .in_set(net::ClientSet::Present),
         );
-        // Producers pose models the camera walk hid when their shadow can land in
-        // view, so this frame's sun volume must be out before they pose.
-        app.add_systems(
-            Update,
-            crate::assemble::drawsurf::publish_sun_shadow_caster_volume
-                .after(crate::prepare::scene::view_parms::stamp_prepared_scene_view)
-                .after(crate::prepare::scene::sun_stage::update_active_sun_stage)
-                .before(frame::WorkerCmdSet::SkinModel)
-                .in_set(net::ClientSet::Present),
-        );
+        // With IW4L_OFFSCREEN_SHADOWS=1, producers pose models the camera walk hid
+        // when their shadow can land in view, so this frame's sun volume must be
+        // out before they pose. Off (the default) the system is not scheduled and
+        // the volume stays empty.
+        let offscreen_shadows_env = diag::memory_settings::OFFSCREEN_SHADOWS_ENV;
+        if render_scene::offscreen_shadow_casters() {
+            app.add_systems(
+                Update,
+                crate::assemble::drawsurf::publish_sun_shadow_caster_volume
+                    .after(crate::prepare::scene::view_parms::stamp_prepared_scene_view)
+                    .after(crate::prepare::scene::sun_stage::update_active_sun_stage)
+                    .before(frame::WorkerCmdSet::SkinModel)
+                    .in_set(net::ClientSet::Present),
+            );
+            diag::info!(
+                World,
+                "offscreen shadow casters: on ({offscreen_shadows_env}=1), animated script models off screen keep their sun shadows"
+            );
+        } else {
+            diag::info!(
+                World,
+                "offscreen shadow casters: off ({offscreen_shadows_env}=0), animated script models cast sun shadows only while on screen"
+            );
+        }
         app.add_systems(
             DrawLaneRebuild,
             (

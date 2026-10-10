@@ -177,17 +177,23 @@ fn scene_ent_admitted(scene: Option<&crate::GfxScene>, entnum: Option<u32>) -> b
 }
 
 /// A script model's draw joins the merge when the camera walk admitted its
-/// entity, or when the producer kept it as a shadow-only caster (colour
-/// refused at the camera frustum) because its sun shadow can land in view
-/// while the model itself is off screen. The colour lane drops shadow-only
-/// draws, so admitting one adds a shadow and never a visible model. An entity
-/// that is gone, or whose scene entry has no surfaces, still stays out.
+/// entity, or, with `offscreen_shadows` (IW4L_OFFSCREEN_SHADOWS=1), when the
+/// producer kept it as a shadow-only caster (colour refused at the camera
+/// frustum) because its sun shadow can land in view while the model itself is
+/// off screen. The colour lane drops shadow-only draws, so admitting one adds a
+/// shadow and never a visible model. An entity that is gone, or whose scene
+/// entry has no surfaces, still stays out. Off, this is `scene_ent_admitted`.
 #[must_use]
-fn script_draw_admitted(scene: Option<&crate::GfxScene>, draw: &XModelSurfaceDraw) -> bool {
+fn script_draw_admitted(
+    scene: Option<&crate::GfxScene>,
+    draw: &XModelSurfaceDraw,
+    offscreen_shadows: bool,
+) -> bool {
     if scene_ent_admitted(scene, draw.scene_entnum) {
         return true;
     }
-    draw.colour_refusal == Some(XModelColourRefusal::CameraFrustum)
+    offscreen_shadows
+        && draw.colour_refusal == Some(XModelColourRefusal::CameraFrustum)
         && draw.scene_entnum.is_some_and(|n| {
             scene.is_some_and(|s| s.scene_ent_live(n) && s.scene_ent_surface_count(n) != Some(0))
         })
@@ -368,8 +374,9 @@ fn xmodel_merge_stamp(
     for draw in bodies.draws() {
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
     }
+    let offscreen_shadows = render_scene::offscreen_shadow_casters();
     for draw in scripts.draws() {
-        script_draw_admitted(scene, draw).hash(&mut occupancy);
+        script_draw_admitted(scene, draw, offscreen_shadows).hash(&mut occupancy);
     }
     for draw in missiles.draws() {
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
@@ -595,6 +602,7 @@ pub fn merge_xmodel_draw_plan(
         );
     }
 
+    let offscreen_shadows = render_scene::offscreen_shadow_casters();
     append_admitted_source(
         merged,
         &mut packed,
@@ -608,7 +616,7 @@ pub fn merge_xmodel_draw_plan(
             .draws()
             .iter()
             .copied()
-            .filter(|d| script_draw_admitted(scene, d)),
+            .filter(|d| script_draw_admitted(scene, d, offscreen_shadows)),
     );
 
     append_admitted_source(
@@ -1020,6 +1028,7 @@ fn refresh_concat_draws(
             }),
         );
     }
+    let offscreen_shadows = render_scene::offscreen_shadow_casters();
     append_concat_owner_draws(
         merged,
         &mut range_base,
@@ -1029,7 +1038,7 @@ fn refresh_concat_draws(
             .draws()
             .iter()
             .copied()
-            .filter(|d| script_draw_admitted(scene, d)),
+            .filter(|d| script_draw_admitted(scene, d, offscreen_shadows)),
     );
     append_concat_owner_draws(
         merged,
@@ -1103,10 +1112,11 @@ fn admitted_mask(
     if fpv_scene_colour(fpv, scene) {
         admitted |= ADMIT_FPV;
     }
+    let offscreen_shadows = render_scene::offscreen_shadow_casters();
     if scripts
         .draws()
         .iter()
-        .any(|d| script_draw_admitted(scene, d))
+        .any(|d| script_draw_admitted(scene, d, offscreen_shadows))
     {
         admitted |= ADMIT_SCRIPT;
     }
@@ -1528,20 +1538,32 @@ mod script_admission_tests {
 
     const SHADOW_ONLY: Option<XModelColourRefusal> = Some(XModelColourRefusal::CameraFrustum);
 
+    /// IW4L_OFFSCREEN_SHADOWS=1.
+    const ON: bool = true;
+
     #[test]
     fn a_walk_visible_script_model_is_admitted() {
         let scene = scene(true, 3);
-        assert!(script_draw_admitted(Some(&scene), &draw(Some(ENT), None)));
         assert!(script_draw_admitted(
             Some(&scene),
-            &draw(Some(ENT), SHADOW_ONLY)
+            &draw(Some(ENT), None),
+            ON
+        ));
+        assert!(script_draw_admitted(
+            Some(&scene),
+            &draw(Some(ENT), SHADOW_ONLY),
+            ON
         ));
     }
 
     #[test]
     fn a_walk_hidden_colour_draw_stays_out() {
         let scene = scene(false, 3);
-        assert!(!script_draw_admitted(Some(&scene), &draw(Some(ENT), None)));
+        assert!(!script_draw_admitted(
+            Some(&scene),
+            &draw(Some(ENT), None),
+            ON
+        ));
     }
 
     #[test]
@@ -1549,7 +1571,8 @@ mod script_admission_tests {
         let scene = scene(false, 3);
         assert!(script_draw_admitted(
             Some(&scene),
-            &draw(Some(ENT), SHADOW_ONLY)
+            &draw(Some(ENT), SHADOW_ONLY),
+            ON
         ));
     }
 
@@ -1558,7 +1581,8 @@ mod script_admission_tests {
         let scene = scene(false, 0);
         assert!(!script_draw_admitted(
             Some(&scene),
-            &draw(Some(ENT), SHADOW_ONLY)
+            &draw(Some(ENT), SHADOW_ONLY),
+            ON
         ));
     }
 
@@ -1567,13 +1591,47 @@ mod script_admission_tests {
         let scene = scene(false, 3);
         assert!(!script_draw_admitted(
             Some(&scene),
-            &draw(Some(ENT + 1), SHADOW_ONLY)
+            &draw(Some(ENT + 1), SHADOW_ONLY),
+            ON
         ));
-        assert!(!script_draw_admitted(None, &draw(Some(ENT), SHADOW_ONLY)));
+        assert!(!script_draw_admitted(
+            None,
+            &draw(Some(ENT), SHADOW_ONLY),
+            ON
+        ));
     }
 
     #[test]
     fn a_draw_without_an_entity_is_admitted_as_before() {
-        assert!(script_draw_admitted(None, &draw(None, None)));
+        assert!(script_draw_admitted(None, &draw(None, None), ON));
+    }
+
+    #[test]
+    fn with_the_switch_off_admission_is_the_camera_walk() {
+        let scenes = [
+            scene(true, 3),
+            scene(false, 3),
+            scene(true, 0),
+            scene(false, 0),
+        ];
+        let scenes = scenes.iter().map(Some).chain([None]);
+        for scene in scenes {
+            for entnum in [Some(ENT), Some(ENT + 1), None] {
+                for refusal in [None, SHADOW_ONLY] {
+                    let d = draw(entnum, refusal);
+                    assert_eq!(
+                        script_draw_admitted(scene, &d, false),
+                        scene_ent_admitted(scene, entnum),
+                        "{entnum:?} {refusal:?}",
+                    );
+                }
+            }
+        }
+        let hidden = scene(false, 3);
+        assert!(!script_draw_admitted(
+            Some(&hidden),
+            &draw(Some(ENT), SHADOW_ONLY),
+            false
+        ));
     }
 }

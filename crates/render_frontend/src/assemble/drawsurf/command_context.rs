@@ -664,7 +664,8 @@ pub(crate) fn sun_shadow_frame(
 /// shadow can land in view. It runs `sun_shadow_frame` on the same view, light
 /// and world that `update_command_context_code_sources` builds the shadow pass
 /// from this frame, so both see the same planes; a volume a frame old would
-/// drop a caster for a frame on a fast turn.
+/// drop a caster for a frame on a fast turn. Scheduled only with
+/// `IW4L_OFFSCREEN_SHADOWS=1` (`render_scene::offscreen_shadow_casters`).
 pub(crate) fn publish_sun_shadow_caster_volume(
     prepared: Res<PreparedSceneView>,
     dir_light: Option<Res<MapDirPrimaryLight>>,

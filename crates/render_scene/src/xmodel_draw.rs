@@ -73,6 +73,22 @@ pub fn sun_partition_keeps(bound: Option<XModelCasterBound>, planes: &[[f32; 4]]
     bound.is_none_or(|bound| !bound.outside(planes))
 }
 
+/// `IW4L_OFFSCREEN_SHADOWS=1` (a line in iw4l-env.txt on the phone): animated
+/// script models the camera walk hid, such as the washing on Favela's lines,
+/// are still posed as shadow-only casters while they touch a sun partition, so
+/// their shadows do not drop off the wall as they leave the screen.
+///
+/// Off by default on every platform: it poses those models and draws their sun
+/// shadows every frame, and stays off until that is measured on the phone. Off,
+/// nothing publishes [`SunShadowCasterVolume`], a hidden model is skipped
+/// before posing, rows are numbered in pose order, and the xmodel merge admits
+/// a script draw only when the camera walk did. Read once at startup with the
+/// other restart-only switches (`diag::memory_settings`).
+#[must_use]
+pub fn offscreen_shadow_casters() -> bool {
+    diag::memory_settings::get().offscreen_shadows
+}
+
 /// This frame's sun-shadow volume, as the clip planes of its two partitions.
 /// A producer asks it whether a model the camera does not see can still throw
 /// a shadow that lands in view, and so must still be posed as a shadow caster.
