@@ -15,6 +15,8 @@ pub(crate) struct Mechanics {
     bodies: BTreeMap<u64, Body>,
     slides: BTreeMap<u64, Slide>,
     finished: Vec<(u64, &'static str)>,
+    /// Rigid bodies that went to sleep this tick, for the pose writer.
+    settled: Vec<u64>,
     cost: BodyCost,
     /// Models already reported as launched without a physics preset.
     fallback_logged: std::collections::BTreeSet<String>,
@@ -56,6 +58,16 @@ pub(crate) struct LaunchSpec {
     pub half: [f32; 3],
     pub phys: xmodel_runtime::ModelPhys,
     pub client: bool,
+}
+
+/// How a pose writer should carry a moving body between snapshots.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BodyTrajectory {
+    pub velocity: [f32; 3],
+    /// Euler angle rates in degrees a second.
+    pub angle_rates: [f32; 3],
+    /// In the air: clients add gravity to the extrapolation.
+    pub falling: bool,
 }
 
 /// What the launched bodies cost from when the first woke to when the last slept.
@@ -150,6 +162,55 @@ impl Mechanics {
     /// Whether `model` is new to the no-preset report.
     pub(crate) fn note_fallback_phys(&mut self, model: &str) -> bool {
         self.fallback_logged.insert(model.to_owned())
+    }
+
+    /// Rigid bodies whose pose must be sent this tick whether or not it
+    /// changed: every moving one, and those that just went to sleep.
+    pub(crate) fn bodies_to_present(&self) -> std::collections::BTreeSet<u64> {
+        self.bodies
+            .iter()
+            .filter(|(_, b)| b.active && matches!(b.motion, BodyMotion::Rigid { .. }))
+            .map(|(object, _)| *object)
+            .chain(self.settled.iter().copied())
+            .collect()
+    }
+
+    /// The trajectory a launched rigid body should be sent with, if it is one.
+    /// Asleep, or calm on the ground, it is sent as stationary: a pose that
+    /// stops changing is not resent, so a small leftover rate would drift on
+    /// clients for good.
+    pub(crate) fn body_trajectory(&self, object: u64) -> Option<BodyTrajectory> {
+        let body = self.bodies.get(&object)?;
+        let BodyMotion::Rigid { body: rigid, .. } = &body.motion else {
+            return None;
+        };
+        let still = BodyTrajectory {
+            velocity: [0.0; 3],
+            angle_rates: [0.0; 3],
+            falling: false,
+        };
+        if !body.active {
+            return Some(still);
+        }
+        let slow = rigid.on_ground && rigid.velocity.length() < super::rigid_body::SLEEP_SPEED;
+        let calm = rigid.on_ground && rigid.spin.length() < super::rigid_body::SLEEP_SPIN;
+        let mut velocity = rigid.velocity;
+        if rigid.on_ground {
+            velocity.z = velocity.z.max(0.0);
+        }
+        Some(BodyTrajectory {
+            velocity: if slow {
+                still.velocity
+            } else {
+                velocity.to_array()
+            },
+            angle_rates: if calm {
+                still.angle_rates
+            } else {
+                angle_rates(rigid)
+            },
+            falling: !rigid.on_ground,
+        })
     }
 
     pub(crate) fn cancel(&mut self, object: u64) {
@@ -280,6 +341,21 @@ fn explosion_impulse(
 /// at rest nudged by a blast) does not either.
 fn crushes(client: bool, drop: f32) -> bool {
     !client && drop > CRUSH_MIN_DROP
+}
+
+/// Euler angle rates (degrees a second) that carry `body`'s spin for a moment.
+fn angle_rates(body: &RigidBody) -> [f32; 3] {
+    const LOOK_AHEAD_S: f32 = 0.01;
+    if body.spin.length_squared() < 1e-8 {
+        return [0.0; 3];
+    }
+    let now = math_iw4::axis_to_angles(body.axis());
+    let mut ahead = *body;
+    let angle = body.spin.length() * LOOK_AHEAD_S;
+    ahead.rotation =
+        (glam::Quat::from_axis_angle(body.spin.normalize(), angle) * body.rotation).normalize();
+    let later = math_iw4::axis_to_angles(ahead.axis());
+    std::array::from_fn(|i| math_iw4::angle_subtract(later[i], now[i]) / LOOK_AHEAD_S)
 }
 
 /// Inferred stand-in for a model without a usable physics preset: the common
@@ -427,9 +503,11 @@ fn advance_bodies(world: &mut World) {
         let Mechanics {
             bodies,
             finished,
+            settled,
             cost,
             ..
         } = &mut *mechanics;
+        settled.clear();
         let started = std::time::Instant::now();
         let mut awake = 0u32;
         let mut sweeps = 0u64;
@@ -445,6 +523,9 @@ fn advance_bodies(world: &mut World) {
                 BodyMotion::Rigid { .. } => {
                     awake += 1;
                     sweeps += u64::from(advance_rigid(world, *object, body, finished, &mut crushed));
+                    if !body.active {
+                        settled.push(*object);
+                    }
                 }
             }
             true
@@ -1032,6 +1113,13 @@ mod tests {
         );
     }
 
+    fn rigid(mechanics: &mut Mechanics, object: u64) -> &mut RigidBody {
+        match &mut mechanics.bodies.get_mut(&object).unwrap().motion {
+            BodyMotion::Rigid { body, .. } => body,
+            BodyMotion::Piece { .. } => panic!("not a rigid body"),
+        }
+    }
+
     #[test]
     fn a_launched_part_starts_at_force_over_mass() {
         let mut mechanics = Mechanics::default();
@@ -1039,6 +1127,49 @@ mod tests {
         let v = Vec3::from_array(mechanics.velocity(7, 0));
         let expected = Vec3::new(1500.0, 4000.0, -1800.0) / 25.0;
         assert!((v - expected).length() < 1e-3);
+    }
+
+    #[test]
+    fn the_pose_writer_follows_the_body_and_stops_when_it_sleeps() {
+        let mut mechanics = Mechanics::default();
+        launched(&mut mechanics, 7, true);
+        let flying = mechanics.body_trajectory(7).unwrap();
+        assert!(flying.falling, "in the air the extrapolation adds gravity");
+        assert_ne!(flying.angle_rates, [0.0; 3], "a hinge launch spins");
+        // The tick a bounce happens the writer carries the velocity after it.
+        let body = rigid(&mut mechanics, 7);
+        body.on_ground = true;
+        body.velocity = Vec3::new(120.0, 40.0, 6.0);
+        let bounced = mechanics.body_trajectory(7).unwrap();
+        assert!(!bounced.falling);
+        assert_eq!(bounced.velocity, [120.0, 40.0, 6.0]);
+        let body = rigid(&mut mechanics, 7);
+        body.velocity = Vec3::new(1.0, 0.5, -3.0);
+        body.spin = Vec3::ZERO;
+        let calm = mechanics.body_trajectory(7).unwrap();
+        assert_eq!((calm.velocity, calm.angle_rates), ([0.0; 3], [0.0; 3]));
+        mechanics.bodies.get_mut(&7).unwrap().active = false;
+        let asleep = mechanics.body_trajectory(7).unwrap();
+        assert_eq!(
+            (asleep.velocity, asleep.angle_rates, asleep.falling),
+            ([0.0; 3], [0.0; 3], false)
+        );
+        mechanics.launch_piece(8, [0.0; 3], [0.0; 3], [4.0; 3]);
+        assert!(mechanics.body_trajectory(8).is_none());
+    }
+
+    #[test]
+    fn a_moving_body_is_sent_every_tick_and_once_more_when_it_sleeps() {
+        let mut mechanics = Mechanics::default();
+        launched(&mut mechanics, 7, true);
+        mechanics.launch_piece(8, [0.0; 3], [0.0; 3], [4.0; 3]);
+        assert!(mechanics.bodies_to_present().contains(&7));
+        assert!(!mechanics.bodies_to_present().contains(&8));
+        mechanics.bodies.get_mut(&7).unwrap().active = false;
+        mechanics.settled.push(7);
+        assert!(mechanics.bodies_to_present().contains(&7), "the sleep tick");
+        mechanics.settled.clear();
+        assert!(mechanics.bodies_to_present().is_empty(), "then left alone");
     }
 
     #[test]
