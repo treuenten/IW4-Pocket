@@ -129,6 +129,8 @@ pub enum SightSample {
     HitPlayer {
         client: ClientId,
         fraction: f32,
+        /// The trace met the player's riot shield, which stops bullets.
+        shield: bool,
     },
     Blocked {
         fraction: f32,
@@ -469,14 +471,21 @@ fn hull(hit: trace_iw4::Trace) -> HullTrace {
 /// Pistols raise and drop on the quick timings during a weapon change.
 const PISTOL_WEAP_CLASS: i32 = 5;
 
+/// The hit location of a riot shield in `weapon_iw4::HITLOC_NAMES`.
+const HITLOC_SHIELD: u8 = 19;
+
 fn classify_shot(outcome: TraceOutcome) -> SightSample {
     match outcome {
         TraceOutcome::Miss { .. } => SightSample::Clear,
         TraceOutcome::Hit {
             fraction,
-            collider: ColliderId::Player { client, .. },
+            collider: ColliderId::Player { client, hitloc, .. },
             ..
-        } => SightSample::HitPlayer { client, fraction },
+        } => SightSample::HitPlayer {
+            client,
+            fraction,
+            shield: hitloc == HITLOC_SHIELD,
+        },
         TraceOutcome::Hit {
             fraction,
             collider: ColliderId::World { glass_encoded, .. },
@@ -502,5 +511,16 @@ fn classify_shot(outcome: TraceOutcome) -> SightSample {
             obstacle: ObstacleKind::Other,
         },
         TraceOutcome::Invalid { .. } => SightSample::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_shield_hit_location_is_the_riot_shield() {
+        assert_eq!(
+            weapon_iw4::HITLOC_NAMES[usize::from(super::HITLOC_SHIELD)],
+            "shield"
+        );
     }
 }

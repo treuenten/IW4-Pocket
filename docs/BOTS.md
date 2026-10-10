@@ -85,6 +85,10 @@ with walk edges, out of the threat's line of fire where one is), tries each
 such point once, and with none reachable holds where it is, crouched, rather
 than asking the route for the same unreachable point on every think.
 
+A shot whose trace would land on the target's riot shield is not a shot: the
+bot tries the head and the feet, then another firing position, as players
+flank a shield.
+
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a
 running match, which is where bot behaviour is judged: `make map mp_boneyard`

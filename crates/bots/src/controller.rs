@@ -956,7 +956,7 @@ impl HostController {
         let melee = self.authorize_fire(
             obs.tick >= self.reaction_until
                 && fresh_contact(obs, target)
-                && shot_allowed(shot, target.id)
+                && reaches_target(shot, target.id)
                 && range <= MELEE_ARM_IN,
             target,
         );
@@ -1813,7 +1813,20 @@ fn fresh_contact(obs: &BotObservation, target: Contact) -> bool {
         && obs.tick.saturating_sub(target.seen_tick) <= FIRE_FRESH_TICKS
 }
 
+/// The shot would hit the target, and not on its riot shield, which stops
+/// bullets: a bot that sees only a shield tries the legs and the head, and
+/// failing those another angle, as a player does.
 fn shot_allowed(sample: QueryResult<SightSample>, target: ClientId) -> bool {
+    match sample {
+        Ok(SightSample::Clear) => true,
+        Ok(SightSample::HitPlayer { client, shield, .. }) => client == target && !shield,
+        Ok(SightSample::Unknown | SightSample::Blocked { .. }) | Err(_) => false,
+    }
+}
+
+/// The trace reaches the target, its shield included: in reach of a melee
+/// swing, which the shield's owner takes on the shield.
+fn reaches_target(sample: QueryResult<SightSample>, target: ClientId) -> bool {
     match sample {
         Ok(SightSample::Clear) => true,
         Ok(SightSample::HitPlayer { client, .. }) => client == target,
@@ -2297,6 +2310,26 @@ mod weapon_fight_tests {
         for task in [TaskKind::Fight, TaskKind::Recover, TaskKind::TouchObj] {
             assert!(!idle_search(task, MoveMode::Hold, PathOutcome::Clear));
         }
+    }
+
+    #[test]
+    fn a_shot_into_a_riot_shield_is_not_a_shot() {
+        let on_shield = Ok(SightSample::HitPlayer {
+            client: ClientId(4),
+            fraction: 0.5,
+            shield: true,
+        });
+        assert!(!shot_allowed(on_shield, ClientId(4)));
+        assert!(definitely_obstructed(on_shield, ClientId(4)));
+        // A swing still lands on it.
+        assert!(reaches_target(on_shield, ClientId(4)));
+        let on_body = Ok(SightSample::HitPlayer {
+            client: ClientId(4),
+            fraction: 0.5,
+            shield: false,
+        });
+        assert!(shot_allowed(on_body, ClientId(4)));
+        assert!(!shot_allowed(on_body, ClientId(5)));
     }
 
     #[test]
