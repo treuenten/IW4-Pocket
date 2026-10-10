@@ -299,6 +299,8 @@ pub enum ObjectiveAction {
     Plant,
     Defuse,
     Defend,
+    /// Bring the carried flag to the team's own capture zone.
+    Deliver,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

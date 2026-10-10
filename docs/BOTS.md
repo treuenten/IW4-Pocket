@@ -106,6 +106,14 @@ to its objective or its hunt. Against a player who takes no damage (god mode,
 a shield it cannot get round) bots attack, move, leave and come back, instead
 of standing in front of him for the rest of the match.
 
+Objectives come from the compass markers a human reads. In Capture the Flag
+the flag carrier (the escort marker rides on him) takes the enemy flag to his
+team's own capture zone, the `waypoint_defend_flag` marker, and walks onto
+its marker once the route is spent, since touching the zone with the flag
+scores. That goal outranks every capture, and near home searching and
+planting too; an enemy in view still comes first. While the team's own flag
+is away the zone is hidden and the carrier has no such goal.
+
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a
 running match, which is where bot behaviour is judged: `make map mp_boneyard`

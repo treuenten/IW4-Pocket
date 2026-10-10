@@ -1542,6 +1542,23 @@ impl HostController {
                         };
                     }
                 }
+                if obj.action == ObjectiveAction::Deliver {
+                    // The capture zone's trigger can be smaller than the disc
+                    // the route ends in: once the route is spent, walk on to
+                    // the marker, where touching it captures.
+                    let (move_mode, path, move_goal) = final_approach(
+                        obs.self_state.origin,
+                        obj.origin,
+                        self.route(obs.self_state.origin, obj.origin, world, nav, astar_budget),
+                    );
+                    return BotIntent {
+                        look_at: Some([obj.origin[0], obj.origin[1], obs.eye()[2]]),
+                        move_goal,
+                        move_mode,
+                        path,
+                        ..BotIntent::default()
+                    };
+                }
                 (
                     obj.origin,
                     false,
@@ -1930,6 +1947,9 @@ fn objective_utility(obs: &BotObservation, obj: ModeObjective, route_length: Opt
     let mut value = match obj.action {
         ObjectiveAction::Capture => 40.0 - cost,
         ObjectiveAction::Plant => 70.0 - cost,
+        // A flag carrier runs it home ahead of any capture, and near home
+        // ahead of searching too; an enemy in view (80 and up) comes first.
+        ObjectiveAction::Deliver => 75.0 - cost,
         ObjectiveAction::Defend => 55.0 - cost,
         ObjectiveAction::Defuse => {
             let needed =
@@ -2250,6 +2270,51 @@ mod use_objective_tests {
         assert!(!too_late_to_defuse(&late, true, 0.0));
         let plant = bomb_use(ObjectiveAction::Plant, 0);
         assert!(!too_late_to_defuse(&plant, true, 0.0));
+    }
+
+    #[test]
+    fn a_flag_carrier_runs_home_before_searching_but_fights_first() {
+        let obs = |origin: [f32; 3]| BotObservation {
+            tick: 1,
+            time_ms: 50,
+            self_state: crate::observation::SelfState {
+                life_sequence: sim::LifeSequence(1),
+                id: ClientId(3),
+                lifecycle: ClientLifecycle::Alive,
+                origin,
+                viewangles: [0.0; 3],
+                delta_angles: [0.0; 3],
+                view_height: 60.0,
+                stance: crate::observation::Stance::Stand,
+                health: 100,
+                weapon: 1,
+                weapon_class: crate::observation::WeaponClass::Assault,
+                weapon_action: crate::observation::WeaponAction::Ready,
+                ammo_clip: 30,
+                ammo_stock: 90,
+                team: 1,
+                linked: false,
+                akimbo: false,
+                ammo_clip_left: 0,
+            },
+            inventory: Vec::new(),
+            seen: Vec::new(),
+            unsensed: Vec::new(),
+            events: Vec::new(),
+            objective: None,
+            objectives: Vec::new(),
+        };
+        let home = ModeObjective {
+            action: ObjectiveAction::Deliver,
+            ..ModeObjective::at([0.0; 3])
+        };
+        // Across the map it still beats hunting and every capture (40 at
+        // most); near home it beats searching (55) and planting (70) too.
+        // An enemy in view (80 and up) comes first either way.
+        let far = objective_utility(&obs([9000.0, 0.0, 0.0]), home, None);
+        assert!(far > 40.0 && far < 80.0, "{far}");
+        let near = objective_utility(&obs([360.0, 0.0, 0.0]), home, None);
+        assert!(near > 70.0 && near < 80.0, "{near}");
     }
 
     #[test]

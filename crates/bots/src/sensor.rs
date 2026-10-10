@@ -338,7 +338,8 @@ struct Mate {
 /// What a marker asks of the team that sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IconRole {
-    /// `waypoint_defend*` and compass pings: nowhere to walk to.
+    /// `waypoint_defend*` and compass pings: nowhere to walk to, except the
+    /// flag carrier's own capture zone (see [`is_flag_zone`]).
     Ignore,
     /// `waypoint_escort`: rides on the teammate carrying the bomb or the flag
     /// (`objective_onentity`), so it is never a place to stand.
@@ -349,6 +350,15 @@ enum IconRole {
     Defuse,
     /// Anything else: a loose bomb, a flag, a zone held by standing in it.
     Capture,
+}
+
+/// ctf.gsc shows a team its own capture zone as `waypoint_defend_flag`, the
+/// one place the enemy flag it carries scores (the zone takes the enemy flag
+/// as its key object, touched with no use time). The zone is hidden while the
+/// team's own flag is away from home, and then the carrier has nowhere to
+/// take it.
+fn is_flag_zone(icon: &str) -> bool {
+    icon.contains("defend_flag")
 }
 
 fn icon_role(icon: &str) -> IconRole {
@@ -451,6 +461,15 @@ fn objectives_from_compass(
                 ..base
             };
             match icon_role(m.icon) {
+                // The flag carrier (the escort marker rides on him) runs the
+                // flag home; for everyone else the zone is nowhere to go.
+                IconRole::Ignore if carrier == Some(me) && is_flag_zone(m.icon) => {
+                    Some(ModeObjective {
+                        action: ObjectiveAction::Deliver,
+                        touching: use_touching(feet, m.origin),
+                        ..base
+                    })
+                }
                 IconRole::Ignore | IconRole::Escort => None,
                 IconRole::Target if bomb_loose => None,
                 IconRole::Target => Some(bomb_use(ObjectiveAction::Plant, carrier)),
@@ -609,6 +628,35 @@ mod tests {
         ];
         let own = goals(&markers, 3, &[mate(3, me, false)]);
         assert!(own[0].use_button && !own[0].touching, "{own:?}");
+    }
+
+    #[test]
+    fn the_flag_carrier_runs_the_flag_home() {
+        let home = [-1132.0, -2208.0, -252.0];
+        let carrier = [1500.0, 300.0, 0.0];
+        let markers = [
+            marker(0, "waypoint_escort", carrier),
+            marker(1, "waypoint_defend_flag", home),
+        ];
+        let mates = [
+            mate(3, carrier, false),
+            mate(4, [1400.0, 320.0, 0.0], false),
+        ];
+        let own = goals(&markers, 3, &mates);
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert_eq!(own[0].action, ObjectiveAction::Deliver);
+        assert_eq!(own[0].origin, home);
+        assert!(!own[0].use_button && !own[0].touching);
+        // His teammates have no goal at their own zone or on him.
+        assert!(goals(&markers, 4, &mates).is_empty());
+        // With the team's own flag taken the zone is hidden: nowhere to go.
+        assert!(goals(&markers[..1], 3, &mates).is_empty());
+        // A defender's site marker is not a flag zone.
+        let sd = [
+            marker(0, "waypoint_escort", carrier),
+            marker(1, "waypoint_defend_a", home),
+        ];
+        assert!(goals(&sd, 3, &mates).is_empty());
     }
 
     #[test]
