@@ -16,13 +16,53 @@ pub struct SourceRevisions {
     pub admission: u64,
 }
 
+fn topology_hash(indices: &[u32], ranges: &[(u32, u32)], decoded_n: usize) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    decoded_n.hash(&mut hasher);
+    indices.hash(&mut hasher);
+    ranges.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The rows a plan's topology fingerprint was last taken from. A producer that
+/// lays the same rows down again — remote bodies are re-skinned every frame but
+/// keep their indices — gets the fingerprint back after a compare of the rows
+/// instead of a SipHash over the whole index buffer. The answer is always the
+/// one `SourceRevisions::set_topology_from` gives for the same rows: the memo
+/// only decides whether it has to be worked out again, so a topology change can
+/// never be missed.
+#[derive(Clone, Debug, Default)]
+pub struct TopologyMemo {
+    indices: Vec<u32>,
+    ranges: Vec<(u32, u32)>,
+    decoded_n: usize,
+    topology: Option<u64>,
+}
+
+impl TopologyMemo {
+    pub fn fingerprint(&mut self, indices: &[u32], ranges: &[(u32, u32)], decoded_n: usize) -> u64 {
+        if let Some(topology) = self.topology
+            && self.decoded_n == decoded_n
+            && self.ranges.as_slice() == ranges
+            && self.indices.as_slice() == indices
+        {
+            debug_assert_eq!(topology, topology_hash(indices, ranges, decoded_n));
+            return topology;
+        }
+        let topology = topology_hash(indices, ranges, decoded_n);
+        self.indices.clear();
+        self.indices.extend_from_slice(indices);
+        self.ranges.clear();
+        self.ranges.extend_from_slice(ranges);
+        self.decoded_n = decoded_n;
+        self.topology = Some(topology);
+        topology
+    }
+}
+
 impl SourceRevisions {
     pub fn set_topology_from(&mut self, indices: &[u32], ranges: &[(u32, u32)], decoded_n: usize) {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        decoded_n.hash(&mut hasher);
-        indices.hash(&mut hasher);
-        ranges.hash(&mut hasher);
-        self.topology = hasher.finish();
+        self.topology = topology_hash(indices, ranges, decoded_n);
     }
 
     pub fn bump_vertices(&mut self) {
@@ -325,4 +365,71 @@ fn missing_products() -> Vec<FrameProduct> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod topology_memo_tests {
+    use super::{SourceRevisions, TopologyMemo};
+
+    fn direct(indices: &[u32], ranges: &[(u32, u32)], decoded_n: usize) -> u64 {
+        let mut revisions = SourceRevisions::default();
+        revisions.set_topology_from(indices, ranges, decoded_n);
+        revisions.topology
+    }
+
+    #[test]
+    fn memo_gives_the_hash_of_the_rows_it_is_handed_whatever_came_before() {
+        // Same rows again, an index changed in place, a range moved, the vertex
+        // count alone, back to an earlier layout, and empty: every answer is the
+        // SipHash of exactly those rows.
+        let a: Vec<u32> = (0..3000).map(|i| (i * 7) % 1000).collect();
+        let mut b = a.clone();
+        b[1234] ^= 1;
+        let ranges_a = vec![(0, 1500), (1500, 1500)];
+        let ranges_b = vec![(0, 1500), (1503, 1497)];
+        let steps: [(&[u32], &[(u32, u32)], usize); 9] = [
+            (&a, &ranges_a, 1000),
+            (&a, &ranges_a, 1000),
+            (&b, &ranges_a, 1000),
+            (&b, &ranges_b, 1000),
+            (&b, &ranges_b, 1001),
+            (&a, &ranges_a, 1000),
+            (&[], &[], 0),
+            (&[], &[], 0),
+            (&a, &ranges_a, 1000),
+        ];
+        let mut memo = TopologyMemo::default();
+        let mut previous = None;
+        for (step, (indices, ranges, decoded_n)) in steps.into_iter().enumerate() {
+            let want = direct(indices, ranges, decoded_n);
+            assert_eq!(
+                memo.fingerprint(indices, ranges, decoded_n),
+                want,
+                "step {step}"
+            );
+            if let Some((prev_indices, prev_ranges, prev_n, prev_want)) = previous {
+                let same = prev_indices == indices && prev_ranges == ranges && prev_n == decoded_n;
+                assert_eq!(
+                    same,
+                    prev_want == want,
+                    "step {step}: a change must move the value"
+                );
+            }
+            previous = Some((indices, ranges, decoded_n, want));
+        }
+    }
+
+    #[test]
+    fn memo_follows_rows_rewritten_in_place_at_the_same_length() {
+        let mut indices: Vec<u32> = (0..64).collect();
+        let ranges = [(0, 64)];
+        let mut memo = TopologyMemo::default();
+        let first = memo.fingerprint(&indices, &ranges, 64);
+        indices.swap(3, 4);
+        let second = memo.fingerprint(&indices, &ranges, 64);
+        assert_ne!(first, second);
+        assert_eq!(second, direct(&indices, &ranges, 64));
+        indices.swap(3, 4);
+        assert_eq!(memo.fingerprint(&indices, &ranges, 64), first);
+    }
 }

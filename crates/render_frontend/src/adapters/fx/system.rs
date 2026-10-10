@@ -628,7 +628,10 @@ fn commit_fx_transaction(
     mut combat: ResMut<CombatFxDump>,
     mut env: FxPresentEnv,
     lighting_cache: Option<Res<WorldModelLightingCache>>,
-    mut lighting_requests: ResMut<ModelLightingRequests>,
+    (mut lighting_requests, mut mark_binds): (
+        ResMut<ModelLightingRequests>,
+        Local<MarkMaterialBinds>,
+    ),
 ) {
     let FxFrameTransaction {
         outcome,
@@ -653,7 +656,7 @@ fn commit_fx_transaction(
         FxFrameOutcome::Generated(generated) => generated,
         FxFrameOutcome::Unavailable(FxUnavailableCause::CatalogAbsent) => {
             host.0.last_mark_mesh = None;
-            fill_mark_mesh_plan(&mut host.0, None, &mut mark_plan, &runtime);
+            fill_mark_mesh_plan(&mut host.0, None, &mut mark_plan, &runtime, &mut mark_binds);
             publish_empty_fx_owned_plans(&mut plan, &mut spark_plan);
             return;
         }
@@ -672,13 +675,19 @@ fn commit_fx_transaction(
     } = generated;
     let Some(catalog) = catalog else {
         *tracer_world = tracers;
-        fill_mark_mesh_plan(&mut host.0, None, &mut mark_plan, &runtime);
+        fill_mark_mesh_plan(&mut host.0, None, &mut mark_plan, &runtime, &mut mark_binds);
         publish_empty_fx_owned_plans(&mut plan, &mut spark_plan);
         return;
     };
     let mut zero_half = 0u32;
 
-    fill_mark_mesh_plan(&mut host.0, mark_mesh, &mut mark_plan, &runtime);
+    fill_mark_mesh_plan(
+        &mut host.0,
+        mark_mesh,
+        &mut mark_plan,
+        &runtime,
+        &mut mark_binds,
+    );
     let planes = frustum_planes.as_slice();
     fill_fx_model_plan(
         &out.models,
@@ -1841,6 +1850,7 @@ fn fill_mark_mesh_plan(
     mesh: Option<fx::GfxMarkMeshCensus>,
     plan: &mut GfxMarkMeshPlan,
     runtime: &MaterialGeneration,
+    binds: &mut MarkMaterialBinds,
 ) {
     let Some(mesh) = mesh else {
         host.gfx_mark_draw_n = None;
@@ -1869,7 +1879,7 @@ fn fill_mark_mesh_plan(
             skip_why = Some("no_material");
             continue;
         };
-        let Some((sort_key, ordinal)) = mark_mesh_bind(name, runtime) else {
+        let Some((sort_key, ordinal)) = binds.bind(surf.mark_slot, name, runtime) else {
             skip_why = Some("no_ordinal");
             continue;
         };
@@ -1938,6 +1948,51 @@ fn fill_mark_mesh_plan(
     host.last_mark_lmap_none_n = Some(none_n);
     host.last_mark_lmap_page_n = Some(page_n);
     plan.publish_share();
+}
+
+/// `mark_mesh_bind` for each mark slot, kept while the slot keeps its material
+/// and the runtime catalog keeps its generation. Every frame binds every live
+/// mark's material by name, two binary searches over the catalog's names; a mark
+/// keeps its material for its whole life, so one compare of the name checks that
+/// the slot's answer still holds. A catalog is never changed once published, so
+/// its generation names everything the answer depends on.
+#[derive(Default)]
+pub(crate) struct MarkMaterialBinds {
+    generation: Option<render_material::MaterialGenerationId>,
+    slots: Vec<Option<(String, Option<(u8, u32)>)>>,
+}
+
+impl MarkMaterialBinds {
+    fn bind(&mut self, slot: u16, name: &str, runtime: &MaterialGeneration) -> Option<(u8, u32)> {
+        self.bind_with(slot, name, runtime.catalog.generation_id(), |name| {
+            mark_mesh_bind(name, runtime)
+        })
+    }
+
+    fn bind_with(
+        &mut self,
+        slot: u16,
+        name: &str,
+        generation: render_material::MaterialGenerationId,
+        bind: impl FnOnce(&str) -> Option<(u8, u32)>,
+    ) -> Option<(u8, u32)> {
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.slots.clear();
+        }
+        let at = usize::from(slot);
+        if self.slots.len() <= at {
+            self.slots.resize_with(at + 1, || None);
+        }
+        match &self.slots[at] {
+            Some((bound, answer)) if bound == name => *answer,
+            _ => {
+                let answer = bind(name);
+                self.slots[at] = Some((name.to_owned(), answer));
+                answer
+            }
+        }
+    }
 }
 
 fn mark_mesh_bind(name: &str, runtime: &MaterialGeneration) -> Option<(u8, u32)> {
@@ -3364,4 +3419,51 @@ fn melee_blood(
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),
     );
     cursor.impact_played = cursor.impact_played.saturating_add(played);
+}
+
+#[cfg(test)]
+mod mark_bind_tests {
+    use super::MarkMaterialBinds;
+
+    fn bind(name: &str, generation: u64) -> Option<(u8, u32)> {
+        // Any pure function of (name, catalog) will do: the cache must hand back
+        // exactly what it would have computed.
+        let sum = name.bytes().map(u32::from).sum::<u32>();
+        (!name.starts_with("missing"))
+            .then_some((sum as u8, sum.wrapping_mul(31) ^ generation as u32))
+    }
+
+    #[test]
+    fn remembered_mark_binds_answer_as_binding_by_name_does() {
+        let first = render_material::RuntimeMaterialCatalog::default().generation_id();
+        let second = render_material::RuntimeMaterialCatalog::default().generation_id();
+        assert_ne!(first, second);
+        // (slot, material, catalog): repeats, a slot reused by another mark
+        // material, a material the catalog lacks, and a new catalog generation
+        // behind the same names.
+        let frames = [
+            (0, "mc/mtl_bullethole_concrete", first),
+            (1, "mc/mtl_bullethole_metal", first),
+            (0, "mc/mtl_bullethole_concrete", first),
+            (1, "mc/mtl_bullethole_metal", first),
+            (0, "mc/mtl_blood_splat", first),
+            (300, "missing_material", first),
+            (300, "missing_material", first),
+            (0, "mc/mtl_blood_splat", second),
+            (1, "mc/mtl_bullethole_metal", second),
+            (300, "mc/mtl_bullethole_wood", second),
+        ];
+        let mut binds = MarkMaterialBinds::default();
+        let mut computed = 0;
+        for (at, (slot, name, generation)) in frames.into_iter().enumerate() {
+            let want = bind(name, generation.get());
+            let got = binds.bind_with(slot, name, generation, |name| {
+                computed += 1;
+                bind(name, generation.get())
+            });
+            assert_eq!(got, want, "frame {at}");
+        }
+        // Only the first sight of each (slot, material, catalog) did the work.
+        assert_eq!(computed, 7);
+    }
 }

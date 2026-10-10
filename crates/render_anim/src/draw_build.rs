@@ -205,7 +205,9 @@ pub fn push_remote_body_cpu_draw(
 }
 
 pub fn finish_remote_body_draw_plan(plan: &mut RemoteBodyDrawPlan) {
-    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
+    let topology =
+        plan.topology_memo
+            .fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
     if plan.revisions.topology != topology {
         plan.revisions.topology = topology;
     }
@@ -733,4 +735,125 @@ pub fn clear_fpv_draw_plan(plan: &mut FpvDrawPlan, lighting_handle: u32) {
     let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, 0);
     let revision = plan.revision;
     plan.revision = stamp_plan_geometry(&mut plan.revisions, revision, topology);
+}
+
+#[cfg(test)]
+mod body_topology_tests {
+    use super::*;
+
+    struct Body {
+        indices: Vec<u32>,
+        decoded_n: usize,
+        surfaces: Vec<(u32, u32)>,
+    }
+
+    fn body(seed: u32, decoded_n: usize, tris: usize) -> Body {
+        let indices: Vec<u32> = (0..tris * 3)
+            .map(|i| (i as u32 * 31 + seed) % decoded_n as u32)
+            .collect();
+        let half = (indices.len() / 2) as u32;
+        Body {
+            surfaces: vec![(0, half), (half, indices.len() as u32 - half)],
+            indices,
+            decoded_n,
+        }
+    }
+
+    /// The frame `submit_remote_bodies` runs when a body moved, then
+    /// `finish_body_draw_plan`. `memo` picks the path under test; without it
+    /// this is the code as it was, every fingerprint a fresh SipHash.
+    fn frame(plan: &mut RemoteBodyDrawPlan, bodies: &[Body], stamped: bool, memo: bool) {
+        plan.clear_geometry();
+        let mut session = take_body_packed_session(plan);
+        for (client, body) in bodies.iter().enumerate() {
+            let rows = vec![[0u8; asset_iw4::size::GFX_PACKED_VERTEX]; body.decoded_n];
+            let Some((_, index_base)) = append_remote_body_cpu_blob(
+                plan,
+                &mut session,
+                &rows,
+                &body.indices,
+                body.decoded_n,
+            ) else {
+                continue;
+            };
+            for &(start, count) in &body.surfaces {
+                push_remote_body_cpu_draw(
+                    plan,
+                    index_base + start,
+                    count,
+                    Mat4::IDENTITY,
+                    1,
+                    0,
+                    0,
+                    0,
+                    Some(client as u32),
+                );
+            }
+        }
+        install_body_packed_session(plan, session);
+        if stamped && !bodies.is_empty() {
+            plan.revisions.bump_surfaces();
+            plan.revisions.bump_draws();
+            let topology = if memo {
+                plan.topology_memo
+                    .fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n)
+            } else {
+                topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n)
+            };
+            if plan.revisions.topology != topology {
+                plan.revisions.topology = topology;
+            }
+            plan.revision = plan.revision.wrapping_add(1);
+        }
+        if memo {
+            finish_remote_body_draw_plan(plan);
+        } else {
+            let topology =
+                topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
+            if plan.revisions.topology != topology {
+                plan.revisions.topology = topology;
+            }
+        }
+    }
+
+    #[test]
+    fn remembered_body_topology_publishes_the_same_revisions_as_hashing_every_frame() {
+        let a = [body(1, 900, 1200), body(2, 700, 900), body(3, 300, 200)];
+        let b = [body(1, 900, 1200), body(5, 650, 800), body(3, 300, 200)];
+        let shorter = [body(1, 900, 1200), body(3, 300, 200)];
+        // (bodies, stamped by the rebuild): re-skins onto the same rows, a body
+        // swapping models, a body leaving, everyone leaving, a rebuild refused
+        // after it laid its rows down (only the finish stamps it), and back.
+        let frames: [(&[Body], bool); 12] = [
+            (&a, true),
+            (&a, true),
+            (&a, true),
+            (&b, true),
+            (&b, true),
+            (&shorter, true),
+            (&a, true),
+            (&[], true),
+            (&[], true),
+            (&b, false),
+            (&b, true),
+            (&a, false),
+        ];
+        let mut remembered = RemoteBodyDrawPlan::default();
+        let mut hashed = RemoteBodyDrawPlan::default();
+        for (at, (bodies, stamped)) in frames.into_iter().enumerate() {
+            frame(&mut remembered, bodies, stamped, true);
+            frame(&mut hashed, bodies, stamped, false);
+            assert_eq!(remembered.revisions, hashed.revisions, "frame {at}");
+            assert_eq!(remembered.revision, hashed.revision, "frame {at}");
+            assert_eq!(
+                remembered.revisions.topology,
+                topology_fingerprint(
+                    &remembered.indices,
+                    &remembered.surface_ranges,
+                    remembered.decoded_n
+                ),
+                "frame {at}"
+            );
+        }
+    }
 }

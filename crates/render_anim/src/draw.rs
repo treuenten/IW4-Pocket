@@ -61,6 +61,10 @@ pub struct RemoteBodyDrawPlan {
 
     pub last_packed_id: Option<u64>,
     pub last_draw_id: Option<u64>,
+
+    /// The rows `revisions.topology` was last fingerprinted from: bodies are
+    /// rebuilt every frame they animate, almost always onto the same indices.
+    pub(crate) topology_memo: render_frame::TopologyMemo,
 }
 
 impl RemoteBodyDrawPlan {
@@ -179,6 +183,10 @@ pub struct ItemDrawPlan {
     pub generation: u64,
     pub revisions: SourceRevisions,
     pub(crate) packed_vertices: asset_world::PackedVertexPayload,
+
+    /// The rows `revisions.topology` was last fingerprinted from; the frame
+    /// re-stamp almost always finds the same ones.
+    pub(crate) topology_memo: render_frame::TopologyMemo,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,6 +216,10 @@ pub struct DynEntDrawPlan {
     pub generation: u64,
     pub revisions: SourceRevisions,
     pub(crate) packed_vertices: asset_world::PackedVertexPayload,
+
+    /// The rows `revisions.topology` was last fingerprinted from; the frame
+    /// re-stamp almost always finds the same ones.
+    pub(crate) topology_memo: render_frame::TopologyMemo,
 }
 
 impl DynEntDrawPlan {

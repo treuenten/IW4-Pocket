@@ -13,7 +13,7 @@ use crate::occupancy::dyn_ent_phys;
 use crate::occupancy::script_model::{DObjLodView, pose_script_dobj_with_materials};
 use crate::{
     DynEntDrawPlan, DynEntOwnerDraw, XMODEL_OBJECT_ID_DYNENT_BASE, append_dynent_asset,
-    stamp_plan_geometry, topology_fingerprint,
+    stamp_plan_geometry,
 };
 use anim_iw4::DOBJ_RADIUS_PARENT_ROOT;
 use render_scene::{
@@ -219,6 +219,114 @@ pub fn fpv_frustum_planes(
         planes.truncate(2);
     }
     planes
+}
+
+/// What `MapXModelSceneCatalog::get` answered for each dyn ent slot, kept
+/// across frames. The cull, the pose and the wake broadphase look up every dyn
+/// ent's model by name every frame, a BTreeMap walk comparing model names. A dyn
+/// ent keeps its model until it is destroyed, so each slot keeps its answer and
+/// one compare of the name checks that it still holds; a catalog that changed in
+/// any way (its change tick moved) drops every answer. The skeleton is held
+/// weakly: a catalog that is gone frees its models whether or not these systems
+/// run again.
+#[derive(Default)]
+pub struct DynEntModelHandles {
+    catalog: Option<bevy::ecs::change_detection::Tick>,
+    slots: Vec<Option<DynEntModelHandle>>,
+}
+
+struct DynEntModelHandle {
+    key: asset_world::MapXModelAssetKey,
+    skel: Option<std::sync::Weak<asset_model::ModelSkel>>,
+    radius: f32,
+}
+
+impl DynEntModelHandles {
+    /// Starts a frame's lookups against `catalog`. Answers taken from any other
+    /// catalog, or from this one before it last changed, are dropped.
+    pub fn sync(&mut self, catalog: Option<&Res<asset_world::MapXModelSceneCatalog>>) {
+        let stamp = catalog.map(|catalog| catalog.last_changed());
+        if self.catalog != stamp {
+            self.catalog = stamp;
+            self.slots.clear();
+        }
+    }
+
+    fn handle(
+        &mut self,
+        catalog: &asset_world::MapXModelSceneCatalog,
+        slot: u16,
+        key: &asset_world::MapXModelAssetKey,
+    ) -> (
+        &DynEntModelHandle,
+        Option<std::sync::Arc<asset_model::ModelSkel>>,
+    ) {
+        let slot = usize::from(slot);
+        if self.slots.len() <= slot {
+            self.slots.resize_with(slot + 1, || None);
+        }
+        // `Some(skel)` while the slot's answer still holds; a skeleton that is
+        // gone means the answer has to be looked up again.
+        let held = match &self.slots[slot] {
+            Some(handle) if handle.key == *key => match &handle.skel {
+                None => Some(None),
+                Some(skel) => skel.upgrade().map(Some),
+            },
+            _ => None,
+        };
+        let skel = match held {
+            Some(skel) => skel,
+            None => {
+                let skel = match catalog.get(key) {
+                    Some(
+                        asset_world::MapXModelSceneAsset::Iw4(skel)
+                        | asset_world::MapXModelSceneAsset::Iw5(skel)
+                        | asset_world::MapXModelSceneAsset::T6(skel)
+                        | asset_world::MapXModelSceneAsset::T5(skel),
+                    ) => Some(std::sync::Arc::clone(skel)),
+                    Some(asset_world::MapXModelSceneAsset::Unavailable { .. }) | None => None,
+                };
+                self.slots[slot] = Some(DynEntModelHandle {
+                    key: key.clone(),
+                    skel: skel.as_ref().map(std::sync::Arc::downgrade),
+                    radius: skel.as_ref().map_or(0.0, |skel| skel.radius.unwrap_or(0.0)),
+                });
+                skel
+            }
+        };
+        (self.slots[slot].as_ref().expect("filled above"), skel)
+    }
+
+    /// `catalog.get(key)` for the dyn ent in `slot`, as the skeleton the scene
+    /// draws (`None` for a model that is missing or unavailable). `catalog` must
+    /// be the one last passed to `sync`.
+    pub fn skel(
+        &mut self,
+        catalog: &asset_world::MapXModelSceneCatalog,
+        slot: u16,
+        key: &asset_world::MapXModelAssetKey,
+    ) -> Option<std::sync::Arc<asset_model::ModelSkel>> {
+        self.handle(catalog, slot, key).1
+    }
+
+    /// `xmodel_radius(Some(catalog), key)` for the dyn ent in `slot`.
+    pub fn radius(
+        &mut self,
+        catalog: Option<&asset_world::MapXModelSceneCatalog>,
+        slot: u16,
+        key: &asset_world::MapXModelAssetKey,
+    ) -> f32 {
+        let Some(catalog) = catalog else {
+            return 0.0;
+        };
+        let slot_at = usize::from(slot);
+        if let Some(Some(handle)) = self.slots.get(slot_at)
+            && handle.key == *key
+        {
+            return handle.radius;
+        }
+        self.handle(catalog, slot, key).0.radius
+    }
 }
 
 pub fn xmodel_radius(
@@ -452,9 +560,11 @@ fn cull_dyn_ent_cell_models(
         (&WorldDynEntInstance, &Transform, &mut Visibility),
         With<DynEntModelEntity>,
     >,
+    mut handles: Local<DynEntModelHandles>,
 ) {
     let planes = fpv_frustum_planes(&cameras);
     let vis = admitted_vis(&cell_vis);
+    handles.sync(catalog.as_ref());
     let catalog = catalog.as_deref();
     for (inst, transform, mut visibility) in &mut instances {
         if inst.dead {
@@ -466,7 +576,7 @@ fn cull_dyn_ent_cell_models(
             continue;
         }
         let origin = transform.translation.to_array();
-        let radius = xmodel_radius(catalog, &inst.current_model);
+        let radius = handles.radius(catalog, inst.index, &inst.current_model);
         let culled = sphere_behind_frustum(origin, radius, &planes);
         if culled {
             *visibility = Visibility::Hidden;
@@ -483,8 +593,10 @@ fn pose_dyn_ents(
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
     prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut product: ResMut<DynEntPoseProduct>,
+    mut handles: Local<DynEntModelHandles>,
 ) {
     product.owners.clear();
+    handles.sync(catalog.as_ref());
     if catalog.as_ref().is_some_and(|c| c.is_changed()) {
         product.assets.clear();
     }
@@ -503,17 +615,10 @@ fn pose_dyn_ents(
         }
 
         let camera_hidden = *visibility == Visibility::Hidden;
-        let skel = match catalog.get(&inst.current_model) {
-            Some(
-                asset_world::MapXModelSceneAsset::Iw4(skel)
-                | asset_world::MapXModelSceneAsset::Iw5(skel)
-                | asset_world::MapXModelSceneAsset::T6(skel)
-                | asset_world::MapXModelSceneAsset::T5(skel),
-            ) => skel.as_ref(),
-            Some(asset_world::MapXModelSceneAsset::Unavailable { .. }) | None => {
-                continue;
-            }
+        let Some(skel) = handles.skel(catalog, inst.index, &inst.current_model) else {
+            continue;
         };
+        let skel = skel.as_ref();
 
         let camera_lod = smodel_camera_lod(
             skel.lod,
@@ -688,10 +793,164 @@ fn append_dynent_draws(
         }
     }
     if !draws.is_empty() {
-        let topology =
-            topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
+        let rows = &mut *plan;
+        let topology = rows.topology_memo.fingerprint(
+            &rows.indices,
+            &rows.surface_ranges,
+            rows.vertices.len(),
+        );
         let rev = plan.revision;
         plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
     }
     plan.publish_frame_rows(&mut draws, &mut owners);
+}
+
+#[cfg(test)]
+mod model_handle_tests {
+    use super::*;
+    use asset_world::{MapXModelAssetKey, MapXModelSceneAsset, MapXModelSceneCatalog};
+    use std::sync::Arc;
+
+    fn skel(name: &str, radius: f32) -> MapXModelSceneAsset {
+        MapXModelSceneAsset::Iw4(Arc::new(asset_model::ModelSkel {
+            name: name.to_owned(),
+            bones: Vec::new(),
+            bone_collision: Vec::new(),
+            bone_names: Vec::new(),
+            tag_view: None,
+            tag_weapon: None,
+            pose: None,
+            positions: Vec::new(),
+            normals: Vec::new(),
+            colors: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+            surface_materials: Vec::new(),
+            surface_vertex_ranges: Vec::new(),
+            surface_index_ranges: Vec::new(),
+            surface_part_bits: Vec::new(),
+            surface_deformed: Vec::new(),
+            surface_vert_list_count: Vec::new(),
+            vert_skin: Vec::new(),
+            rigid_verts: 0,
+            blend_verts: 0,
+            packed_vertices: Vec::new(),
+            radius: Some(radius),
+            bounds: None,
+            contents: None,
+            coll_lod: 0,
+            coll_surfs: Vec::new(),
+            movement_brushes: Vec::new(),
+            mount_tag: None,
+            lod: None,
+            lod_smc: None,
+            lod_part_bits: None,
+            lod_surf_span: [(0, 0); 4],
+        }))
+    }
+
+    fn key(name: &str) -> MapXModelAssetKey {
+        MapXModelAssetKey(name.to_owned())
+    }
+
+    fn catalog(a_radius: f32) -> MapXModelSceneCatalog {
+        let mut catalog = MapXModelSceneCatalog::default();
+        catalog.insert(key("a"), skel("a", a_radius));
+        catalog.insert(key("b"), skel("b", 9.0));
+        catalog.insert(
+            key("u"),
+            MapXModelSceneAsset::Unavailable { reason: "test" },
+        );
+        catalog
+    }
+
+    #[derive(Resource, Default)]
+    struct Probe(Vec<(u16, MapXModelAssetKey)>);
+
+    /// (remembered radius, looked-up radius, remembered skeleton, looked-up
+    /// skeleton) per probe.
+    #[derive(Resource, Default)]
+    struct Seen(Vec<(f32, f32, Option<String>, Option<String>)>);
+
+    fn probe(
+        catalog: Option<Res<MapXModelSceneCatalog>>,
+        probes: Res<Probe>,
+        mut handles: Local<DynEntModelHandles>,
+        mut seen: ResMut<Seen>,
+    ) {
+        handles.sync(catalog.as_ref());
+        let catalog = catalog.as_deref();
+        seen.0.clear();
+        for (slot, key) in &probes.0 {
+            let remembered = handles.radius(catalog, *slot, key);
+            let looked_up = xmodel_radius(catalog, key);
+            let remembered_skel = catalog
+                .and_then(|catalog| handles.skel(catalog, *slot, key))
+                .map(|skel| skel.name.clone());
+            let looked_up_skel = catalog
+                .and_then(|catalog| catalog.get(key))
+                .and_then(|asset| match asset {
+                    MapXModelSceneAsset::Iw4(skel)
+                    | MapXModelSceneAsset::Iw5(skel)
+                    | MapXModelSceneAsset::T6(skel)
+                    | MapXModelSceneAsset::T5(skel) => Some(skel.name.clone()),
+                    MapXModelSceneAsset::Unavailable { .. } => None,
+                });
+            seen.0
+                .push((remembered, looked_up, remembered_skel, looked_up_skel));
+        }
+    }
+
+    fn check(app: &mut App, step: &str) -> Vec<f32> {
+        app.update();
+        let seen = &app.world().resource::<Seen>().0;
+        for (at, (remembered, looked_up, remembered_skel, looked_up_skel)) in
+            seen.iter().enumerate()
+        {
+            assert_eq!(
+                remembered.to_bits(),
+                looked_up.to_bits(),
+                "{step} probe {at}"
+            );
+            assert_eq!(remembered_skel, looked_up_skel, "{step} probe {at}");
+        }
+        seen.iter().map(|row| row.0).collect()
+    }
+
+    #[test]
+    fn remembered_models_answer_as_the_catalog_does_through_every_change() {
+        let mut app = App::new();
+        app.init_resource::<Seen>()
+            .insert_resource(Probe(vec![
+                (0, key("a")),
+                (1, key("b")),
+                (2, key("u")),
+                (3, key("missing")),
+                (7, key("a")),
+            ]))
+            .insert_resource(catalog(5.0))
+            .add_systems(Update, probe);
+        assert_eq!(check(&mut app, "first"), [5.0, 9.0, 0.0, 0.0, 5.0]);
+        assert_eq!(check(&mut app, "again"), [5.0, 9.0, 0.0, 0.0, 5.0]);
+
+        // A destroyed dyn ent swaps its model: same slot, another name.
+        app.world_mut().resource_mut::<Probe>().0[0].1 = key("b");
+        app.world_mut().resource_mut::<Probe>().0[1].1 = key("a");
+        assert_eq!(check(&mut app, "swapped"), [9.0, 5.0, 0.0, 0.0, 5.0]);
+
+        // A new catalog: same names, other models behind them.
+        app.insert_resource(catalog(6.5));
+        assert_eq!(check(&mut app, "new catalog"), [9.0, 6.5, 0.0, 0.0, 6.5]);
+
+        // The catalog changed in place.
+        app.world_mut()
+            .resource_mut::<MapXModelSceneCatalog>()
+            .alias("a", "b");
+        assert_eq!(check(&mut app, "aliased"), [9.0, 9.0, 0.0, 0.0, 9.0]);
+
+        app.world_mut().remove_resource::<MapXModelSceneCatalog>();
+        assert_eq!(check(&mut app, "no catalog"), [0.0; 5]);
+        app.insert_resource(catalog(4.0));
+        assert_eq!(check(&mut app, "back"), [9.0, 4.0, 0.0, 0.0, 4.0]);
+    }
 }
