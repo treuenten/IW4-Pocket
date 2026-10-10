@@ -53,11 +53,14 @@ pub enum WeaponClass {
     Lmg,
     Sniper,
     Shotgun,
+    /// Keeps the launcher's own blast away from the bot.
+    Launcher,
 }
 
 impl WeaponClass {
     pub fn fight_hold(self) -> f32 {
         match self {
+            Self::Launcher => 400.0,
             Self::Sniper => 360.0,
             Self::Lmg => 220.0,
             Self::Assault => 160.0,
@@ -86,11 +89,10 @@ impl WeaponClass {
             UniqueGroup::Lmg => Self::Lmg,
             UniqueGroup::Shotgun => Self::Shotgun,
             UniqueGroup::Smg | UniqueGroup::MachinePistol | UniqueGroup::Pistol => Self::Smg,
-            UniqueGroup::Assault
-            | UniqueGroup::Riot
-            | UniqueGroup::Projectile
-            | UniqueGroup::Cqb
-            | UniqueGroup::Special => Self::Assault,
+            UniqueGroup::Projectile => Self::Launcher,
+            UniqueGroup::Assault | UniqueGroup::Riot | UniqueGroup::Cqb | UniqueGroup::Special => {
+                Self::Assault
+            }
         }
     }
 }
@@ -166,7 +168,20 @@ pub struct WeaponFacts {
     pub lunge: bool,
 }
 
+/// A launcher is neither raised nor fired with an enemy closer than this:
+/// MW2 rockets arm almost at once and the bot would stand in its own blast.
+pub const LAUNCHER_MIN_RANGE: f32 = 300.0;
+
 impl WeaponFacts {
+    /// The closest an enemy may be for this weapon to be used on it.
+    pub fn min_range(&self) -> f32 {
+        if self.launcher {
+            LAUNCHER_MIN_RANGE.max(1.5 * self.blast_radius as f32)
+        } else {
+            0.0
+        }
+    }
+
     /// A gun the bot can fight with: selectable, and either a bullet weapon or
     /// a launcher that fires without a lock. A whitelist on purpose, so a shield,
     /// a knife or a T5 row whose raw weapType means something else is never
@@ -220,7 +235,13 @@ impl WeaponSlot {
     }
 
     pub fn is_loaded_gun(&self) -> bool {
-        self.facts.selectable && self.clip > 0
+        self.is_usable_gun() && self.rounds() > 0
+    }
+
+    /// A usable gun that may be used on an enemy this far away (`None`: no
+    /// enemy in view).
+    pub fn usable_at(&self, range: Option<f32>) -> bool {
+        self.is_usable_gun() && range.is_none_or(|range| range >= self.facts.min_range())
     }
 
     /// A usable gun with rounds in a magazine or in reserve.
@@ -364,15 +385,34 @@ impl BotObservation {
         self.held().is_some_and(|slot| slot.facts.shield)
     }
 
-    /// Some usable gun still has rounds, in a magazine or in reserve. Without
-    /// one the bot can only fight with its melee.
-    pub fn armed(&self) -> bool {
+    /// Some gun usable on an enemy `range` away still has rounds, in a
+    /// magazine or in reserve. Without one the bot can only fight with its
+    /// melee.
+    pub fn armed(&self, range: Option<f32>) -> bool {
         if self.held().is_none()
             && (self.self_state.clip_total() > 0 || self.self_state.ammo_stock > 0)
         {
             return true;
         }
-        self.inventory.iter().any(WeaponSlot::is_armed_gun)
+        self.inventory
+            .iter()
+            .any(|slot| slot.is_armed_gun() && slot.usable_at(range))
+    }
+
+    /// Distance to the nearest enemy in view.
+    pub fn nearest_threat(&self) -> Option<f32> {
+        let here = self.self_state.origin;
+        self.seen
+            .iter()
+            .map(|contact| {
+                let d = [
+                    contact.origin[0] - here[0],
+                    contact.origin[1] - here[1],
+                    contact.origin[2] - here[2],
+                ];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+            })
+            .min_by(f32::total_cmp)
     }
 
     pub fn eye(&self) -> [f32; 3] {

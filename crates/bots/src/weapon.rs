@@ -12,21 +12,6 @@ const TICK_MS: i32 = 50;
 /// legal command either way; only the comparison needs real numbers.
 const DEFAULT_ACTION_MS: i32 = 2000;
 
-/// A spent gun in hand, nothing to load it with and no other gun loaded: switch
-/// to a gun that still has reserve ammunition, which the next decision reloads.
-///
-/// Off by default. Without it `choose` has nothing to offer in that state and
-/// the bot keeps the empty gun until it dies: an Overwatch bot that emptied its
-/// MG4 at an enemy and then fired its AT4 stood still for the rest of a match
-/// with 100 MG4 rounds in reserve, and so does a sniper whose pistol runs dry.
-/// `IW4L_BOT_RESERVE_AMMO=1` in iw4l-env.txt turns it on for the phone.
-pub const RESERVE_AMMO_ENV: &str = "IW4L_BOT_RESERVE_AMMO";
-
-fn reserve_ammo() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| perf::switch(RESERVE_AMMO_ENV))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WeaponAct {
     Switch { to: u16 },
@@ -151,7 +136,7 @@ impl Commitment {
         Self {
             act,
             held: me.weapon,
-            clip_at_start: me.ammo_clip,
+            clip_at_start: me.clip_total(),
             life: me.life_sequence,
             deadline_tick: obs
                 .tick
@@ -190,7 +175,7 @@ impl Commitment {
                 if me.weapon_action == WeaponAction::Reloading {
                     self.entered = true;
                 }
-                if me.ammo_clip > self.clip_at_start {
+                if me.clip_total() > self.clip_at_start {
                     return WeaponStatus::Succeeded;
                 }
                 if !self.entered && me.ammo_stock <= 0 {
@@ -217,29 +202,56 @@ fn held_slot(obs: &BotObservation) -> WeaponSlot {
     }
 }
 
-/// Combat equipment needs attention when the held magazine is empty. Reloading
-/// and switching are then compared on the simulator's own timings, with a
-/// visible threat deciding whether speed outranks keeping the current gun.
-fn choose(obs: &BotObservation) -> Option<WeaponAct> {
-    choose_with(obs, reserve_ammo())
-}
-
-/// `reserve`: see [`RESERVE_AMMO_ENV`].
-fn choose_with(obs: &BotObservation, reserve: bool) -> Option<WeaponAct> {
+/// Combat equipment needs attention when the gun in hand cannot shoot: its
+/// magazines are empty, or it is not a gun the bot can fight with at all (a
+/// lock-on launcher, a knife), or it is a launcher whose own blast would reach
+/// the bot. Reloading and switching are then compared on the simulator's own
+/// timings, with a visible threat deciding whether speed outranks keeping the
+/// current gun. Only usable guns are ever switched to.
+pub(crate) fn choose(obs: &BotObservation) -> Option<WeaponAct> {
     let me = &obs.self_state;
-    if !me.weapon_action.is_settled() || me.ammo_clip > 0 {
+    if !me.weapon_action.is_settled() {
         return None;
     }
     let held = held_slot(obs);
-    // An offhand or an item in hand is not a readiness decision.
-    if obs.held().is_some_and(|slot| !slot.facts.selectable) {
+    // An offhand or an item in hand is not a readiness decision, and a riot
+    // shield is fought with, not reloaded: leaving it is the fight's call.
+    if obs
+        .held()
+        .is_some_and(|slot| !slot.facts.selectable || slot.facts.shield)
+    {
         return None;
     }
-    let reload_ms = (me.ammo_stock > 0).then(|| held.reload_ms());
+    let range = obs.nearest_threat();
+    // A weapon the content has no row for keeps the magazine's word.
+    let usable = obs.held().is_none_or(|slot| slot.is_usable_gun());
+    let fits = |slot: &&WeaponSlot| slot.weapon != me.weapon && slot.usable_at(range);
+    let quickest = |slots: &mut dyn Iterator<Item = &WeaponSlot>| {
+        slots
+            .map(|slot| (slot.switch_ms(&held), slot.weapon))
+            .min()
+            .map(|(_, to)| WeaponAct::Switch { to })
+    };
+    if usable && me.clip_total() > 0 {
+        if held.usable_at(range) {
+            return None;
+        }
+        // A loaded launcher with the enemy inside its blast: put it away for a
+        // gun that still has rounds anywhere, or keep it until the range opens.
+        return quickest(
+            &mut obs
+                .inventory
+                .iter()
+                .filter(fits)
+                .filter(|slot| slot.rounds() > 0 || slot.stock > 0),
+        );
+    }
+    let reload_ms = (usable && me.ammo_stock > 0).then(|| held.reload_ms());
     let switch = obs
         .inventory
         .iter()
-        .filter(|slot| slot.weapon != me.weapon && slot.is_loaded_gun())
+        .filter(fits)
+        .filter(|slot| slot.is_loaded_gun())
         .map(|slot| (slot.switch_ms(&held), slot.weapon))
         .min();
     match (switch, reload_ms) {
@@ -253,41 +265,56 @@ fn choose_with(obs: &BotObservation, reserve: bool) -> Option<WeaponAct> {
         }
         (Some((_, to)), None) => Some(WeaponAct::Switch { to }),
         (None, Some(_)) => Some(WeaponAct::Reload),
-        // Nothing loaded anywhere: the gun with reserve that is quickest to raise.
-        (None, None) if reserve => obs
-            .inventory
-            .iter()
-            .filter(|slot| slot.weapon != me.weapon && slot.facts.selectable && slot.stock > 0)
-            .map(|slot| (slot.switch_ms(&held), slot.weapon))
-            .min()
-            .map(|(_, to)| WeaponAct::Switch { to }),
-        (None, None) => None,
+        // Nothing loaded anywhere: the gun with reserve that is quickest to
+        // raise, which the next decision (or the raise itself) reloads. Without
+        // this an Overwatch bot that emptied its MG4 and then fired its AT4
+        // stood still for the rest of a match with 100 MG4 rounds in reserve,
+        // and so did a sniper whose pistol ran dry.
+        (None, None) => quickest(
+            &mut obs
+                .inventory
+                .iter()
+                .filter(fits)
+                .filter(|slot| slot.stock > 0),
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::{SelfState, Stance, WeaponClass, WeaponFacts};
+    use crate::observation::{
+        Contact, KnowledgeSource, SelfState, Stance, WeaponClass, WeaponFacts,
+    };
     use sim::{ClientId, ClientLifecycle, LifeSequence};
 
     const AT4: u16 = 79;
     const MG4: u16 = 713;
     const FRAG: u16 = 372;
+    const JAVELIN: u16 = 407;
+    const CHEYTAC: u16 = 186;
+    const SHIELD: u16 = 836;
+    const USP: u16 = 1123;
+    const UZI_AKIMBO: u16 = 1144;
+
+    fn facts(selectable: bool, clip: i32) -> WeaponFacts {
+        WeaponFacts {
+            selectable,
+            clip_size: clip.max(1),
+            raise_time_ms: 600,
+            drop_time_ms: 400,
+            reload_time_ms: 2000,
+            reload_empty_time_ms: 3000,
+            bullet: selectable,
+            ..WeaponFacts::default()
+        }
+    }
 
     fn slot(weapon: u16, selectable: bool, clip: i32, stock: i32) -> WeaponSlot {
         WeaponSlot {
             weapon,
             class: WeaponClass::default(),
-            facts: WeaponFacts {
-                selectable,
-                clip_size: clip.max(1),
-                raise_time_ms: 600,
-                drop_time_ms: 400,
-                reload_time_ms: 2000,
-                reload_empty_time_ms: 3000,
-                ..WeaponFacts::default()
-            },
+            facts: facts(selectable, clip),
             clip,
             stock,
             akimbo: false,
@@ -295,8 +322,31 @@ mod tests {
         }
     }
 
+    fn launcher(weapon: u16, needs_lock: bool, clip: i32, stock: i32) -> WeaponSlot {
+        WeaponSlot {
+            facts: WeaponFacts {
+                bullet: false,
+                launcher: true,
+                needs_lock,
+                ..facts(true, 1)
+            },
+            ..slot(weapon, true, clip, stock)
+        }
+    }
+
+    fn shield(weapon: u16) -> WeaponSlot {
+        WeaponSlot {
+            facts: WeaponFacts {
+                bullet: false,
+                shield: true,
+                ..facts(true, 1)
+            },
+            ..slot(weapon, true, 1, 0)
+        }
+    }
+
     /// The Overwatch bot of the Estate smoke run: the AT4 in hand fired, the
-    /// MG4 magazine empty with 100 rounds in reserve, an enemy in view.
+    /// MG4 magazine empty with 100 rounds in reserve.
     fn spent_launcher(inventory: Vec<WeaponSlot>) -> BotObservation {
         BotObservation {
             tick: 2758,
@@ -330,37 +380,162 @@ mod tests {
         }
     }
 
+    /// The bot holds `weapon` with the magazine and reserve of its slot.
+    fn holding(mut obs: BotObservation, weapon: u16) -> BotObservation {
+        let held = *obs.slot(weapon).expect("held weapon in the inventory");
+        obs.self_state.weapon = weapon;
+        obs.self_state.ammo_clip = held.clip;
+        obs.self_state.ammo_clip_left = held.clip_left;
+        obs.self_state.akimbo = held.akimbo;
+        obs.self_state.ammo_stock = held.stock;
+        obs
+    }
+
+    fn enemy_at(mut obs: BotObservation, range: f32) -> BotObservation {
+        obs.seen.push(Contact {
+            id: ClientId(0),
+            origin: [range, 0.0, 0.0],
+            source: KnowledgeSource::CurrentlySeen,
+            seen_tick: obs.tick,
+            confidence: 1.0,
+        });
+        obs
+    }
+
     #[test]
-    fn a_spent_gun_switches_to_reserve_only_with_the_switch() {
+    fn a_spent_gun_switches_to_one_with_reserve() {
         let obs = spent_launcher(vec![
-            slot(AT4, true, 0, 0),
+            launcher(AT4, false, 0, 0),
             slot(FRAG, false, 1, 1),
             slot(MG4, true, 0, 100),
         ]);
-        assert_eq!(choose_with(&obs, false), None);
-        assert_eq!(choose_with(&obs, true), Some(WeaponAct::Switch { to: MG4 }));
+        assert_eq!(choose(&obs), Some(WeaponAct::Switch { to: MG4 }));
     }
 
     #[test]
     fn nothing_in_reserve_and_offhands_offer_no_switch() {
         let obs = spent_launcher(vec![
-            slot(AT4, true, 0, 0),
+            launcher(AT4, false, 0, 0),
             slot(FRAG, false, 1, 1),
             slot(MG4, true, 0, 0),
         ]);
-        assert_eq!(choose_with(&obs, true), None);
+        assert_eq!(choose(&obs), None);
+        assert!(!obs.armed(None));
     }
 
     #[test]
     fn a_loaded_gun_or_a_reload_still_comes_first() {
         // Another gun loaded: switch to it, as before.
-        let mut obs = spent_launcher(vec![slot(AT4, true, 0, 0), slot(MG4, true, 30, 100)]);
-        assert_eq!(choose_with(&obs, true), Some(WeaponAct::Switch { to: MG4 }));
+        let mut obs = spent_launcher(vec![launcher(AT4, false, 0, 0), slot(MG4, true, 30, 100)]);
+        assert_eq!(choose(&obs), Some(WeaponAct::Switch { to: MG4 }));
         // The held gun has reserve of its own: reload it, as before.
-        obs.self_state.weapon = MG4;
-        obs.self_state.ammo_stock = 100;
-        obs.inventory = vec![slot(AT4, true, 0, 0), slot(MG4, true, 0, 100)];
-        assert_eq!(choose_with(&obs, true), Some(WeaponAct::Reload));
-        assert_eq!(choose_with(&obs, false), Some(WeaponAct::Reload));
+        obs.inventory = vec![launcher(AT4, false, 0, 0), slot(MG4, true, 0, 100)];
+        let obs = holding(obs, MG4);
+        assert_eq!(choose(&obs), Some(WeaponAct::Reload));
+    }
+
+    #[test]
+    fn a_lock_on_launcher_is_never_taken_and_counts_as_empty_in_hand() {
+        // The Intervention bot of the god-mode runs: rifle empty with ten in
+        // reserve. The loaded Javelin is not a gun it can fight with.
+        let obs = spent_launcher(vec![
+            slot(CHEYTAC, true, 0, 10),
+            launcher(JAVELIN, true, 1, 1),
+        ]);
+        let obs = enemy_at(holding(obs, CHEYTAC), 900.0);
+        assert_eq!(choose(&obs), Some(WeaponAct::Reload));
+        // Already holding the loaded Javelin: back to the rifle, which the
+        // next decision reloads.
+        let obs = holding(obs, JAVELIN);
+        assert_eq!(choose(&obs), Some(WeaponAct::Switch { to: CHEYTAC }));
+    }
+
+    #[test]
+    fn a_shield_in_hand_is_left_to_the_fight() {
+        let obs = spent_launcher(vec![shield(SHIELD), slot(USP, true, 12, 24)]);
+        let obs = enemy_at(holding(obs, SHIELD), 150.0);
+        assert_eq!(choose(&obs), None);
+        assert!(!obs.held_gun_loaded());
+        assert!(obs.armed(Some(150.0)));
+        // A shield is never a gun to switch to either.
+        let obs = spent_launcher(vec![slot(USP, true, 0, 0), shield(SHIELD)]);
+        let obs = holding(obs, USP);
+        assert_eq!(choose(&obs), None);
+        assert!(!obs.armed(None));
+    }
+
+    #[test]
+    fn a_launcher_is_not_raised_or_kept_with_the_enemy_close() {
+        // MG4 empty with reserve, the AT4 loaded, an enemy 150 units away:
+        // reload the MG4 rather than switch to a rocket that would kill both.
+        let obs = spent_launcher(vec![slot(MG4, true, 0, 100), launcher(AT4, false, 1, 0)]);
+        let obs = holding(obs, MG4);
+        assert_eq!(
+            choose(&enemy_at(obs.clone(), 900.0)),
+            Some(WeaponAct::Switch { to: AT4 })
+        );
+        assert_eq!(
+            choose(&enemy_at(obs.clone(), 150.0)),
+            Some(WeaponAct::Reload)
+        );
+        // The AT4 loaded in hand when the enemy closes in: put it away.
+        let obs = holding(obs, AT4);
+        assert_eq!(choose(&enemy_at(obs.clone(), 900.0)), None);
+        assert_eq!(
+            choose(&enemy_at(obs.clone(), 150.0)),
+            Some(WeaponAct::Switch { to: MG4 })
+        );
+        // With nothing else to fire, the bot has only its melee that close.
+        let obs = spent_launcher(vec![slot(MG4, true, 0, 0), launcher(AT4, false, 1, 0)]);
+        let obs = holding(obs, AT4);
+        assert!(!obs.armed(Some(150.0)));
+        assert!(obs.armed(Some(900.0)));
+    }
+
+    #[test]
+    fn both_akimbo_magazines_count() {
+        let pair = WeaponSlot {
+            akimbo: true,
+            clip_left: 9,
+            ..slot(UZI_AKIMBO, true, 0, 32)
+        };
+        let obs = holding(
+            spent_launcher(vec![pair, slot(USP, true, 12, 24)]),
+            UZI_AKIMBO,
+        );
+        assert!(obs.held_gun_loaded());
+        assert_eq!(choose(&obs), None);
+        let dry = WeaponSlot {
+            clip_left: 0,
+            ..pair
+        };
+        let obs = holding(
+            spent_launcher(vec![dry, slot(USP, true, 12, 24)]),
+            UZI_AKIMBO,
+        );
+        assert_eq!(choose(&obs), Some(WeaponAct::Reload));
+    }
+
+    #[test]
+    fn usable_guns_are_a_whitelist() {
+        let law = WeaponFacts {
+            launcher: true,
+            ..facts(true, 1)
+        };
+        let gun = |f: WeaponFacts| WeaponFacts { bullet: false, ..f };
+        // T5: the M72 LAW fires unlocked, the Strela-3 needs a lock.
+        assert!(gun(law).is_usable_gun());
+        assert!(
+            !gun(WeaponFacts {
+                needs_lock: true,
+                ..law
+            })
+            .is_usable_gun()
+        );
+        // A raw T5 weapType that is neither bullet nor projectile (melee 7).
+        assert!(!gun(facts(true, 1)).is_usable_gun());
+        // Offhands are not guns whatever their type.
+        assert!(!facts(false, 1).is_usable_gun());
+        assert!(facts(true, 30).is_usable_gun());
     }
 }

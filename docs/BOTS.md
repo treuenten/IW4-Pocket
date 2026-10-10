@@ -44,10 +44,15 @@ baked support per sector around the threat, checked for line of fire and
 exposure, then reached through the ordinary route executor — reachability is
 never inferred from a component label.
 
-The weapon channel reloads the gun in hand or switches to a loaded one. With
-`IW4L_BOT_RESERVE_AMMO=1` (off by default) a bot whose gun is spent, with
-nothing loaded anywhere, also switches to a gun that still has reserve
-ammunition and reloads it there instead of keeping the empty one.
+The weapon channel reloads the gun in hand or switches to a loaded one; with
+nothing loaded anywhere it switches to a gun that still has reserve ammunition
+and reloads it there instead of keeping the empty one. Only usable guns are
+switched to: selectable, and bullet or a launcher that fires without a lock
+(never a Javelin, Stinger or Strela, which need a lock the bots never take, and
+never the riot shield). A held weapon that is not one counts as empty. Both
+magazines of an akimbo pair count. A launcher is neither raised nor fired with
+an enemy inside 300 units (or 1.5 times its blast), where it would kill the bot
+too.
 
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a

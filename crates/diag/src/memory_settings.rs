@@ -218,9 +218,6 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         // Top priority for the tick and render threads; the server tick on the
         // main thread (both off by default).
         "IW4L_THREAD_QOS" | "IW4L_TICK_ON_MAIN" => matches!(value, "0" | "1"),
-        // A bot with a spent gun and no loaded one switches to a gun with reserve
-        // ammunition instead of standing still (off by default).
-        "IW4L_BOT_RESERVE_AMMO" => matches!(value, "0" | "1"),
         // Free each exact-colour shader's compiled data (naga IR) once its
         // pipelines are built, instead of keeping it for the whole map (off by
         // default; Apple only).
@@ -379,9 +376,6 @@ mod tests {
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "0"));
         assert!(valid_file_setting("IW4L_HEALTH_LOG", "1"));
         for v in ["on", "off", "false", "2", "", " 0", "0\0"] { assert!(!valid_file_setting("IW4L_HEALTH_LOG", v), "{v:?}"); }
-        assert!(valid_file_setting("IW4L_BOT_RESERVE_AMMO", "0"));
-        assert!(valid_file_setting("IW4L_BOT_RESERVE_AMMO", "1"));
-        for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_BOT_RESERVE_AMMO", v), "{v:?}"); }
         assert!(valid_file_setting("IW4L_LEAN_SHADERS", "0"));
         assert!(valid_file_setting("IW4L_LEAN_SHADERS", "1"));
         for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_LEAN_SHADERS", v), "{v:?}"); }

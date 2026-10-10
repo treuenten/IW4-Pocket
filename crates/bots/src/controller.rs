@@ -253,7 +253,7 @@ impl HostController {
                         self.intent.look_at = Some(std::array::from_fn(|i| {
                             eye[i] + (target[i] - eye[i]) * fraction
                         }));
-                        self.intent.fire = obs.self_state.ammo_clip > 0
+                        self.intent.fire = obs.held_gun_loaded()
                             && self.intent.weapon.is_none()
                             && !self.intent.reload
                             && (self.task.kind != TaskKind::Fight
@@ -598,7 +598,7 @@ impl HostController {
             },
             -1.0,
         ];
-        if seen && obs.self_state.ammo_clip == 0 {
+        if seen && obs.self_state.clip_total() == 0 {
             scores[2] = 30.0;
             scores[3] = 100.0;
         }
@@ -797,7 +797,7 @@ impl HostController {
         }
         let fire = self.authorize_fire(
             obs.tick >= self.reaction_until
-                && obs.self_state.ammo_clip != 0
+                && can_shoot(obs, target)
                 && fresh_contact(obs, target)
                 && shot_allowed(shot, target.id),
             target,
@@ -896,7 +896,7 @@ impl HostController {
         let fire = self.authorize_fire(
             self.aggression > self.self_preserve
                 && obs.tick >= self.reaction_until
-                && obs.self_state.ammo_clip != 0
+                && can_shoot(obs, target)
                 && fresh_contact(obs, target)
                 && shot_allowed(
                     world.shot_ray(obs.eye(), aim_at, obs.self_state.id),
@@ -1531,6 +1531,16 @@ fn choose_objective(
         }
     }
     deferred
+}
+
+/// The gun in hand can shoot at this contact: loaded, a gun the bot can fight
+/// with, and not a launcher whose blast would reach the bot at this range.
+fn can_shoot(obs: &BotObservation, target: Contact) -> bool {
+    let range = dist2(obs.self_state.origin, target.origin).sqrt();
+    obs.held_gun_loaded()
+        && obs
+            .held()
+            .is_none_or(|slot| range >= slot.facts.min_range())
 }
 
 /// A positive observation of this contact, recent enough to shoot at. A contact

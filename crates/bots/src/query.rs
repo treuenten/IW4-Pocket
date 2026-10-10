@@ -406,6 +406,13 @@ impl WorldQuery for SimWorld {
     }
 
     fn weapon_class(&self, weapon: u16) -> WeaponClass {
+        // A launcher by its weapType, whatever attachments its name carries.
+        if self
+            .weapon_combat_facts(u32::from(weapon))
+            .is_some_and(|facts| facts.weap_type == weapon_iw4::WEAPTYPE_PROJECTILE)
+        {
+            return WeaponClass::Launcher;
+        }
         WeaponClass::from_script_name(self.weapon_script_name(u32::from(weapon)))
     }
 
