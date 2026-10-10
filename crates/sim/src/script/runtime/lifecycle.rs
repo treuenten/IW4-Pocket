@@ -42,6 +42,7 @@ pub(crate) fn install(
     natives: NativeRegistry,
     level: LevelData,
 ) -> Result<(), Fault> {
+    host::mechanics::announce_part_physics();
     let plan = host::restart::RestartPlan {
         natives: natives.clone(),
         entities: Arc::new(level.entities),

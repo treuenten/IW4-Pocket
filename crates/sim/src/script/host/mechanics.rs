@@ -35,14 +35,17 @@ struct Body {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum BodyMotion {
-    /// A T5 destructible piece: a box that falls until it first touches.
+    /// A box that falls until it first touches: a T5 destructible piece, or,
+    /// with IW4L_PART_PHYSICS off, a model launched by PhysicsLaunchClient/Server.
     Piece {
         velocity: [f32; 3],
         offset: [f32; 3],
         mins: [f32; 3],
         maxs: [f32; 3],
+        /// Whether it crushes a player it comes down on; a client part never does.
+        crushes: bool,
     },
-    /// A model launched by PhysicsLaunchClient/Server.
+    /// A model launched by PhysicsLaunchClient/Server with IW4L_PART_PHYSICS=1.
     Rigid {
         body: RigidBody,
         /// Client physics: no collision with players, never crushes.
@@ -86,6 +89,9 @@ struct BodyCost {
 
 const TICK_S: f32 = crate::MATCH_TICK_MS as f32 / 1000.0;
 const SETTLE_TICKS: u32 = 200;
+/// The falling box a launched model is with IW4L_PART_PHYSICS off.
+const BODY_MINS: [f32; 3] = [-12.0, -12.0, 0.0];
+const BODY_MAXS: [f32; 3] = [12.0, 12.0, 24.0];
 const EXPLOSION_FORCE: f32 = 12500.0;
 const EXPLOSION_UPBIAS: f32 = 0.5;
 const EXPLOSION_MIN_FORCE: f32 = 40.0;
@@ -120,6 +126,28 @@ impl Mechanics {
         if let Some(motions) = self.motions.get_mut(&object) {
             motions.retain(|m| m.field != field);
         }
+    }
+
+    /// A launched model with IW4L_PART_PHYSICS off: the falling box from
+    /// before the rigid bodies, which takes the launch vector as its velocity.
+    /// A client part never crushes.
+    pub(crate) fn launch_box(&mut self, object: u64, velocity: [f32; 3], client: bool) {
+        self.motions.remove(&object);
+        self.slides.remove(&object);
+        self.bodies.insert(
+            object,
+            Body {
+                motion: BodyMotion::Piece {
+                    velocity,
+                    offset: [0.0; 3],
+                    mins: BODY_MINS,
+                    maxs: BODY_MAXS,
+                    crushes: !client,
+                },
+                ticks: 0,
+                active: true,
+            },
+        );
     }
 
     pub(crate) fn launch(&mut self, object: u64, spec: LaunchSpec) {
@@ -170,6 +198,7 @@ impl Mechanics {
                     offset,
                     mins: half.map(|h| -h),
                     maxs: half,
+                    crushes: true,
                 },
                 ticks: 0,
                 active: true,
@@ -543,16 +572,49 @@ const FALLBACK_PHYS: xmodel_runtime::ModelPhys = xmodel_runtime::ModelPhys {
 /// The old placeholder box, for a model without bounds.
 const FALLBACK_BOX: ([f32; 3], [f32; 3]) = ([0.0, 0.0, 12.0], [12.0; 3]);
 
-/// PhysicsLaunchClient/Server: hand the model to a rigid body pushed by
-/// `force` at the world `point`. Client parts live in client physics in the
-/// original, which the server's players and bullets never meet, so they are
-/// made non-solid here.
+/// `IW4L_PART_PHYSICS=1` (a line in iw4l-env.txt on the phone): launched car
+/// parts and the care package move as rigid bodies that tumble, bounce and lie
+/// flat. Off by default on every platform until it has been checked on the
+/// phone. Off, a launched model is the falling box it was before (see
+/// [`launch_falling_box`]). Read once at startup with the other restart-only
+/// switches (`diag::memory_settings`).
+pub(crate) fn part_physics() -> bool {
+    diag::memory_settings::get().part_physics
+}
+
+/// The startup log line saying whether launched parts are rigid bodies; once
+/// a process, at the first script install.
+pub(crate) fn announce_part_physics() {
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    ANNOUNCED.call_once(|| {
+        let env = diag::memory_settings::PART_PHYSICS_ENV;
+        if part_physics() {
+            diag::info!(
+                Sim,
+                "part physics: on ({env}=1), launched car parts and the care package are rigid bodies"
+            );
+        } else {
+            diag::info!(
+                Sim,
+                "part physics: off ({env}=0), launched car parts and the care package fall as a box and stand upright"
+            );
+        }
+    });
+}
+
+/// PhysicsLaunchClient/Server. With IW4L_PART_PHYSICS=1 the model becomes a
+/// rigid body pushed by `force` at the world `point`. Client parts live in
+/// client physics in the original, which the server's players and bullets
+/// never meet, so they are made non-solid here. Off, the falling box.
 pub(crate) fn physics_launch(
     world: &mut World,
     receiver: &Value,
     args: &[Value],
     client: bool,
 ) -> Result<Value, String> {
+    if !part_physics() {
+        return launch_falling_box(world, receiver, args, client);
+    }
     let object = super::natives::engine::entity_id(world, receiver)?;
     let point = super::args::vector(args, 0)?;
     let force = super::args::vector(args, 1)?;
@@ -626,6 +688,34 @@ pub(crate) fn physics_launch(
         entity.solid = false;
     } else {
         runtime.set_object_field(object, "angles", Value::Vector(angles));
+    }
+    Ok(Value::Undefined)
+}
+
+/// PhysicsLaunchClient/Server with IW4L_PART_PHYSICS off, as before the rigid
+/// bodies: the launch vector is taken as a velocity, and a fixed box whose
+/// bottom is the origin falls until it first touches, then stands upright.
+/// Two fixes hold either way. A client part (a car door, hood or mirror)
+/// never crushes a player: in MW2 it lives in client physics, out of the
+/// server's reach. The care package is let go level (see [`launch_angles`]).
+fn launch_falling_box(
+    world: &mut World,
+    receiver: &Value,
+    args: &[Value],
+    client: bool,
+) -> Result<Value, String> {
+    let object = super::natives::engine::entity_id(world, receiver)?;
+    super::args::vector(args, 0)?;
+    let force = super::args::vector(args, 1)?;
+    world
+        .resource_mut::<Mechanics>()
+        .launch_box(object, force, client);
+    let mut runtime = world.resource_mut::<Runtime>();
+    runtime.entities.get_mut(&object).unwrap().linked_to = None;
+    // The pose it hung in, which the link kept up to date until now.
+    if !client && let Value::Vector(angles) = runtime.object_field(object, "angles") {
+        let level = launch_angles(angles, false);
+        runtime.set_object_field(object, "angles", Value::Vector(level));
     }
     Ok(Value::Undefined)
 }
@@ -753,6 +843,7 @@ fn advance_piece(
         offset,
         mins,
         maxs,
+        crushes,
     } = &mut body.motion
     else {
         return;
@@ -784,11 +875,19 @@ fn advance_piece(
         trace.fraction
     };
     let at: [f32; 3] = std::array::from_fn(|i| origin[i] + velocity[i] * TICK_S * fraction);
-    if crushes(false, origin[2] - at[2]) {
+    if box_crushes(*crushes, velocity[2]) {
         crushed.extend(
-            crush_victims(world, object, origin, at, *mins, *maxs)
-                .into_iter()
-                .map(|(victim, point)| (victim, object, point)),
+            crush_victims(
+                world,
+                object,
+                origin,
+                at,
+                *mins,
+                *maxs,
+                CrushVolume::AroundMove,
+            )
+            .into_iter()
+            .map(|(victim, point)| (victim, object, point)),
         );
     }
     body.ticks += 1;
@@ -860,6 +959,7 @@ fn advance_rigid(
                 origin.to_array(),
                 (offset - half).to_array(),
                 (offset + half).to_array(),
+                CrushVolume::Swept,
             )
             .into_iter()
             .map(|(victim, point)| (victim, object, point)),
@@ -876,7 +976,22 @@ fn advance_rigid(
     report.sweeps
 }
 
-/// Live players a body sweeping from `origin` to `at` passes through. The box
+/// What a body moving from `origin` to `at` covers for a crush test.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CrushVolume {
+    /// The box swept along the move (a rigid body).
+    Swept,
+    /// One box around the whole move (the falling box, as before the rigid bodies).
+    AroundMove,
+}
+
+/// Whether a falling box crushes this tick: while it is coming down, unless
+/// it is a client part, which never crushes.
+fn box_crushes(crushes: bool, vertical_speed: f32) -> bool {
+    crushes && vertical_speed < 0.0
+}
+
+/// Live players a body moving from `origin` to `at` passes through. The box
 /// is the linked brush's, if the body carries one, else `mins..maxs` around
 /// the origin.
 fn crush_victims(
@@ -886,6 +1001,7 @@ fn crush_victims(
     at: [f32; 3],
     mins: [f32; 3],
     maxs: [f32; 3],
+    volume: CrushVolume,
 ) -> Vec<(crate::ClientId, [f32; 3])> {
     let presence = world.resource::<Runtime>().entities[&object].presence;
     let frame = crate::frame::FrameWorld::from_world(world);
@@ -922,21 +1038,31 @@ fn crush_victims(
         crate::bullet_collision::PLAYER_MINS,
         crate::bullet_collision::PLAYER_MAXS,
     );
+    let around_lo: [f32; 3] = std::array::from_fn(|i| origin[i].min(at[i]) + mins[i]);
+    let around_hi: [f32; 3] = std::array::from_fn(|i| origin[i].max(at[i]) + maxs[i]);
     let mut victims = Vec::new();
     frame.visit_players(|id, ps| {
         if ps.pm_type >= playerstate_iw4::PM_TYPE_DEAD {
             return;
         }
-        let lo = Vec3::from_array(std::array::from_fn(|i| ps.origin[i] + pmins[i]));
-        let hi = Vec3::from_array(std::array::from_fn(|i| ps.origin[i] + pmaxs[i]));
-        if super::rigid_body::swept_box_overlaps(
-            Vec3::from_array(origin),
-            Vec3::from_array(at),
-            Vec3::from_array(mins),
-            Vec3::from_array(maxs),
-            lo,
-            hi,
-        ) {
+        let inside = match volume {
+            CrushVolume::AroundMove => (0..3).all(|i| {
+                ps.origin[i] + pmins[i] < around_hi[i] && ps.origin[i] + pmaxs[i] > around_lo[i]
+            }),
+            CrushVolume::Swept => {
+                let lo = Vec3::from_array(std::array::from_fn(|i| ps.origin[i] + pmins[i]));
+                let hi = Vec3::from_array(std::array::from_fn(|i| ps.origin[i] + pmaxs[i]));
+                super::rigid_body::swept_box_overlaps(
+                    Vec3::from_array(origin),
+                    Vec3::from_array(at),
+                    Vec3::from_array(mins),
+                    Vec3::from_array(maxs),
+                    lo,
+                    hi,
+                )
+            }
+        };
+        if inside {
             victims.push((id, ps.origin));
         }
     });
@@ -1449,6 +1575,59 @@ mod tests {
         );
         body.push(near, Vec3::ZERO, EXPLOSION_SPIN_SHARE);
         assert!((body.velocity - near / 25.0).length() < 1e-3);
+    }
+
+    #[test]
+    fn part_physics_is_off_unless_the_switch_is_set() {
+        if std::env::var_os(diag::memory_settings::PART_PHYSICS_ENV).is_none() {
+            assert!(
+                !part_physics(),
+                "IW4L_PART_PHYSICS unset means the falling box"
+            );
+        }
+    }
+
+    #[test]
+    fn with_the_switch_off_a_launch_is_the_old_falling_box() {
+        let mut mechanics = Mechanics::default();
+        mechanics.launch_box(7, [1500.0, 4000.0, -1800.0], true);
+        mechanics.launch_box(8, [3.0, 1.0, 4.0], false);
+        assert_eq!(
+            mechanics.velocity(7, 0),
+            [1500.0, 4000.0, -1800.0],
+            "the launch vector is its velocity, as before"
+        );
+        let shape = |mechanics: &Mechanics, object| match mechanics.bodies[&object].motion {
+            BodyMotion::Piece {
+                offset,
+                mins,
+                maxs,
+                crushes,
+                ..
+            } => (offset, mins, maxs, crushes),
+            BodyMotion::Rigid { .. } => panic!("not the falling box"),
+        };
+        assert_eq!(
+            shape(&mechanics, 7),
+            ([0.0; 3], BODY_MINS, BODY_MAXS, false)
+        );
+        assert!(shape(&mechanics, 8).3, "the care package still crushes");
+        // The pose writer sends it as any other mover, as before.
+        assert!(mechanics.body_trajectory(7).is_none());
+        assert!(mechanics.bodies_to_present().is_empty());
+        // A T5 piece crushes as it always did.
+        mechanics.launch_piece(9, [0.0; 3], [0.0; 3], [4.0; 3]);
+        assert!(shape(&mechanics, 9).3);
+    }
+
+    #[test]
+    fn a_falling_box_crushes_while_coming_down_unless_it_is_a_client_part() {
+        assert!(box_crushes(true, -40.0), "a falling care package crushes");
+        assert!(!box_crushes(true, 40.0), "a box thrown upward does not");
+        assert!(
+            !box_crushes(false, -40.0),
+            "a car door, hood or mirror never crushes"
+        );
     }
 
     #[test]

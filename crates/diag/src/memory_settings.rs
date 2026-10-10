@@ -10,6 +10,7 @@ pub const RESIDENT_MAP_ENV: &str = "IW4L_RESIDENT_MAP";
 pub const IOS_BC_ENV: &str = "IW4L_IOS_BC";
 pub const FX_MODELS_ENV: &str = "IW4L_FX_MODELS";
 pub const OFFSCREEN_SHADOWS_ENV: &str = "IW4L_OFFSCREEN_SHADOWS";
+pub const PART_PHYSICS_ENV: &str = "IW4L_PART_PHYSICS";
 
 /// Device class, chosen once at startup from the memory iOS grants this process.
 /// Defaults only: every `IW4L_*` switch (iw4l-env.txt) still wins over the tier.
@@ -82,6 +83,10 @@ pub struct MemorySettings {
     /// their sun shadows stay on screen. It adds posing and shadow draws every
     /// frame, so it is off on every platform until measured on the phone.
     pub offscreen_shadows: bool,
+    /// Launched car parts and the care package move as rigid bodies that
+    /// tumble, bounce and lie flat. New and still being checked on the phone,
+    /// so off on every platform: off, they are the old falling box.
+    pub part_physics: bool,
 }
 
 fn flag(value: Option<&str>, default: bool) -> bool {
@@ -109,6 +114,7 @@ impl MemorySettings {
         bc: Option<&str>,
         fx_models: Option<&str>,
         offscreen_shadows: Option<&str>,
+        part_physics: Option<&str>,
     ) -> Self {
         let default_fpv = match tier.fpv_default(ios) {
             u64::MAX => u64::MAX,
@@ -129,6 +135,7 @@ impl MemorySettings {
             ios_bc: flag(bc, true),
             fx_models: flag(fx_models, false),
             offscreen_shadows: flag(offscreen_shadows, false),
+            part_physics: flag(part_physics, false),
         }
     }
 
@@ -143,9 +150,9 @@ impl MemorySettings {
         } else {
             (self.fpv_retain_bytes / (1024 * 1024)).to_string()
         };
-        format!("device tier: {} | memory settings: {FPV_CACHE_ENV}={fpv} MiB; {SHADER_WORKERS_ENV}={} requested (0=pool); {MOVE_IMAGES_ENV}={}; {RESIDENT_MAP_ENV}={}; {IOS_BC_ENV}={}; {FX_MODELS_ENV}={}; {OFFSCREEN_SHADOWS_ENV}={}",
+        format!("device tier: {} | memory settings: {FPV_CACHE_ENV}={fpv} MiB; {SHADER_WORKERS_ENV}={} requested (0=pool); {MOVE_IMAGES_ENV}={}; {RESIDENT_MAP_ENV}={}; {IOS_BC_ENV}={}; {FX_MODELS_ENV}={}; {OFFSCREEN_SHADOWS_ENV}={}; {PART_PHYSICS_ENV}={}",
             self.tier.name(), self.shader_workers, u8::from(self.move_images), u8::from(self.resident_map),
-            u8::from(self.ios_bc), u8::from(self.fx_models), u8::from(self.offscreen_shadows))
+            u8::from(self.ios_bc), u8::from(self.fx_models), u8::from(self.offscreen_shadows), u8::from(self.part_physics))
     }
 }
 
@@ -173,6 +180,7 @@ pub fn get() -> &'static MemorySettings {
             std::env::var(IOS_BC_ENV).ok().as_deref(),
             std::env::var(FX_MODELS_ENV).ok().as_deref(),
             std::env::var(OFFSCREEN_SHADOWS_ENV).ok().as_deref(),
+            std::env::var(PART_PHYSICS_ENV).ok().as_deref(),
         )
     })
 }
@@ -188,7 +196,7 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
     match name {
         FPV_CACHE_ENV => value.parse::<u64>().is_ok_and(|n| n <= 1024),
         SHADER_WORKERS_ENV => value.parse::<u64>().is_ok_and(|n| (1..=64).contains(&n)),
-        MOVE_IMAGES_ENV | RESIDENT_MAP_ENV | IOS_BC_ENV | FX_MODELS_ENV | OFFSCREEN_SHADOWS_ENV =>
+        MOVE_IMAGES_ENV | RESIDENT_MAP_ENV | IOS_BC_ENV | FX_MODELS_ENV | OFFSCREEN_SHADOWS_ENV | PART_PHYSICS_ENV =>
             matches!(value, "0" | "1"),
         "IW4L_IMAGE_DECODE_BUDGET_MIB" | "IW4L_CACHE_BUDGET_MIB" =>
             value.parse::<u64>().is_ok_and(|n| n <= 4096),
@@ -248,7 +256,7 @@ mod tests {
     use super::*;
     #[test]
     fn platform_defaults_and_invalid_values() {
-        let ios = MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, None);
+        let ios = MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, None, None);
         assert_eq!(ios.fpv_retain_bytes, 0);
         assert_eq!(ios.effective_shader_workers(4), 1);
         assert!(ios.move_images);
@@ -256,23 +264,26 @@ mod tests {
         assert!(ios.ios_bc);
         assert!(!ios.fx_models);
         assert!(!ios.offscreen_shadows);
-        let invalid = MemorySettings::parse(true, Tier::Low, Some("-1"), Some("0"), Some("bad"), Some("bad"), Some("bad"), Some("bad"), Some("bad"));
+        assert!(!ios.part_physics);
+        let invalid = MemorySettings::parse(true, Tier::Low, Some("-1"), Some("0"), Some("bad"), Some("bad"), Some("bad"), Some("bad"), Some("bad"), Some("bad"));
         assert_eq!(invalid.fpv_retain_bytes, 0);
         assert_eq!(invalid.shader_workers, 1);
         assert!(!invalid.resident_map);
         assert!(invalid.ios_bc);
         assert!(!invalid.fx_models);
         assert!(!invalid.offscreen_shadows);
-        let desktop = MemorySettings::parse(false, Tier::High, None, None, None, None, None, None, None);
+        assert!(!invalid.part_physics);
+        let desktop = MemorySettings::parse(false, Tier::High, None, None, None, None, None, None, None, None);
         assert_eq!(desktop.fpv_retain_bytes, u64::MAX);
         assert_eq!(desktop.effective_shader_workers(4), 4);
         assert!(desktop.resident_map);
         assert!(!desktop.fx_models);
         assert!(!desktop.offscreen_shadows);
+        assert!(!desktop.part_physics);
     }
     #[test]
     fn ab_settings_are_bounded() {
-        let s = MemorySettings::parse(true, Tier::Low, Some("64"), Some("64"), Some("0"), Some("1"), Some("0"), Some("1"), None);
+        let s = MemorySettings::parse(true, Tier::Low, Some("64"), Some("64"), Some("0"), Some("1"), Some("0"), Some("1"), None, None);
         assert_eq!(s.fpv_retain_bytes, 64 * 1024 * 1024);
         assert_eq!(s.effective_shader_workers(4), 4);
         assert_eq!(s.effective_shader_workers(0), 1);
@@ -280,7 +291,7 @@ mod tests {
         assert!(s.resident_map);
         assert!(!s.ios_bc);
         assert!(s.fx_models);
-        assert_eq!(MemorySettings::parse(true, Tier::Low, Some("18446744073709551615"), Some("65"), None, None, None, None, None).fpv_retain_bytes, 0);
+        assert_eq!(MemorySettings::parse(true, Tier::Low, Some("18446744073709551615"), Some("65"), None, None, None, None, None, None).fpv_retain_bytes, 0);
     }
     #[test]
     fn tier_boundaries_follow_granted_memory() {
@@ -295,19 +306,19 @@ mod tests {
     }
     #[test]
     fn tiers_set_defaults_and_env_still_wins() {
-        let low = MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, None);
+        let low = MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, None, None);
         assert_eq!((low.fpv_retain_bytes, low.effective_shader_workers(4), low.resident_map), (0, 1, false));
-        let mid = MemorySettings::parse(true, Tier::Mid, None, None, None, None, None, None, None);
+        let mid = MemorySettings::parse(true, Tier::Mid, None, None, None, None, None, None, None, None);
         assert_eq!((mid.fpv_retain_bytes, mid.effective_shader_workers(4), mid.resident_map), (64 << 20, 2, false));
-        let high = MemorySettings::parse(true, Tier::High, None, None, None, None, None, None, None);
+        let high = MemorySettings::parse(true, Tier::High, None, None, None, None, None, None, None, None);
         assert_eq!((high.fpv_retain_bytes, high.effective_shader_workers(4), high.resident_map), (256 << 20, 2, false));
-        let forced = MemorySettings::parse(true, Tier::Low, Some("128"), Some("3"), None, Some("1"), None, None, None);
+        let forced = MemorySettings::parse(true, Tier::Low, Some("128"), Some("3"), None, Some("1"), None, None, None, None);
         assert_eq!((forced.fpv_retain_bytes, forced.effective_shader_workers(4), forced.resident_map), (128 << 20, 3, true));
     }
     #[test]
     fn fx_models_switch_is_off_unless_set_to_1() {
         for (ios, tier) in [(true, Tier::Low), (true, Tier::High), (false, Tier::High)] {
-            let fx = |value| MemorySettings::parse(ios, tier, None, None, None, None, None, value, None).fx_models;
+            let fx = |value| MemorySettings::parse(ios, tier, None, None, None, None, None, value, None, None).fx_models;
             assert!(!fx(None));
             assert!(!fx(Some("0")));
             assert!(fx(Some("1")));
@@ -315,13 +326,13 @@ mod tests {
             assert!(!fx(Some("on")));
             assert!(!fx(Some("2")));
         }
-        assert!(MemorySettings::parse(true, Tier::Low, None, None, None, None, None, Some("1"), None)
+        assert!(MemorySettings::parse(true, Tier::Low, None, None, None, None, None, Some("1"), None, None)
             .report().contains("; IW4L_FX_MODELS=1;"));
     }
     #[test]
     fn offscreen_shadows_switch_is_off_unless_set_to_1() {
         for (ios, tier) in [(true, Tier::Low), (true, Tier::High), (false, Tier::High)] {
-            let on = |value| MemorySettings::parse(ios, tier, None, None, None, None, None, None, value).offscreen_shadows;
+            let on = |value| MemorySettings::parse(ios, tier, None, None, None, None, None, None, value, None).offscreen_shadows;
             assert!(!on(None));
             assert!(!on(Some("0")));
             assert!(on(Some("1")));
@@ -329,9 +340,24 @@ mod tests {
             assert!(!on(Some("on")));
             assert!(!on(Some("2")));
         }
-        let report = |value| MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, value).report();
-        assert!(report(None).ends_with("IW4L_OFFSCREEN_SHADOWS=0"));
-        assert!(report(Some("1")).ends_with("IW4L_OFFSCREEN_SHADOWS=1"));
+        let report = |value| MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, value, None).report();
+        assert!(report(None).contains("; IW4L_OFFSCREEN_SHADOWS=0;"));
+        assert!(report(Some("1")).contains("; IW4L_OFFSCREEN_SHADOWS=1;"));
+    }
+    #[test]
+    fn part_physics_switch_is_off_unless_set_to_1() {
+        for (ios, tier) in [(true, Tier::Low), (true, Tier::Mid), (true, Tier::High), (false, Tier::High)] {
+            let on = |value| MemorySettings::parse(ios, tier, None, None, None, None, None, None, None, value).part_physics;
+            assert!(!on(None), "off by default");
+            assert!(!on(Some("0")));
+            assert!(on(Some("1")));
+            assert!(on(Some(" 1 ")));
+            assert!(!on(Some("on")));
+            assert!(!on(Some("2")));
+        }
+        let report = |value| MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, None, value).report();
+        assert!(report(None).ends_with("IW4L_PART_PHYSICS=0"));
+        assert!(report(Some("1")).ends_with("IW4L_PART_PHYSICS=1"));
     }
     #[test]
     fn budget_boundaries() {
@@ -356,6 +382,9 @@ mod tests {
         assert!(valid_file_setting("IW4L_OFFSCREEN_SHADOWS", "0"));
         assert!(valid_file_setting("IW4L_OFFSCREEN_SHADOWS", "1"));
         for v in ["on", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_OFFSCREEN_SHADOWS", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_PART_PHYSICS", "0"));
+        assert!(valid_file_setting("IW4L_PART_PHYSICS", "1"));
+        for v in ["on", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_PART_PHYSICS", v), "{v:?}"); }
         assert!(!valid_file_setting(SHADER_WORKERS_ENV, "0"));
         assert!(!valid_file_setting("IW4L_GAMES", "/tmp"));
         assert!(!valid_file_setting("IW4L_UNKNOWN", "1"));
