@@ -306,7 +306,7 @@ impl Mechanics {
 /// A PhysicsExplosionSphere's push on a body at `at`: full strength inside
 /// `inner`, fading to nothing at `outer`, scaled by the body's preset, tipped
 /// upward, and nothing below the minimum force.
-fn explosion_impulse(
+pub(super) fn explosion_impulse(
     at: Vec3,
     center: Vec3,
     outer: f32,
@@ -652,7 +652,20 @@ fn advance_rigid(
                 crate::bullet_collision::MASK_PHYS_WORLD,
             ))
         };
-        let report = rigid.step(TICK_S, &mut sweep);
+        let mut terrain = |start: Vec3, end: Vec3, half: Vec3| {
+            Sweep::from_trace(&crate::world::clip_trace(
+                &[],
+                frame.clip_bsp(),
+                frame.clip_mesh(),
+                start.to_array(),
+                end.to_array(),
+                (-half).to_array(),
+                half.to_array(),
+                crate::bullet_collision::MASK_PHYS_WORLD,
+                &|_| true,
+            ))
+        };
+        let report = rigid.step(TICK_S, &mut sweep, &mut terrain);
         let asleep = rigid.ready_to_sleep() || body.ticks >= SETTLE_TICKS;
         if asleep {
             rigid.settle(&mut sweep);

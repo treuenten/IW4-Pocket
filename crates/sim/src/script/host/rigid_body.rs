@@ -2,12 +2,18 @@
 //! an oriented box with the mass, bounce and friction of its model's physics
 //! preset. It falls, spins, bounces off the world, tips over and settles on top
 //! of the ground. The step is a pure function over a sweep closure, so it runs
-//! against the static world in the game and against an analytic floor in tests.
+//! against the static world in the game and against built worlds in tests.
 //!
-//! Collision sweeps the world box that encloses the rotated box. Against a floor
-//! that box's bottom is exactly the body's lowest corner; against walls it is a
-//! little generous. The contact response is an impulse at the corners that touch,
-//! so a part landing on an edge tips over and a part lying on a face stays put.
+//! Collision sweeps the world box that encloses the rotated box. The game's
+//! world trace turns that box into an upright capsule whose bottom is the box's
+//! bottom, so against a floor the sweep stops exactly at the body's lowest
+//! corner. The contact response is an impulse at the corners that touch, so a
+//! part landing on an edge tips over and a part lying on a face stays put.
+//!
+//! Terrain is one-sided triangles: a capsule that gets more than its radius
+//! under one never meets it again. So nothing here ever moves a body downward
+//! while it overlaps the world, and a turn that lowers its bottom is first
+//! checked against what is under it.
 
 use glam::{Mat3, Quat, Vec3};
 
@@ -25,8 +31,15 @@ const UNSTICK_MAX_LIFT: f32 = 16.0;
 pub(crate) const LAUNCH_FORCE_SCALE: f32 = 1.0;
 /// Inferred cap on spin, in rad/s (about 860 degrees a second).
 pub(crate) const MAX_ANG_SPEED: f32 = 15.0;
-/// Guard for a preset with a near-zero mass: no part leaves faster than this.
-const MAX_SPEED: f32 = 4000.0;
+/// Inferred guard for very light presets (the coupe mirrors' can_metal is
+/// 0.1): no part moves faster than this, launched, pushed or falling.
+const MAX_SPEED: f32 = 1500.0;
+/// Longest a part spawned inside the world (its own car's clip) takes to fly
+/// out of it; after that it is moved to the nearest clear place.
+const ESCAPE_MAX_S: f32 = 0.5;
+/// A body this far below where it was launched has left the world: it goes
+/// back to the last place it was clear of it and stops.
+const FALL_LIMIT: f32 = 4096.0;
 /// A resting part this close to lying on a face is laid flat on it.
 const FACE_SNAP_COS: f32 = 0.965_925_8; // cos(15 degrees)
 /// Corners within this distance of the deepest one share the contact.
@@ -40,6 +53,12 @@ const GROUND_SPIN_KEEP: f32 = 0.9;
 const SETTLE_SPEED: f32 = 20.0;
 const SETTLE_SPIN: f32 = 1.5;
 const SETTLE_KEEP: f32 = 0.7;
+/// A part resting within 15 degrees of a face turns onto it over about this
+/// long (inferred), rather than rocking on the corners.
+const LEVEL_S: f32 = 0.1;
+/// Inferred, as MW2's physics also stops bodies that stay busy too long: a
+/// part still tumbling on the ground this long after its last push settles.
+const LATE_SETTLE_S: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Phys {
@@ -54,10 +73,9 @@ pub(crate) struct Sweep {
     pub fraction: f32,
     pub end: Vec3,
     pub normal: Vec3,
-    /// The box starts inside the world. Moving out of it is not blocked.
+    /// The box starts inside the world. Against brushes moving out of it is
+    /// not blocked; against terrain a move into a triangle it overlaps is.
     pub start_solid: bool,
-    /// The whole move stays inside the world.
-    pub all_solid: bool,
 }
 
 impl Sweep {
@@ -67,7 +85,6 @@ impl Sweep {
             end: Vec3::from_array(trace.endpos),
             normal: Vec3::from_array(trace.normal),
             start_solid: trace.startsolid != 0 || trace.allsolid != 0,
-            all_solid: trace.allsolid != 0,
         }
     }
 }
@@ -89,6 +106,18 @@ pub(crate) struct RigidBody {
     pub on_ground: bool,
     /// How long the body has been slow and on the ground.
     pub calm_s: f32,
+    /// It has been clear of the world since it was launched.
+    pub free: bool,
+    /// How long it has spent flying out of the world it was spawned in.
+    pub escape_s: f32,
+    /// The last centre and orientation it was found clear of the world in.
+    pub last_free: (Vec3, Quat),
+    pub launch_z: f32,
+    /// How long since it was launched or last pushed.
+    pub awake_s: f32,
+    /// It fell out of the world, or could not get out of the one it was
+    /// spawned in, and was stopped for good.
+    pub lost: bool,
 }
 
 /// What one step cost, for the settle report in the log.
@@ -126,6 +155,12 @@ impl RigidBody {
             },
             on_ground: false,
             calm_s: 0.0,
+            free: false,
+            escape_s: 0.0,
+            last_free: (origin + rotation * mid, rotation),
+            launch_z: origin.z,
+            awake_s: 0.0,
+            lost: false,
         };
         let impulse = force * LAUNCH_FORCE_SCALE;
         let lever = point - body.center;
@@ -164,21 +199,25 @@ impl RigidBody {
         self.spin += self.inverse_inertia_world() * lever.cross(impulse * spin_share);
         self.clamp_spin();
         self.calm_s = 0.0;
+        self.awake_s = 0.0;
         self.on_ground = false;
     }
 
-    /// Advances `dt` seconds in whole substeps.
+    /// Advances `dt` seconds in whole substeps. `sweep` meets the whole
+    /// static world; `terrain` only its terrain triangles, which a body
+    /// still inside a brush must not pass under.
     pub(crate) fn step(
         &mut self,
         dt: f32,
         sweep: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
     ) -> StepReport {
         let mut report = StepReport::default();
         let steps = (dt / SUBSTEP_S).round().max(1.0) as u32;
         let sub = dt / steps as f32;
         for _ in 0..steps {
             let before = *self;
-            self.substep(sub, sweep, &mut report);
+            self.substep(sub, sweep, terrain, &mut report);
             if !self.is_finite() {
                 // Never hand a broken pose to the world or the network.
                 *self = before;
@@ -206,73 +245,118 @@ impl RigidBody {
         &mut self,
         dt: f32,
         sweep: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
         report: &mut StepReport,
     ) {
+        let count = std::cell::Cell::new(0u32);
         let mut trace = |start, end, half| {
-            report.sweeps += 1;
+            count.set(count.get() + 1);
             sweep(start, end, half)
         };
+        let mut terrain = |start, end, half| {
+            count.set(count.get() + 1);
+            terrain(start, end, half)
+        };
+        self.advance(dt, &mut trace, &mut terrain);
+        report.sweeps += count.get();
+    }
+
+    fn advance(
+        &mut self,
+        dt: f32,
+        trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+    ) {
         self.velocity.z -= GRAVITY * dt;
+        self.clamp_speed();
+        self.awake_s += dt;
+        if self.lost || self.center.z < self.launch_z - FALL_LIMIT {
+            self.lost = true;
+            self.stop_at_last_free(dt);
+            return;
+        }
         let old_rotation = self.rotation;
-        let old_half = world_half(old_rotation, self.half);
+        let old_half = self.sweep_half(old_rotation);
+        if !self.free && !self.get_free(trace, old_half) {
+            self.inside_world(trace, terrain, dt);
+            return;
+        }
         let mut rotation = turned(old_rotation, self.spin, dt);
-        let mut half = world_half(rotation, self.half);
+        let mut half = self.sweep_half(rotation);
         let mut start = self.center;
-        let mut hit = trace(start, start + self.velocity * dt, half);
-        let mut lifted_out = false;
-        if hit.all_solid {
-            let grown = (half.z - old_half.z).max(0.0);
-            if let Some(lifted) = unstick(&mut trace, start, half, grown) {
-                start = lifted;
-                lifted_out = true;
-                hit = trace(start, start + self.velocity * dt, half);
-            } else {
-                let unturned = trace(start, start + self.velocity * dt, old_half);
-                if unturned.all_solid {
-                    // Inside the world whichever way it faces: a part spawned
-                    // inside its own car's or box's clip. Let it fly out
-                    // through it rather than freeze where it was mounted.
-                    self.rotation = rotation;
-                    self.center = start + self.velocity * dt;
-                    self.on_ground = false;
-                    self.calm_s = 0.0;
-                    return;
+        // Set when the body was raised onto what is under it: it touched
+        // that, along this normal.
+        let mut rested = None;
+        if rotation != old_rotation {
+            let grown = half.z - old_half.z;
+            if grown > 0.0 {
+                // The turn lowers the bottom: turn about whatever is under
+                // the old bottom. Without this the turned box can start deep
+                // inside the terrain, out of reach of any sweep.
+                let top = start + Vec3::Z * (grown + CONTACT_SLOP);
+                let probe = trace(top, start, half);
+                if !probe.start_solid && probe.fraction < 1.0 {
+                    start = probe.end;
+                    rested = Some(probe.normal.try_normalize().unwrap_or(Vec3::Z));
                 }
-                // The world blocks the turn: keep the old orientation.
+            }
+            // A sweep that meets terrain forgets that it started inside a
+            // brush, so the turned box is tested where it stands. What is
+            // under it was dealt with above; what is left is beside it (a
+            // wall, a kerb, the car), which the turn may not go into, and
+            // lifting it clear would only hop it up onto that.
+            if !fits(trace, start, half) {
                 rotation = old_rotation;
                 half = old_half;
+                start = self.center;
+                rested = None;
+                self.spin = Vec3::ZERO;
+            }
+        }
+        let delta = self.velocity * dt;
+        let mut hit = trace(start, start + delta, half);
+        if hit.start_solid && rotation != old_rotation {
+            // Terrain the turned box overlaps and is moving into.
+            let unturned = trace(self.center, self.center + delta, old_half);
+            if !unturned.start_solid {
+                rotation = old_rotation;
+                half = old_half;
+                start = self.center;
+                rested = None;
                 self.spin = Vec3::ZERO;
                 hit = unturned;
             }
-            if hit.all_solid {
-                hit = Sweep {
-                    fraction: 0.0,
-                    end: start,
-                    normal: Vec3::Z,
-                    start_solid: true,
-                    all_solid: true,
-                };
+        }
+        if hit.start_solid {
+            if let Some(lifted) = unstick(trace, start, half) {
+                start = lifted;
+                rested = Some(Vec3::Z);
+                hit = trace(start, start + delta, half);
             }
         }
+        if hit.start_solid {
+            self.stop_at_last_free(dt);
+            return;
+        }
         self.rotation = rotation;
-        let before = self.center;
-        let touched = hit.fraction < 1.0 || lifted_out;
+        let before = start;
+        let mut touched = hit.fraction < 1.0 || rested.is_some();
         if hit.fraction < 1.0 {
             let normal = hit.normal.try_normalize().unwrap_or(Vec3::Z);
-            self.center = hit.end + normal * CONTACT_SLOP;
+            self.center = hit.end + separation(normal);
             self.collide(normal);
             self.on_ground = normal.z > GROUND_NZ;
             // Spend the rest of the substep with the velocity the contact
             // left, so a part sliding along the ground is not slowed by
             // gravity pressing it into the ground every substep.
             let rest = (1.0 - hit.fraction.max(0.0)) * dt;
-            if rest > dt * 0.01 && !hit.all_solid {
+            if rest > dt * 0.01 {
                 let slide = trace(self.center, self.center + self.velocity * rest, half);
                 if slide.start_solid {
                     // Stay at the contact.
                 } else if slide.fraction < 1.0 {
                     let normal = slide.normal.try_normalize().unwrap_or(Vec3::Z);
-                    self.center = slide.end + normal * CONTACT_SLOP;
+                    self.center = slide.end + separation(normal);
                     self.collide(normal);
                     self.on_ground |= normal.z > GROUND_NZ;
                 } else {
@@ -281,63 +365,205 @@ impl RigidBody {
             }
         } else {
             self.center = hit.end;
-            self.on_ground = lifted_out;
-            if lifted_out {
-                // The lift stands in for turning about the corner that dug
-                // into the ground: that corner is a contact, and has to lose
-                // its downward speed like one, or every lift adds energy.
-                self.collide(Vec3::Z);
+            self.on_ground = rested.is_some_and(|normal| normal.z > GROUND_NZ);
+            if let Some(normal) = rested {
+                // Being raised stands in for turning about the corner that
+                // touched: that corner is a contact, and has to lose its
+                // speed into the surface like one, or every lift adds energy.
+                self.collide(normal);
             }
         }
-        if self.on_ground
-            && self.velocity.length() < SETTLE_SPEED
-            && self.spin.length() < SETTLE_SPIN
-        {
+        // Every pose the body takes is one it fits in. A sweep that meets
+        // terrain forgets that it started inside a brush, and being set off
+        // a terrain edge can put it into the corner of a brush, which the
+        // sweeps then cannot see out of. If it ended up anywhere like that,
+        // it stays where it started this substep instead.
+        if self.center != before && !fits(trace, self.center, half) {
+            self.center = before;
+            touched = true;
+        }
+        self.last_free = (self.center, self.rotation);
+        if touched {
+            self.keep_to_what_was_achieved(delta, self.center - before, dt);
+        }
+        let slow = self.velocity.length() < SETTLE_SPEED && self.spin.length() < SETTLE_SPIN;
+        if self.on_ground && (slow || self.awake_s > LATE_SETTLE_S) {
             self.velocity *= SETTLE_KEEP;
             self.spin *= SETTLE_KEEP;
         }
-        // Calm is judged by how far the body actually went: one wedged in a
-        // crease or against a wall keeps a velocity it cannot use.
+        // Calm is judged by how far the body actually went and turned: one
+        // wedged in a crease or leaning on a wall keeps a velocity and a spin
+        // it cannot use.
         let moved = (self.center - before).length() / dt;
+        let turned_rate = old_rotation.angle_between(self.rotation) / dt;
         let calm = touched
             && moved.min(self.velocity.length()) < SLEEP_SPEED
-            && self.spin.length() < SLEEP_SPIN;
+            && turned_rate.min(self.spin.length()) < SLEEP_SPIN;
         self.calm_s = if calm { self.calm_s + dt } else { 0.0 };
+    }
+
+    /// A body blocked short of where its velocity was taking it keeps no more
+    /// speed that way than it actually covered. A contact whose normal does
+    /// not face the move (a terrain edge beside a part pressed down by
+    /// gravity) stops the move without taking any speed away, and that speed
+    /// would otherwise build up tick after tick and throw the part later.
+    fn keep_to_what_was_achieved(&mut self, intended: Vec3, achieved: Vec3, dt: f32) {
+        let Some(direction) = intended.try_normalize() else {
+            return;
+        };
+        let allowed = achieved.dot(direction).max(0.0) / dt;
+        let along = self.velocity.dot(direction);
+        if along > allowed {
+            self.velocity -= direction * (along - allowed);
+        }
+    }
+
+    /// Whether a body spawned inside the world is clear of it now, or can
+    /// be lifted clear (a part overlapping the ground it lies on).
+    fn get_free(&mut self, trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep, half: Vec3) -> bool {
+        let at = if fits(trace, self.center, half) {
+            Some(self.center)
+        } else if self.escape_s == 0.0 {
+            unstick(trace, self.center, half)
+        } else {
+            None
+        };
+        if let Some(at) = at {
+            self.center = at;
+            self.free = true;
+            self.last_free = (at, self.rotation);
+        }
+        self.free
+    }
+
+    /// Still inside the world it was spawned in: a door inside its own car's
+    /// clip. It flies out through it without turning, but never downward and
+    /// never into terrain, which the brush around it hides from the world
+    /// sweep. If that takes too long it is moved to the nearest clear place.
+    fn inside_world(
+        &mut self,
+        trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        dt: f32,
+    ) {
+        self.on_ground = false;
+        let half = self.sweep_half(self.rotation);
+        if self.escape_s < ESCAPE_MAX_S {
+            self.calm_s = 0.0;
+            self.escape_s += dt;
+            self.velocity.z = self.velocity.z.max(0.0);
+            let hit = terrain(self.center, self.center + self.velocity * dt, half);
+            if hit.fraction < 1.0 {
+                let normal = hit.normal.try_normalize().unwrap_or(Vec3::Z);
+                if !hit.start_solid {
+                    self.center = hit.end + separation(normal);
+                }
+                self.collide(normal);
+            } else {
+                self.center = hit.end;
+            }
+            return;
+        }
+        let toward = self.velocity.truncate().extend(0.0);
+        match nearest_clear(trace, terrain, self.center, half, toward) {
+            Some(at) => {
+                self.center = at;
+                self.free = true;
+                self.last_free = (at, self.rotation);
+            }
+            None => {
+                // Nowhere near is clear: leave it where it was launched.
+                self.lost = true;
+                self.stop_at_last_free(dt);
+            }
+        }
+    }
+
+    /// Back to the last place the body was clear of the world, at rest.
+    fn stop_at_last_free(&mut self, dt: f32) {
+        (self.center, self.rotation) = self.last_free;
+        self.velocity = Vec3::ZERO;
+        self.spin = Vec3::ZERO;
+        self.calm_s += dt;
+    }
+
+    /// The box the sweeps use. The world trace takes the box's x extent as
+    /// its capsule radius, so the wider of x and y goes there: a door turned
+    /// edge-on to a wall then stops short of it instead of half inside it.
+    fn sweep_half(&self, rotation: Quat) -> Vec3 {
+        let half = world_half(rotation, self.half);
+        let reach = half.x.max(half.y);
+        Vec3::new(reach, reach, half.z)
     }
 
     /// Impulse response at the corners touching a surface with `normal`.
     fn collide(&mut self, normal: Vec3) {
-        if normal.z > GROUND_NZ {
+        let ground = normal.z > GROUND_NZ;
+        if ground {
             self.spin *= GROUND_SPIN_KEEP;
         }
-        let lever = contact_lever(self.rotation, self.half, normal);
+        let mut lever = contact_lever(self.rotation, self.half, normal);
         let inverse = self.inverse_inertia_world();
         let approach = self.point_velocity(lever).dot(normal);
         if approach >= 0.0 {
             return;
         }
-        let bounce = if -approach < REST_SPEED {
-            0.0
-        } else {
-            self.phys.bounce
-        };
+        let resting = -approach < REST_SPEED;
+        let bounce = if resting { 0.0 } else { self.phys.bounce };
+        // Resting on a face, give or take a few degrees: the ground carries
+        // it under its centre, so holding it up adds no turn. A single
+        // corner taking the whole support would rock a lying part for good.
+        let lying = (ground && resting)
+            .then(|| nearest_face(self.rotation, normal))
+            .flatten();
+        if lying.is_some() {
+            lever = normal * lever.dot(normal);
+        }
+        // What holding the whole body up takes, for friction while it rests.
+        let carried = (-self.velocity.dot(normal)).max(0.0) * self.phys.mass;
         let k_normal = effective_inverse_mass(self.phys.mass, inverse, lever, normal);
         let jn = -(1.0 + bounce) * approach / k_normal;
         self.apply_impulse(normal * jn, lever);
-        let relative = self.point_velocity(lever);
-        let tangent = relative - normal * relative.dot(normal);
-        let slip = tangent.length();
-        if slip > 1e-4 {
-            let direction = tangent / slip;
-            let k_tangent = effective_inverse_mass(self.phys.mass, inverse, lever, direction);
-            let jt = (slip / k_tangent).min(self.phys.friction * jn);
-            self.apply_impulse(-direction * jt, lever);
+        if ground && resting {
+            // Resting friction holds the body as a whole, as on a real
+            // slope: it stays put where the slope is under its friction
+            // angle and slides where it is steeper. Through a single corner
+            // it would mostly turn the part and let it creep downhill. Long
+            // after its last push a part is simply held.
+            let tangent = self.velocity - normal * self.velocity.dot(normal);
+            let slip = tangent.length();
+            if slip > 1e-4 {
+                let held = if self.awake_s > LATE_SETTLE_S {
+                    slip
+                } else {
+                    slip.min(self.phys.friction * carried / self.phys.mass)
+                };
+                self.velocity -= tangent / slip * held;
+            }
+        } else {
+            let relative = self.point_velocity(lever);
+            let tangent = relative - normal * relative.dot(normal);
+            let slip = tangent.length();
+            if slip > 1e-4 {
+                let direction = tangent / slip;
+                let k_tangent = effective_inverse_mass(self.phys.mass, inverse, lever, direction);
+                let jt = (slip / k_tangent).min(self.phys.friction * jn);
+                self.apply_impulse(-direction * jt, lever);
+            }
         }
         // Friction at an off-centre corner also turns the body, which can
         // drive that corner back into the surface: stop it there again.
         let again = self.point_velocity(lever).dot(normal);
         if again < 0.0 {
             self.apply_impulse(normal * (-again / k_normal), lever);
+        }
+        if let Some((axis, target)) = lying {
+            // Settle the last few degrees onto the face: turn toward it,
+            // keeping only the spin about the ground's normal.
+            let level = axis.cross(target);
+            let angle = axis.dot(target).clamp(-1.0, 1.0).acos();
+            let level = level.try_normalize().unwrap_or(Vec3::ZERO) * angle / LEVEL_S;
+            self.spin = normal * self.spin.dot(normal) + level;
         }
         self.clamp_spin();
     }
@@ -352,10 +578,10 @@ impl RigidBody {
         self.velocity = Vec3::ZERO;
         self.spin = Vec3::ZERO;
         let old_rotation = self.rotation;
-        let old_half = self.world_half();
+        let old_half = self.sweep_half(old_rotation);
         let flat = flatten(self.rotation);
         self.rotation = flat;
-        let half = self.world_half();
+        let half = self.sweep_half(flat);
         let lift = (half.z - old_half.z).max(0.0) + CONTACT_SLOP;
         let start = self.center + Vec3::Z * lift;
         let down = sweep(start, start - Vec3::Z * (lift + UNSTICK_MAX_LIFT), half);
@@ -363,10 +589,16 @@ impl RigidBody {
             self.rotation = old_rotation;
             return;
         }
+        let old_center = self.center;
         if down.fraction < 1.0 && down.normal.z > GROUND_NZ {
             self.center = down.end + Vec3::Z * CONTACT_SLOP;
         } else if flat != old_rotation {
             self.rotation = old_rotation;
+        }
+        if (self.center, self.rotation) != (old_center, old_rotation)
+            && !fits(sweep, self.center, self.sweep_half(self.rotation))
+        {
+            (self.center, self.rotation) = (old_center, old_rotation);
         }
     }
 
@@ -380,6 +612,10 @@ impl RigidBody {
         if speed > MAX_ANG_SPEED {
             self.spin *= MAX_ANG_SPEED / speed;
         }
+        self.clamp_speed();
+    }
+
+    fn clamp_speed(&mut self) {
         let speed = self.velocity.length();
         if speed > MAX_SPEED {
             self.velocity *= MAX_SPEED / speed;
@@ -422,22 +658,67 @@ fn turned(rotation: Quat, spin: Vec3, dt: f32) -> Quat {
     (Quat::from_axis_angle(spin / spin.length(), angle) * rotation).normalize()
 }
 
-/// Lifts a stuck box: first by `first` (what the turn grew its bottom by),
-/// then by doubling probes up to [`UNSTICK_MAX_LIFT`].
+/// How far a body is set off a surface it touched. Off the ground it is
+/// raised straight up: set off along a slope's normal, it would come back
+/// down a little further along each time and creep down every slope.
+fn separation(normal: Vec3) -> Vec3 {
+    if normal.z > GROUND_NZ {
+        Vec3::Z * (CONTACT_SLOP / normal.z)
+    } else {
+        normal * CONTACT_SLOP
+    }
+}
+
+/// Whether the box fits at `at` without overlapping the world.
+fn fits(trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep, at: Vec3, half: Vec3) -> bool {
+    !trace(at, at, half).start_solid
+}
+
+/// Lifts a stuck box by doubling steps up to [`UNSTICK_MAX_LIFT`].
 fn unstick(
     trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
     at: Vec3,
     half: Vec3,
-    first: f32,
 ) -> Option<Vec3> {
-    let mut dz = if first > 0.0 { first } else { CONTACT_SLOP };
-    let cap = dz.max(UNSTICK_MAX_LIFT);
-    while dz <= cap {
+    let mut dz = CONTACT_SLOP;
+    while dz <= UNSTICK_MAX_LIFT {
         let lifted = at + Vec3::Z * dz;
-        if !trace(lifted, lifted, half).start_solid {
+        if fits(trace, lifted, half) {
             return Some(lifted);
         }
         dz *= 2.0;
+    }
+    None
+}
+
+/// The nearest place a box stuck inside the world fits, trying the way it
+/// was going first, then sideways and up (never down), out to 128 units,
+/// and only where getting there crosses no terrain: a place under the
+/// terrain fits just as well as one on top of it.
+fn nearest_clear(
+    trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+    terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+    at: Vec3,
+    half: Vec3,
+    toward: Vec3,
+) -> Option<Vec3> {
+    let ways = [
+        toward.try_normalize().unwrap_or(Vec3::ZERO),
+        Vec3::X,
+        Vec3::NEG_X,
+        Vec3::Y,
+        Vec3::NEG_Y,
+        Vec3::Z,
+    ];
+    let mut reach = 8.0;
+    while reach <= 128.0 {
+        for way in ways.iter().filter(|w| **w != Vec3::ZERO) {
+            let candidate = at + *way * reach;
+            if fits(trace, candidate, half) && terrain(at, candidate, half).fraction >= 1.0 {
+                return Some(candidate);
+            }
+        }
+        reach *= 2.0;
     }
     None
 }
@@ -467,22 +748,26 @@ fn effective_inverse_mass(mass: f32, inverse: Mat3, lever: Vec3, direction: Vec3
     1.0 / mass + direction.dot((inverse * lever.cross(direction)).cross(lever))
 }
 
-/// The orientation with the body axis nearest to vertical made exactly
-/// vertical, when it is within 15 degrees; otherwise unchanged.
-fn flatten(rotation: Quat) -> Quat {
+/// The body axis nearest to `up` and the way along `up` it points, when it
+/// is within 15 degrees of it: the body is lying on that face.
+fn nearest_face(rotation: Quat, up: Vec3) -> Option<(Vec3, Vec3)> {
     let m = Mat3::from_quat(rotation);
     let (axis, cos) = [m.x_axis, m.y_axis, m.z_axis]
         .into_iter()
-        .map(|a| (a, a.z.abs()))
-        .fold(
-            (Vec3::Z, -1.0),
-            |best, c| if c.1 > best.1 { c } else { best },
-        );
-    if cos < FACE_SNAP_COS || cos >= 1.0 {
-        return rotation;
+        .map(|a| (a, a.dot(up).abs()))
+        .fold((up, -1.0), |best, c| if c.1 > best.1 { c } else { best });
+    (cos >= FACE_SNAP_COS).then(|| (axis, up * axis.dot(up).signum()))
+}
+
+/// The orientation with the body axis nearest to vertical made exactly
+/// vertical, when it is within 15 degrees; otherwise unchanged.
+fn flatten(rotation: Quat) -> Quat {
+    match nearest_face(rotation, Vec3::Z) {
+        Some((axis, target)) if axis.dot(target) < 1.0 => {
+            (Quat::from_rotation_arc(axis, target) * rotation).normalize()
+        }
+        _ => rotation,
     }
-    let target = Vec3::Z * axis.z.signum();
-    (Quat::from_rotation_arc(axis, target) * rotation).normalize()
 }
 
 /// Whether a box moving from `start` to `end` with extents `mins..maxs`
@@ -520,6 +805,9 @@ pub(crate) fn swept_box_overlaps(
 }
 
 #[cfg(test)]
+mod street_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -538,7 +826,6 @@ mod tests {
             end,
             normal: Vec3::ZERO,
             start_solid,
-            all_solid: false,
         }
     }
 
@@ -548,7 +835,6 @@ mod tests {
             end: start,
             normal: Vec3::Z,
             start_solid: true,
-            all_solid: true,
         }
     }
 
@@ -571,7 +857,6 @@ mod tests {
             end: start + (end - start) * fraction,
             normal: Vec3::Z,
             start_solid: false,
-            all_solid: false,
         }
     }
 
@@ -627,7 +912,7 @@ mod tests {
     fn run_until_asleep(body: &mut RigidBody, max_ticks: u32) -> u32 {
         let mut sweep = |s, e, h| floor(s, e, h);
         for tick in 1..=max_ticks {
-            body.step(0.05, &mut sweep);
+            body.step(0.05, &mut sweep, &mut |s, e, h| floor(s, e, h));
             if body.ready_to_sleep() {
                 body.settle(&mut sweep);
                 return tick;
@@ -688,7 +973,7 @@ mod tests {
         let mut first_contact = None;
         for _ in 0..40 {
             let before = body;
-            body.step(SUBSTEP_S, &mut sweep);
+            body.step(SUBSTEP_S, &mut sweep, &mut |s, e, h| floor(s, e, h));
             if body.on_ground {
                 first_contact = Some((before, body));
                 break;
@@ -745,7 +1030,7 @@ mod tests {
             Vec3::new(2500.0, 0.0, 0.0),
         );
         let mut sweep = |s, e, h| floor(s, e, h);
-        body.step(0.05, &mut sweep);
+        body.step(0.05, &mut sweep, &mut |s, e, h| floor(s, e, h));
         assert!(body.center.z - body.world_half().z >= 0.0);
         assert!(body.center.x > 1.0, "it is not frozen in place");
     }
@@ -756,10 +1041,10 @@ mod tests {
         body.velocity = Vec3::new(-89.0, 234.0, 167.0);
         let mut sweep = |s, e, h| floor_and_car(s, e, h);
         let start = body.center;
-        assert!(sweep(start, start, body.world_half()).all_solid);
+        assert!(sweep(start, start, body.world_half()).start_solid);
         let mut asleep = false;
         for _ in 0..200 {
-            body.step(0.05, &mut sweep);
+            body.step(0.05, &mut sweep, &mut |s, e, h| floor(s, e, h));
             if body.ready_to_sleep() {
                 body.settle(&mut sweep);
                 asleep = true;
@@ -773,6 +1058,69 @@ mod tests {
             (0.0..=0.5).contains(&lowest) || (60.0..=60.5).contains(&lowest),
             "it rests on the floor or on top of the block: {lowest}"
         );
+    }
+
+    /// A terrain edge beside a part: every move down stops at once with a
+    /// sideways normal, which by itself takes no speed away.
+    fn edge(start: Vec3, end: Vec3, _half: Vec3) -> Sweep {
+        if end.z < start.z {
+            Sweep {
+                fraction: 0.0,
+                end: start,
+                normal: Vec3::X,
+                start_solid: false,
+            }
+        } else {
+            open(end, false)
+        }
+    }
+
+    #[test]
+    fn a_part_held_up_by_an_edge_does_not_store_up_speed() {
+        let at = Vec3::new(0.0, 0.0, 50.0);
+        let mut body = RigidBody::launch(
+            at,
+            yaw_axis(0.0),
+            Vec3::ZERO,
+            Vec3::new(10.0, 4.0, 10.0),
+            DOOR,
+            at,
+            Vec3::ZERO,
+        );
+        for _ in 0..40 {
+            body.step(0.05, &mut |s, e, h| edge(s, e, h), &mut |s, e, h| {
+                edge(s, e, h)
+            });
+            assert!(
+                body.velocity.length() <= GRAVITY * SUBSTEP_S + 1e-3,
+                "speed it cannot use is not kept: {}",
+                body.velocity
+            );
+        }
+        assert!(body.center.z >= at.z - 1e-3, "and it is not pulled down");
+    }
+
+    #[test]
+    fn a_part_that_falls_out_of_the_world_stops() {
+        let at = Vec3::new(0.0, 0.0, 100.0);
+        let mut body = RigidBody::launch(
+            at,
+            yaw_axis(0.0),
+            Vec3::ZERO,
+            Vec3::splat(8.0),
+            DOOR,
+            at,
+            Vec3::ZERO,
+        );
+        let mut void = |_s: Vec3, e: Vec3, _h: Vec3| open(e, false);
+        let mut ticks = 0;
+        while !body.ready_to_sleep() && ticks < 200 {
+            body.step(0.05, &mut void, &mut |_s, e, _h| open(e, false));
+            ticks += 1;
+        }
+        assert!(ticks < 200, "it goes to sleep instead of falling for good");
+        assert!(body.lost);
+        assert!(body.center.z > at.z - FALL_LIMIT - 100.0);
     }
 
     #[test]
