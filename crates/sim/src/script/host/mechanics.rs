@@ -20,6 +20,8 @@ pub(crate) struct Mechanics {
     cost: BodyCost,
     /// Models already reported as launched without a physics preset.
     fallback_logged: std::collections::BTreeSet<String>,
+    /// Models whose first launch the log has reported.
+    launch_logged: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -162,6 +164,11 @@ impl Mechanics {
     /// Whether `model` is new to the no-preset report.
     pub(crate) fn note_fallback_phys(&mut self, model: &str) -> bool {
         self.fallback_logged.insert(model.to_owned())
+    }
+
+    /// Whether this is the first launch of `model`, which the log reports.
+    pub(crate) fn note_first_launch(&mut self, model: &str) -> bool {
+        self.launch_logged.insert(model.to_owned())
     }
 
     /// Rigid bodies whose pose must be sent this tick whether or not it
@@ -344,8 +351,13 @@ fn crushes(client: bool, drop: f32) -> bool {
 }
 
 /// Euler angle rates (degrees a second) that carry `body`'s spin for a moment.
+/// Near pitch +-90 yaw and roll are ill-defined and their rates blow up (a
+/// look-ahead across the pole turns both by 180), so there the spin is not
+/// extrapolated: the body is still sent every tick, and only holds its
+/// angles between snapshots.
 fn angle_rates(body: &RigidBody) -> [f32; 3] {
     const LOOK_AHEAD_S: f32 = 0.01;
+    const POLE_PITCH: f32 = 80.0;
     if body.spin.length_squared() < 1e-8 {
         return [0.0; 3];
     }
@@ -355,7 +367,16 @@ fn angle_rates(body: &RigidBody) -> [f32; 3] {
     ahead.rotation =
         (glam::Quat::from_axis_angle(body.spin.normalize(), angle) * body.rotation).normalize();
     let later = math_iw4::axis_to_angles(ahead.axis());
-    std::array::from_fn(|i| math_iw4::angle_subtract(later[i], now[i]) / LOOK_AHEAD_S)
+    let near_pole = |angles: [f32; 3]| math_iw4::angle_subtract(angles[0], 0.0).abs() > POLE_PITCH;
+    if near_pole(now) || near_pole(later) {
+        return [0.0; 3];
+    }
+    // No Euler rate is faster than the spin itself could make it, away from
+    // the pole; anything faster is a wrap.
+    let cap = 2.0 * super::rigid_body::MAX_ANG_SPEED.to_degrees();
+    std::array::from_fn(|i| {
+        (math_iw4::angle_subtract(later[i], now[i]) / LOOK_AHEAD_S).clamp(-cap, cap)
+    })
 }
 
 /// Inferred stand-in for a model without a usable physics preset: the common
@@ -418,16 +439,18 @@ pub(crate) fn physics_launch(
             FALLBACK_PHYS
         }
     };
-    diag::info!(
-        Sim,
-        "physics launch: {} `{model}` force {:.0} mass {} at ({:.0},{:.0},{:.0})",
-        if client { "client" } else { "server" },
-        glam::Vec3::from_array(force).length(),
-        phys.mass,
-        origin[0],
-        origin[1],
-        origin[2]
-    );
+    if world.resource_mut::<Mechanics>().note_first_launch(&model) {
+        diag::info!(
+            Sim,
+            "physics launch: first {} `{model}`: mass {} bounce {} friction {} explosion scale {}, force {:.0}",
+            if client { "client" } else { "server" },
+            phys.mass,
+            phys.bounce,
+            phys.friction,
+            phys.explosive_force_scale,
+            glam::Vec3::from_array(force).length(),
+        );
+    }
     world.resource_mut::<Mechanics>().launch(
         object,
         LaunchSpec {
@@ -1169,6 +1192,25 @@ mod tests {
         );
         mechanics.launch_piece(8, [0.0; 3], [0.0; 3], [4.0; 3]);
         assert!(mechanics.body_trajectory(8).is_none());
+    }
+
+    #[test]
+    fn spin_is_sent_as_angle_rates_except_near_the_pole() {
+        let mut mechanics = Mechanics::default();
+        launched(&mut mechanics, 7, true);
+        let body = rigid(&mut mechanics, 7);
+        body.rotation = glam::Quat::IDENTITY;
+        body.spin = Vec3::new(0.0, 0.0, 2.0);
+        let level = angle_rates(body);
+        assert!((level[1] - 2.0f32.to_degrees()).abs() < 1.0, "{level:?}");
+        // Pitched 85 degrees down, a turn about the world's up axis is all
+        // yaw and roll, which the look-ahead can flip by 180 each.
+        body.rotation = glam::Quat::from_rotation_y(85.0f32.to_radians());
+        body.spin = Vec3::new(3.0, 0.0, 8.0);
+        assert_eq!(angle_rates(body), [0.0; 3]);
+        body.rotation = glam::Quat::from_rotation_y(60.0f32.to_radians());
+        let cap = 2.0 * super::super::rigid_body::MAX_ANG_SPEED.to_degrees();
+        assert!(angle_rates(body).iter().all(|r| r.abs() <= cap));
     }
 
     #[test]
