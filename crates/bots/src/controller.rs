@@ -1405,13 +1405,7 @@ fn objective_utility(obs: &BotObservation, obj: ModeObjective, route_length: Opt
         / 180.0
         * 1000.0;
     let cost = (travel_ms / 1000.0).min(25.0);
-    let interaction_left = obj.interaction_ms as f32 * (1.0 - obj.progress.clamp(0.0, 1.0));
-    if obj.action == ObjectiveAction::Defuse
-        && obj.role == TeamRole::Actor
-        && obj.remaining_ms.is_some_and(|ms| {
-            (ms as f32) < interaction_left + if obj.touching { 0.0 } else { travel_ms }
-        })
-    {
+    if too_late_to_defuse(&obj, obs.self_state.linked, travel_ms) {
         return -1.0;
     }
     let mut value = match obj.action {
@@ -1436,6 +1430,32 @@ fn objective_utility(obs: &BotObservation, obj: ModeObjective, route_length: Opt
         value = 200.0;
     }
     value
+}
+
+/// A defuse the bot has yet to start that cannot finish before the bomb goes
+/// off. Once begun it is never given up for lack of time: the bot cannot see
+/// the script's progress, so it would set the whole defuse time against a fuse
+/// that has been running down alongside the hold, and let go just short of
+/// the end. MW2 runs a defuse that began with the defuse time left to the end.
+fn too_late_to_defuse(obj: &ModeObjective, linked: bool, travel_ms: f32) -> bool {
+    if obj.action != ObjectiveAction::Defuse
+        || obj.role != TeamRole::Actor
+        || use_under_way(obj, linked)
+    {
+        return false;
+    }
+    let interaction_left = obj.interaction_ms as f32 * (1.0 - obj.progress.clamp(0.0, 1.0));
+    obj.remaining_ms.is_some_and(|ms| {
+        (ms as f32) < interaction_left + if obj.touching { 0.0 } else { travel_ms }
+    })
+}
+
+/// The bot is planting or defusing this objective now.
+/// `_gameobjects::useHoldThink` links the player to the trigger for the whole
+/// hold, and useHoldThinkLoop ends it as soon as Use is let go or the player
+/// stops touching the trigger.
+fn use_under_way(obj: &ModeObjective, linked: bool) -> bool {
+    linked && obj.touching && obj.use_button
 }
 
 fn choose_objective(
@@ -1650,5 +1670,50 @@ mod use_objective_tests {
         assert_eq!(final_approach(here, [10.0, 0.0, 0.0], spent), spent);
         let blocked = (MoveMode::Hold, PathOutcome::Blocked, Some(marker));
         assert_eq!(final_approach(here, marker, blocked), blocked);
+    }
+
+    fn bomb_use(action: ObjectiveAction, remaining_ms: u32) -> ModeObjective {
+        ModeObjective {
+            action,
+            remaining_ms: Some(remaining_ms),
+            interaction_ms: 5_000,
+            touching: true,
+            use_button: true,
+            ..ModeObjective::at([0.0; 3])
+        }
+    }
+
+    #[test]
+    fn a_defuse_under_way_is_held_to_the_end() {
+        // Sab on mp_invasion: linked at the bomb with 9750 ms on the fuse, the
+        // defuser let go 96 ticks in with 4950 ms left, 4 ticks from the end.
+        let late = bomb_use(ObjectiveAction::Defuse, 4_950);
+        assert!(!too_late_to_defuse(&late, true, 0.0));
+        let plant = bomb_use(ObjectiveAction::Plant, 0);
+        assert!(!too_late_to_defuse(&plant, true, 0.0));
+    }
+
+    #[test]
+    fn a_defuse_not_yet_started_still_checks_the_fuse() {
+        let at_bomb = bomb_use(ObjectiveAction::Defuse, 4_950);
+        assert!(too_late_to_defuse(&at_bomb, false, 0.0));
+        assert!(!too_late_to_defuse(
+            &bomb_use(ObjectiveAction::Defuse, 5_000),
+            false,
+            0.0
+        ));
+        let walking_in = ModeObjective {
+            touching: false,
+            ..bomb_use(ObjectiveAction::Defuse, 8_000)
+        };
+        assert!(too_late_to_defuse(&walking_in, false, 4_000.0));
+        assert!(!too_late_to_defuse(&walking_in, false, 2_000.0));
+        // Not touching means not under way, whatever the link says.
+        assert!(too_late_to_defuse(&walking_in, true, 4_000.0));
+        let cover = ModeObjective {
+            role: TeamRole::Cover,
+            ..at_bomb
+        };
+        assert!(!too_late_to_defuse(&cover, false, 0.0));
     }
 }
