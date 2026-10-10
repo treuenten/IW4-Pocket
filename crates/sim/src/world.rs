@@ -971,6 +971,12 @@ impl SimState {
         self.combat_facts_for(weapon)
     }
 
+    /// Read-only launch facts of a weapon that fires a missile (lock-on,
+    /// explosion radius), as the combat step reads them.
+    pub fn weapon_launch_facts(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
+        self.missile_launch_facts(weapon)
+    }
+
     pub(crate) fn combat_facts_for(&self, weapon: u32) -> Option<WeaponCombatFacts> {
         self.content
             .weapons()

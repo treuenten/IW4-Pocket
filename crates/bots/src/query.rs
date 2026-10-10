@@ -411,6 +411,7 @@ impl WorldQuery for SimWorld {
 
     fn weapon_facts(&self, weapon: u16) -> Option<WeaponFacts> {
         let facts = self.weapon_combat_facts(u32::from(weapon))?;
+        let launch = self.weapon_launch_facts(u32::from(weapon));
         Some(WeaponFacts {
             // weapInventoryType 0 is a carried gun the player can select.
             selectable: facts.inventory_type == 0,
@@ -422,6 +423,16 @@ impl WorldQuery for SimWorld {
             quick_drop_time_ms: facts.quick_drop_time_ms,
             reload_time_ms: facts.reload_time_ms,
             reload_empty_time_ms: facts.reload_empty_time_ms,
+            fire_time_ms: facts.fire_time_ms,
+            semi_auto: weapon_iw4::FireType::from_i32(facts.fire_type)
+                .is_ok_and(weapon_iw4::FireType::is_single),
+            bullet: facts.weap_type == weapon_iw4::WEAPTYPE_BULLET,
+            launcher: facts.weap_type == weapon_iw4::WEAPTYPE_PROJECTILE,
+            shield: facts.weap_type == weapon_iw4::WEAPTYPE_SHIELD,
+            needs_lock: launch.is_some_and(|launch| launch.require_lock_to_fire),
+            blast_radius: launch.map_or(0, |launch| launch.explosion_radius.max(0)),
+            clip_index: weapon_iw4::clip_table_key(facts.clip_index, u32::from(weapon)),
+            lunge: facts.melee_charge_anim && facts.melee_charge_time_ms > 0,
         })
     }
 }

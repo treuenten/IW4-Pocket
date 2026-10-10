@@ -40,6 +40,13 @@ pub fn observe_focused(
         .map(|(_, ps)| ps)?;
     let team = meta.client_state_team;
     world.enter(QuerySubsystem::Perception);
+    let inventory = own_inventory(ps, meta, world);
+    let akimbo = ps.last_weapon_hand >= 1;
+    let ammo_clip_left = inventory
+        .iter()
+        .find(|slot| slot.weapon == ps.weapon as u16)
+        .filter(|_| akimbo)
+        .map_or(0, |slot| slot.clip_left);
     let self_state = SelfState {
         life_sequence: meta.life_sequence,
         id: bot,
@@ -57,8 +64,9 @@ pub fn observe_focused(
         ammo_stock: meta.ammo_stock,
         team,
         linked: meta.controls.linked,
+        akimbo,
+        ammo_clip_left,
     };
-    let inventory = own_inventory(ps, meta, world);
     let mut seen = Vec::new();
     let mut unsensed = Vec::new();
     if meta.lifecycle != ClientLifecycle::Alive {
@@ -176,15 +184,25 @@ fn own_inventory(
                 .iter()
                 .find(|(owned, _, _)| *owned == id as u32)
                 .map_or((0, 0), |(_, clip, stock)| (*clip, *stock));
+            let akimbo =
+                weapon_iw4::num_hands_for_held(&ps.weapons, &ps.weapon_data, id as u32) >= 1;
             Some(WeaponSlot {
                 weapon,
                 class: world.weapon_class(weapon),
                 facts,
                 clip,
                 stock,
+                akimbo,
+                clip_left: if akimbo { left_clip(ps, &facts) } else { 0 },
             })
         })
         .collect()
+}
+
+/// The left-hand magazine of an akimbo pair. The match state's ammunition
+/// list carries the right hand only; the clip table holds both.
+fn left_clip(ps: &playerstate_iw4::PlayerState, facts: &crate::observation::WeaponFacts) -> i32 {
+    weapon_iw4::get_clip_for_hand(&ps.ammoclip, facts.clip_index, 1).max(0)
 }
 
 /// Snapshot indices in the order perception spends its allowance: the committed

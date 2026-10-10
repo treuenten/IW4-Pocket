@@ -143,6 +143,37 @@ pub struct WeaponFacts {
     pub quick_drop_time_ms: i32,
     pub reload_time_ms: i32,
     pub reload_empty_time_ms: i32,
+    /// Milliseconds between two shots of the trigger hand.
+    pub fire_time_ms: i32,
+    /// One round per pull of the trigger (fireType single shot or double
+    /// barrel): the weapon fires again only after the trigger is let go.
+    pub semi_auto: bool,
+    /// weapType bullet: a gun that hits along a trace.
+    pub bullet: bool,
+    /// weapType projectile: a launcher.
+    pub launcher: bool,
+    /// weapType riot shield on the IW4, IW5 and T6 rows. Its attack is the
+    /// melee bash; the fire button only clicks.
+    pub shield: bool,
+    /// requireLockToFire: the simulation lets the trigger through only with a
+    /// lock-on, which the bots never acquire.
+    pub needs_lock: bool,
+    /// The launcher's explosion radius in units, 0 for a gun.
+    pub blast_radius: i32,
+    /// The magazine's row in the player's clip table.
+    pub clip_index: i32,
+    /// The melee can lunge at a target beyond the plain melee range.
+    pub lunge: bool,
+}
+
+impl WeaponFacts {
+    /// A gun the bot can fight with: selectable, and either a bullet weapon or
+    /// a launcher that fires without a lock. A whitelist on purpose, so a shield,
+    /// a knife or a T5 row whose raw weapType means something else is never
+    /// taken for a gun.
+    pub fn is_usable_gun(&self) -> bool {
+        self.selectable && (self.bullet || (self.launcher && !self.needs_lock))
+    }
 }
 
 /// One owned weapon with the ammunition the match state holds for it.
@@ -151,8 +182,13 @@ pub struct WeaponSlot {
     pub weapon: u16,
     pub class: WeaponClass,
     pub facts: WeaponFacts,
+    /// The right-hand magazine, the only one unless the weapon is akimbo.
     pub clip: i32,
     pub stock: i32,
+    /// Carried as an akimbo pair: two magazines on one shared reserve.
+    pub akimbo: bool,
+    /// The left-hand magazine of an akimbo pair, 0 otherwise.
+    pub clip_left: i32,
 }
 
 impl WeaponSlot {
@@ -174,8 +210,22 @@ impl WeaponSlot {
         }
     }
 
+    /// Rounds in the magazines, both hands of an akimbo pair counted.
+    pub fn rounds(&self) -> i32 {
+        self.clip + self.clip_left
+    }
+
+    pub fn is_usable_gun(&self) -> bool {
+        self.facts.is_usable_gun()
+    }
+
     pub fn is_loaded_gun(&self) -> bool {
         self.facts.selectable && self.clip > 0
+    }
+
+    /// A usable gun with rounds in a magazine or in reserve.
+    pub fn is_armed_gun(&self) -> bool {
+        self.is_usable_gun() && (self.rounds() > 0 || self.stock > 0)
     }
 }
 
@@ -193,11 +243,24 @@ pub struct SelfState {
     pub weapon: u16,
     pub weapon_class: WeaponClass,
     pub weapon_action: WeaponAction,
+    /// The right-hand magazine of the weapon in hand.
     pub ammo_clip: i32,
     pub ammo_stock: i32,
     pub team: i32,
     /// Held by a script `playerLinkTo`, as while planting or defusing.
     pub linked: bool,
+    /// The weapon in hand is an akimbo pair (lastWeaponHand 1): the left gun
+    /// fires on the attack button and the right one on the throw button.
+    pub akimbo: bool,
+    /// The left-hand magazine of an akimbo pair in hand, 0 otherwise.
+    pub ammo_clip_left: i32,
+}
+
+impl SelfState {
+    /// Rounds in the magazines of the weapon in hand, both hands counted.
+    pub fn clip_total(&self) -> i32 {
+        self.ammo_clip + self.ammo_clip_left
+    }
 }
 
 pub const DEFAULT_OBJECTIVE_RADIUS: f32 = 96.0;
@@ -289,6 +352,27 @@ impl BotObservation {
 
     pub fn owns(&self, weapon: u16) -> bool {
         self.inventory.iter().any(|slot| slot.weapon == weapon)
+    }
+
+    /// The weapon in hand is a gun that can shoot now. A weapon the content has
+    /// no row for keeps the magazine's word, as before the facts existed.
+    pub fn held_gun_loaded(&self) -> bool {
+        self.self_state.clip_total() > 0 && self.held().is_none_or(WeaponSlot::is_usable_gun)
+    }
+
+    pub fn holds_shield(&self) -> bool {
+        self.held().is_some_and(|slot| slot.facts.shield)
+    }
+
+    /// Some usable gun still has rounds, in a magazine or in reserve. Without
+    /// one the bot can only fight with its melee.
+    pub fn armed(&self) -> bool {
+        if self.held().is_none()
+            && (self.self_state.clip_total() > 0 || self.self_state.ammo_stock > 0)
+        {
+            return true;
+        }
+        self.inventory.iter().any(WeaponSlot::is_armed_gun)
     }
 
     pub fn eye(&self) -> [f32; 3] {

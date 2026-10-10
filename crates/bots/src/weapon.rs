@@ -290,6 +290,8 @@ mod tests {
             },
             clip,
             stock,
+            akimbo: false,
+            clip_left: 0,
         }
     }
 
@@ -315,6 +317,9 @@ mod tests {
                 ammo_clip: 0,
                 ammo_stock: 0,
                 team: 0,
+                linked: false,
+                akimbo: false,
+                ammo_clip_left: 0,
             },
             inventory,
             seen: Vec::new(),
