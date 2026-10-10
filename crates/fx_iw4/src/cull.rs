@@ -93,12 +93,35 @@ pub fn cull_elem_light(
     cull_sphere(planes, count, pos, size0)
 }
 
+/// Light colour of an FX omni or spot light element. The input is the elem's
+/// visual colour already put in R,G,B,A order (render_fx reads the stored
+/// B,G,R,A bytes and swaps them once, exactly as the sprites do). The output
+/// feeds `GfxLightPack.color`, which is R,G,B like a map primary light, so the
+/// channels keep their order here.
 #[inline]
-pub fn elem_light_color_bgr(color_rgba: [u8; 4], scale: f32) -> [f32; 3] {
+pub fn elem_light_color_rgb(color_rgba: [u8; 4], scale: f32) -> [f32; 3] {
     let s = scale * (crate::FX_RECIP_255 as f32);
-    [
-        color_rgba[2] as f32 * s,
-        color_rgba[1] as f32 * s,
-        color_rgba[0] as f32 * s,
-    ]
+    let [r, g, b, _a] = color_rgba;
+    [r as f32 * s, g as f32 * s, b as f32 * s]
+}
+
+#[cfg(test)]
+mod elem_light_color_tests {
+    use super::*;
+
+    #[test]
+    fn light_colour_keeps_red_first() {
+        assert_eq!(
+            elem_light_color_rgb([255, 128, 0, 255], 1.0),
+            [1.0, 128.0 / 255.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn light_colour_scales_every_channel() {
+        let [r, g, b] = elem_light_color_rgb([255, 0, 51, 7], 2.0);
+        assert_eq!(r, 2.0);
+        assert_eq!(g, 0.0);
+        assert!((b - 0.4).abs() < 1e-6);
+    }
 }

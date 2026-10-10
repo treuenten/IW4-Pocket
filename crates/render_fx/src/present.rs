@@ -19,7 +19,7 @@ use fx::{
 use fx_iw4::{
     FX_ELEM_ATLAS_OFF, FX_ELEM_ATLAS_SIZE, FxElemType, FxRandomChannel, apply_lighting_frac_bgra,
     build_cloud, clamp_elem_rotation_time, cull_cloud, cull_elem_light,
-    effect_def_needs_lighting_sample, elem_light_color_bgr, elem_uses_lighting_frac,
+    effect_def_needs_lighting_sample, elem_light_color_rgb, elem_uses_lighting_frac,
     evaluate_rotation_total, evaluate_scale, evaluate_size0, evaluate_size1, get_elem_angles_axis,
     get_velocity_at_time, sample_f32, sprite_atlas_uv, vec3_normalize, vis_blocker_add_prepared,
 };
@@ -1461,7 +1461,7 @@ pub fn build_fx_verts(
             is_spot: ctx.elem_type == FxElemType::SpotLight as u8,
             origin: ctx.origin,
             radius: size0,
-            color_bgr: elem_light_color_bgr(color, scale),
+            color_rgb: elem_light_color_rgb(color, scale),
             axis,
         })
     };
@@ -1607,4 +1607,29 @@ pub(crate) fn owned_elem_infos(effect: &OwnedFxEffectDef) -> Vec<FxElemDefInfo> 
 fn axis_from_angles_deg(angles_deg: [f32; 3]) -> [[f32; 3]; 3] {
     let (forward, _right, _up) = angle_vectors(angles_deg);
     axis_from_hit_normal(forward)
+}
+
+#[cfg(test)]
+mod light_colour_tests {
+    use super::*;
+    use fx_iw4::{FX_ELEM_VIS_STATE_SAMPLE_SIZE, FX_VIS_COLOR_OFF, pack_code_mesh_vertex};
+
+    #[test]
+    fn fx_light_and_sprite_agree_on_red() {
+        // A warm orange stored the way the effect data holds it: B,G,R,A.
+        let stored_bgra = [0x40, 0xBA, 0xF2, 0xFF];
+        let mut samples = vec![0u8; 2 * FX_ELEM_VIS_STATE_SAMPLE_SIZE];
+        for sample in samples.chunks_mut(FX_ELEM_VIS_STATE_SAMPLE_SIZE) {
+            sample[FX_VIS_COLOR_OFF..FX_VIS_COLOR_OFF + 4].copy_from_slice(&stored_bgra);
+        }
+        let rgba = evaluate_color_rgba(&samples, 0, 0.0, 0.0).unwrap();
+        let light = elem_light_color_rgb(rgba, 1.0);
+        let want = [0xF2, 0xBA, 0x40].map(|c| c as f32 / 255.0);
+        for (got, expect) in light.into_iter().zip(want) {
+            assert!((got - expect).abs() < 1e-6, "{light:?} != {want:?}");
+        }
+        assert!(light[0] > light[2]);
+        let row = pack_code_mesh_vertex([0.0; 3], rgba, 0, 0, 0);
+        assert_eq!(row[18], 0xF2);
+    }
 }

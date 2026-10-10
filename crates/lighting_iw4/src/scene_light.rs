@@ -212,10 +212,10 @@ pub fn add_omni_light_to_scene_allows(
     Ok(())
 }
 
-pub fn omni_light_pack(origin: [f32; 3], radius: f32, color_bgr: [f32; 3]) -> GfxLightPack {
+pub fn omni_light_pack(origin: [f32; 3], radius: f32, color_rgb: [f32; 3]) -> GfxLightPack {
     GfxLightPack {
         light_type: GFX_LIGHT_TYPE_OMNI,
-        color: color_bgr,
+        color: color_rgb,
         direction: [0.0; 3],
         origin,
         radius,
@@ -281,7 +281,7 @@ pub fn spot_light_pack(
     origin: [f32; 3],
     forward: [f32; 3],
     radius: f32,
-    color_bgr: [f32; 3],
+    color_rgb: [f32; 3],
     cone: SpotLightConeDvars,
 ) -> GfxLightPack {
     let end = spot_light_clamp_end(cone.start_radius, cone.end_radius, radius);
@@ -301,9 +301,9 @@ pub fn spot_light_pack(
     GfxLightPack {
         light_type: GFX_LIGHT_TYPE_SPOT,
         color: [
-            color_bgr[0] * cone.brightness,
-            color_bgr[1] * cone.brightness,
-            color_bgr[2] * cone.brightness,
+            color_rgb[0] * cone.brightness,
+            color_rgb[1] * cone.brightness,
+            color_rgb[2] * cone.brightness,
         ],
         direction: dir,
         origin,
@@ -313,5 +313,18 @@ pub fn spot_light_pack(
         exponent: cone.exponent,
         falloff_image_width: None,
         lmap_lookup_start: 0,
+    }
+}
+
+#[cfg(test)]
+mod light_pack_colour_tests {
+    use super::*;
+
+    #[test]
+    fn omni_light_keeps_rgb_order_through_diffuse() {
+        let pack = omni_light_pack([0.0; 3], 100.0, [1.0, 0.5, 0.0]);
+        assert_eq!(pack.color, [1.0, 0.5, 0.0]);
+        let diffuse = light_diffuse(pack.color, 1.0);
+        assert!(diffuse[0] > diffuse[1] && diffuse[1] > diffuse[2]);
     }
 }
