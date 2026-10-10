@@ -411,6 +411,8 @@ struct Outcome {
     flat: bool,
     /// Standing on an edge on the floor: its thinnest axis lies level.
     on_edge: bool,
+    /// How far its own up axis points up at the end.
+    up: f32,
 }
 
 /// Runs `body` the way Mechanics does: a 50 ms step a tick, sleeping when
@@ -500,6 +502,7 @@ fn simulate(street: &Street, mut body: RigidBody, efs: f32, blasts: &[Blast]) ->
     let axes = Mat3::from_quat(body.rotation);
     let thin_up = [axes.x_axis, axes.y_axis, axes.z_axis][thin].z.abs();
     out.on_edge = thin_up < 0.5 && out.final_low - out.final_floor < 1.0;
+    out.up = axes.z_axis.z;
     out
 }
 
@@ -1027,4 +1030,54 @@ fn a_door_touching_a_wall_never_crosses_it() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// The care package as it is launched now: level, from far away with a
+/// push of a few units. Dropped from the helicopter's height onto the road
+/// it lands the right way up.
+#[test]
+fn a_care_package_let_go_level_lands_upright() {
+    let mut rng = Lcg(0xc0de);
+    let street = Street::new(Vec3::new(0.0, -2000.0, 0.0), 0.0);
+    let crate_part = Part {
+        name: "care_package",
+        mount: Vec3::ZERO,
+        mid: Vec3::new(0.0, 0.0, 15.0),
+        half: Vec3::new(32.0, 17.0, 15.0),
+        phys: Phys {
+            mass: 1.0,
+            bounce: 0.1,
+            friction: 0.5,
+        },
+        efs: 1.0,
+        force_scale: 1.0,
+    };
+    for case in 0..20 {
+        let at = Vec3::new(
+            rng.range(-280.0, 40.0),
+            rng.range(-140.0, 110.0),
+            rng.range(800.0, 2000.0),
+        );
+        let heading = Quat::from_rotation_z(rng.range(0.0, 360.0f32).to_radians());
+        let push = Vec3::new(
+            rng.range(0.0, 4.0),
+            rng.range(0.0, 4.0),
+            rng.range(0.0, 4.0),
+        );
+        let out = simulate(
+            &street,
+            launch(at, heading, crate_part, Vec3::ZERO, push),
+            crate_part.efs,
+            &[],
+        );
+        assert!(
+            out.asleep && out.final_low - out.final_floor < 1.0,
+            "case {case}: {out:?}"
+        );
+        let body_up = out.up;
+        assert!(
+            body_up > 0.999,
+            "case {case} from {at}: it lands on its base, up {body_up}"
+        );
+    }
 }

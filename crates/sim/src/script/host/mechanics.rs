@@ -410,6 +410,22 @@ fn angle_rates(body: &RigidBody) -> [f32; 3] {
     })
 }
 
+/// The orientation a launched body starts in. PhysicsLaunchServer is the
+/// care package (in MP nothing else uses it), let go by the helicopter it
+/// hung under by its tag_ground and pushed by a few units from a point far
+/// from it (the world origin), so without spin. MW2's helicopter has come to
+/// a stop at its goal when it lets go, so the crate falls level and lands
+/// upright; ours still carries the nose-up flare of braking there, which
+/// tipped the crate by up to 40 degrees and landed it on an edge or an end.
+/// It keeps only its heading. Client parts start as their tag is.
+fn launch_angles(angles: [f32; 3], client: bool) -> [f32; 3] {
+    if client {
+        angles
+    } else {
+        [0.0, angles[1], 0.0]
+    }
+}
+
 /// Where launched parts may be on this map. The lowest valid ground lies
 /// [`LOWEST_GROUND_BELOW_SPAWN`] under the lowest tdm spawn (any spawn point
 /// if there is none); the bounds are those of the solid brushes and the
@@ -553,6 +569,7 @@ pub(crate) fn physics_launch(
             FALLBACK_PHYS
         }
     };
+    let angles = launch_angles(angles, client);
     if world.resource_mut::<Mechanics>().note_first_launch(&model) {
         diag::info!(
             Sim,
@@ -583,6 +600,8 @@ pub(crate) fn physics_launch(
     entity.linked_to = None;
     if client {
         entity.solid = false;
+    } else {
+        runtime.set_object_field(object, "angles", Value::Vector(angles));
     }
     Ok(Value::Undefined)
 }
@@ -1321,6 +1340,12 @@ mod tests {
         body.rotation = glam::Quat::from_rotation_y(60.0f32.to_radians());
         let cap = 2.0 * super::super::rigid_body::MAX_ANG_SPEED.to_degrees();
         assert!(angle_rates(body).iter().all(|r| r.abs() <= cap));
+    }
+
+    #[test]
+    fn a_care_package_starts_level_and_car_parts_as_their_tag() {
+        assert_eq!(launch_angles([-38.4, 314.4, 2.0], false), [0.0, 314.4, 0.0]);
+        assert_eq!(launch_angles([12.0, 62.0, -7.0], true), [12.0, 62.0, -7.0]);
     }
 
     #[test]
