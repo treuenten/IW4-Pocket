@@ -69,7 +69,10 @@ it can use at that range (all dry, or only a launcher too close) knifes the
 same way instead of backing off, and any bot with an enemy in knife reach
 knifes it. Each swing is its own press, and fire and melee never share a
 command. A bot backs off to reload or switch only while there is a reload or
-switch to make.
+switch to make. It falls back to a baked support further from the threat (one
+with walk edges, out of the threat's line of fire where one is), tries each
+such point once, and with none reachable holds where it is, crouched, rather
+than asking the route for the same unreachable point on every think.
 
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a

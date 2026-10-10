@@ -55,6 +55,10 @@ const MELEE_ARM_IN: f32 = crate::motor::LUNGE_REACH_IN + 32.0;
 /// far away, or that it cannot reach, for `SIDEARM_THINKS` thinks.
 const SIDEARM_RANGE_IN: f32 = 600.0;
 const SIDEARM_THINKS: u32 = 30;
+/// Fall-back points one retreat considers, each checked once for cover.
+const RETREAT_CANDIDATES: usize = 4;
+/// A threat that moves this far gets a new set of fall-back points.
+const RETREAT_REPLAN_IN: f32 = 160.0;
 
 #[derive(Clone, Debug)]
 pub struct HostController {
@@ -94,6 +98,8 @@ pub struct HostController {
     prefer_weapon: Option<WeaponAct>,
     /// Consecutive thinks a riot-shield bot's enemy has been far or unreachable.
     shield_far: u32,
+    /// Where a recovering bot falls back to while it reloads or switches.
+    retreat: Option<Retreat>,
 }
 
 impl HostController {
@@ -131,6 +137,7 @@ impl HostController {
             use_unlinked: 0,
             prefer_weapon: None,
             shield_far: 0,
+            retreat: None,
         }
     }
 
@@ -227,6 +234,7 @@ impl HostController {
             self.use_unlinked = 0;
             self.prefer_weapon = None;
             self.shield_far = 0;
+            self.retreat = None;
             self.decision = Decision::default();
             self.task = Task::default();
         }
@@ -403,6 +411,9 @@ impl HostController {
             next = self.pick_task(obs, objective);
         }
         let switched = next.kind != self.task.kind;
+        if next.kind != TaskKind::Recover {
+            self.retreat = None;
+        }
         // Routes are keyed by destination. A temporary combat fallback must not
         // discard navigation progress on every think tick.
         self.task = next;
@@ -1311,14 +1322,8 @@ impl HostController {
                     .last_seen()
                     .next()
                     .or_else(|| self.memory.currently_seen().next())
-                    .map(|c| c.origin)
-                    .unwrap_or([
-                        obs.self_state.origin[0] + 64.0,
-                        obs.self_state.origin[1],
-                        obs.self_state.origin[2],
-                    ]);
-                let away = away_from(obs.self_state.origin, threat, 192.0);
-                (away, false, threat)
+                    .copied();
+                return self.back_off(obs, world, nav, astar_budget, threat);
             }
         };
         let (move_mode, path, move_goal) =
@@ -1329,7 +1334,82 @@ impl HostController {
             desired_range: None,
             move_mode,
             use_button,
-            crouch: matches!(kind, SeekKind::BackOff),
+            path,
+            ..BotIntent::default()
+        }
+    }
+
+    /// Fall back from the threat while reloading, switching or hurt: to a
+    /// baked support further from it, out of its line of fire where one is,
+    /// tried once each. A point the route cannot reach is dropped for the next
+    /// one rather than asked for again on every think, and with none left the
+    /// bot holds where it is, crouched, until it can fight again.
+    fn back_off(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
+        astar_budget: &mut u32,
+        threat: Option<Contact>,
+    ) -> BotIntent {
+        let here = obs.self_state.origin;
+        let threat_at = threat.map_or([here[0] + 64.0, here[1], here[2]], |c| c.origin);
+        let hold = |look: [f32; 3]| BotIntent {
+            look_at: Some(look),
+            move_goal: Some(here),
+            move_mode: MoveMode::Hold,
+            crouch: true,
+            path: PathOutcome::Clear,
+            ..BotIntent::default()
+        };
+        if self.retreat.as_ref().is_none_or(|retreat| {
+            dist2(retreat.threat, threat_at) > RETREAT_REPLAN_IN * RETREAT_REPLAN_IN
+        }) {
+            let candidates = match nav.filter(|graph| !graph.is_empty()) {
+                Some(graph) => nav::retreat_supports(graph, here, threat_at, RETREAT_CANDIDATES),
+                None => vec![away_from(here, threat_at, 192.0)],
+            };
+            world.enter(QuerySubsystem::Tactical);
+            let threat_eye = [threat_at[0], threat_at[1], threat_at[2] + 60.0];
+            let shooter = threat.map_or(obs.self_state.id, |c| c.id);
+            let mut ranked: Vec<(bool, usize, [f32; 3])> = candidates
+                .into_iter()
+                .enumerate()
+                .map(|(order, pos)| {
+                    let chest = [pos[0], pos[1], pos[2] + 48.0];
+                    let sample = world.shot_ray(threat_eye, chest, shooter);
+                    let covered = matches!(sample, Ok(SightSample::Blocked { .. }));
+                    (!covered, order, pos)
+                })
+                .collect();
+            // Covered points first, then the retreat's own order; popped from the end.
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+            self.retreat = Some(Retreat {
+                threat: threat_at,
+                candidates: ranked.into_iter().map(|(_, _, pos)| pos).collect(),
+                chosen: None,
+            });
+        }
+        let retreat = self.retreat.as_mut().expect("retreat set above");
+        let Some(goal) = retreat.chosen.or_else(|| retreat.candidates.pop()) else {
+            return hold(threat_at);
+        };
+        retreat.chosen = Some(goal);
+        let (move_mode, path, move_goal) = self.route(here, goal, world, nav, astar_budget);
+        if matches!(
+            path,
+            PathOutcome::Unreachable | PathOutcome::IncompleteGraph
+        ) {
+            if let Some(retreat) = self.retreat.as_mut() {
+                retreat.chosen = None;
+            }
+            return hold(threat_at);
+        }
+        BotIntent {
+            look_at: Some(threat_at),
+            move_goal,
+            move_mode,
+            crouch: move_mode == MoveMode::Hold,
             path,
             ..BotIntent::default()
         }
@@ -1530,6 +1610,14 @@ impl FightScan {
             age > FIGHT_SCAN_MAX_AGE_TICKS
         }
     }
+}
+
+/// One fall-back from a threat: the supports still to try, best last.
+#[derive(Clone, Debug, PartialEq)]
+struct Retreat {
+    threat: [f32; 3],
+    candidates: Vec<[f32; 3]>,
+    chosen: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2051,6 +2139,52 @@ mod weapon_fight_tests {
                 .iter()
                 .any(|cmd| cmd.buttons & buttons::MELEE_CHARGE != 0)
         );
+    }
+
+    /// Walls everywhere: every hull trace is blocked, every ray clear.
+    struct Walled;
+
+    impl WorldQuery for Walled {
+        fn sight_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn shot_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn hull_trace(&mut self, start: [f32; 3], _: [f32; 3]) -> QueryResult<HullTrace> {
+            Ok(HullTrace {
+                fraction: 0.0,
+                normal: [1.0, 0.0, 0.0],
+                endpos: start,
+                startsolid: false,
+            })
+        }
+    }
+
+    #[test]
+    fn a_reloading_bot_with_nowhere_to_fall_back_holds_and_reloads() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let empty = gun(USP, 0, 24);
+        for tick in 1..=12 {
+            bot.drive(
+                &facing_enemy(tick, empty, vec![empty], 300.0),
+                &mut Walled,
+                50,
+            );
+        }
+        assert_eq!(bot.task().kind, TaskKind::Recover);
+        let intent = bot.intent();
+        assert!(intent.reload, "{intent:?}");
+        assert_eq!(
+            (intent.move_mode, intent.path, intent.crouch),
+            (MoveMode::Hold, PathOutcome::Clear, true),
+            "{intent:?}"
+        );
+        // The unreachable point was tried once, not on every think.
+        let retreat = bot.retreat.as_ref().expect("a retreat");
+        assert!(retreat.candidates.is_empty() && retreat.chosen.is_none());
     }
 
     #[test]

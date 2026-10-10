@@ -861,6 +861,56 @@ pub fn firing_supports(
     picked.into_iter().map(|(_, pos)| pos).collect()
 }
 
+/// Baked supports a bot can fall back to from a threat at `threat`: walk-linked
+/// nodes on its own component, 96 to 320 units away on about the same floor,
+/// that put at least 64 more units between the bot and the threat. Ordered by
+/// how close they come to the point 192 units straight away from the threat,
+/// capped at `max`. A node with no walk edge is never one: a bot sent there has
+/// nowhere to go next. The caller still routes to them and checks cover.
+pub fn retreat_supports(
+    graph: &NavGraph,
+    from: [f32; 3],
+    threat: [f32; 3],
+    max: usize,
+) -> Vec<[f32; 3]> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let Some(start) = nearest_within(graph, from, SNAP_IN) else {
+        return Vec::new();
+    };
+    let comp = graph.component[start as usize];
+    let gap = dist_xy(from, threat);
+    let (dx, dy) = (from[0] - threat[0], from[1] - threat[1]);
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let away = [
+        from[0] + dx / len * 192.0,
+        from[1] + dy / len * 192.0,
+        from[2],
+    ];
+    let mut picked: Vec<(f32, [f32; 3])> = Vec::with_capacity(max + 1);
+    for (i, pos) in graph.nodes.iter().enumerate() {
+        if graph.component[i] != comp || graph.adj.get(i).is_none_or(Vec::is_empty) {
+            continue;
+        }
+        let travel = dist_xy(*pos, from);
+        if !(96.0..=320.0).contains(&travel)
+            || (pos[2] - from[2]).abs() > 96.0
+            || dist_xy(*pos, threat) < gap + 64.0
+        {
+            continue;
+        }
+        let score = dist_xy(*pos, away);
+        if picked.len() == max && picked.last().is_some_and(|(worst, _)| score >= *worst) {
+            continue;
+        }
+        let at = picked.partition_point(|(s, _)| *s <= score);
+        picked.insert(at, (score, *pos));
+        picked.truncate(max);
+    }
+    picked.into_iter().map(|(_, pos)| pos).collect()
+}
+
 /// Graph-only query for topology diagnostics; runtime callers use `find_route`
 /// to validate connectors and interaction volumes against collision.
 pub fn find_path(
@@ -1655,5 +1705,59 @@ impl Ord for OrdF {
 impl PartialOrd for OrdF {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod retreat_tests {
+    use super::*;
+
+    /// A corridor of walk-linked nodes along x every 48 units, and one node
+    /// beside it with no edges, as the bake leaves a few dozen on every map.
+    fn corridor() -> NavGraph {
+        let mut nodes: Vec<[f32; 3]> = (-8..=8).map(|i| [i as f32 * 48.0, 0.0, 0.0]).collect();
+        let count = nodes.len();
+        let mut adj: Vec<Vec<NavEdge>> = (0..count)
+            .map(|i| {
+                [i.checked_sub(1), (i + 1 < count).then_some(i + 1)]
+                    .into_iter()
+                    .flatten()
+                    .map(|to| NavEdge {
+                        to: to as u16,
+                        cost: 48.0,
+                        kind: TraversalKind::Walk,
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut component = vec![0; count];
+        nodes.push([196.0, 40.0, 0.0]);
+        adj.push(Vec::new());
+        component.push(1);
+        NavGraph {
+            nodes,
+            component,
+            adj,
+            ..NavGraph::default()
+        }
+    }
+
+    #[test]
+    fn retreat_points_lie_away_from_the_threat_on_linked_nodes() {
+        let graph = corridor();
+        let points = retreat_supports(&graph, [0.0; 3], [-300.0, 0.0, 0.0], 3);
+        assert_eq!(points.len(), 3, "{points:?}");
+        assert_eq!(points[0], [192.0, 0.0, 0.0]);
+        assert!(
+            points
+                .iter()
+                .all(|p| p[1] == 0.0 && (96.0..=320.0).contains(&p[0])),
+            "{points:?}"
+        );
+        // With the threat on the other side the retreat turns round.
+        let back = retreat_supports(&graph, [0.0; 3], [300.0, 0.0, 0.0], 3);
+        assert_eq!(back[0], [-192.0, 0.0, 0.0]);
+        // Nothing further from a threat at the corridor's end.
+        assert!(retreat_supports(&graph, [384.0, 0.0, 0.0], [0.0, 0.0, 0.0], 3).is_empty());
     }
 }
