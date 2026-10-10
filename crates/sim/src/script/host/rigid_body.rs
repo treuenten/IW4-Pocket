@@ -465,16 +465,18 @@ impl RigidBody {
             self.escape_s += dt;
             self.velocity.z = self.velocity.z.max(0.0);
             let hit = terrain(self.center, self.center + self.velocity * dt, half);
-            if hit.fraction < 1.0 {
-                let normal = hit.normal.try_normalize().unwrap_or(Vec3::Z);
-                if !hit.start_solid {
+            if !hit.start_solid {
+                if hit.fraction < 1.0 {
+                    let normal = hit.normal.try_normalize().unwrap_or(Vec3::Z);
                     self.center = hit.end + separation(normal);
+                    self.collide(normal);
+                } else {
+                    self.center = hit.end;
                 }
-                self.collide(normal);
-            } else {
-                self.center = hit.end;
+                return;
             }
-            return;
+            // It overlaps terrain as well, which it cannot fly through:
+            // waiting will not get it out.
         }
         let toward = self.velocity.truncate().extend(0.0);
         match nearest_clear(trace, terrain, self.center, half, toward) {
@@ -693,6 +695,13 @@ fn separation(normal: Vec3) -> Vec3 {
     }
 }
 
+/// Whether a terrain sweep went into a triangle's top or side. Meeting the
+/// underside of one (going up out of a hollow or under an overhang) cannot
+/// leave a body below the ground.
+fn crosses_down(hit: Sweep) -> bool {
+    hit.fraction < 1.0 && hit.normal.z >= 0.0
+}
+
 /// Whether the box fits at `at` without overlapping the world.
 fn fits(trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep, at: Vec3, half: Vec3) -> bool {
     !trace(at, at, half).start_solid
@@ -717,8 +726,8 @@ fn unstick(
 
 /// The nearest place a box stuck inside the world fits, trying the way it
 /// was going first, then sideways and up (never down), out to 128 units,
-/// and only where getting there crosses no terrain: a place under the
-/// terrain fits just as well as one on top of it.
+/// and only where getting there does not go into terrain from above: a
+/// place under the terrain fits just as well as one on top of it.
 fn nearest_clear(
     trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
     terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
@@ -738,7 +747,7 @@ fn nearest_clear(
     while reach <= 128.0 {
         for way in ways.iter().filter(|w| **w != Vec3::ZERO) {
             let candidate = at + *way * reach;
-            if fits(trace, candidate, half) && terrain(at, candidate, half).fraction >= 1.0 {
+            if fits(trace, candidate, half) && !crosses_down(terrain(at, candidate, half)) {
                 return Some(candidate);
             }
         }

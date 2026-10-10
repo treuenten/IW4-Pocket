@@ -605,9 +605,16 @@ impl Tally {
     }
 }
 
-fn random_car(rng: &mut Lcg) -> (Vec3, f32) {
-    // Anywhere from the middle of the road to hard against the kerb.
-    let car = Vec3::new(rng.range(-160.0, 160.0), rng.range(-220.0, 120.0), 0.0);
+fn random_car(rng: &mut Lcg, case: usize) -> (Vec3, f32) {
+    let car = if case % 4 == 3 {
+        // Parked on the ramp, level, as its clip is: the doors on the
+        // uphill side spawn half inside the ramp's terrain.
+        let (x, y) = (rng.range(220.0, 420.0), rng.range(-420.0, -220.0));
+        Vec3::new(x, y, floor_height(x, y, x))
+    } else {
+        // Anywhere from the middle of the road to hard against the kerb.
+        Vec3::new(rng.range(-160.0, 160.0), rng.range(-220.0, 120.0), 0.0)
+    };
     (car, rng.range(0.0, 360.0))
 }
 
@@ -617,7 +624,7 @@ fn thrown_car_parts_stay_on_top_of_the_street_and_come_to_rest() {
     let mut tally = Tally::default();
     let (mut flat_parts, mut on_edge) = (0u32, 0u32);
     for case in 0..120 {
-        let (car, car_yaw) = random_car(&mut rng);
+        let (car, car_yaw) = random_car(&mut rng, case);
         let street = Street::new(car, car_yaw);
         // Every other car has a neighbour go up while its parts settle.
         let second = (case % 2 == 1).then(|| Blast {
