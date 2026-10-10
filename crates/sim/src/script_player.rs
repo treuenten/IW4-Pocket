@@ -16,6 +16,20 @@ pub(crate) fn spectator_lifecycle(team: i32) -> ClientLifecycle {
     }
 }
 
+/// Health a client holds after `spawn()` in `sessionstate`. MW2's own
+/// spawnPlayer sets `self.health = self.maxhealth` before it calls
+/// `spawn()`, and spawnSpectator, spawnIntermission and spawnEndOfGame
+/// never touch health. So only "playing" fills to max; a spectator (a fresh
+/// client, a dead player, everyone after map_restart) holds 0 and is not
+/// isAlive(); "dead" and "intermission" keep what the client had.
+fn spawned_health(sessionstate: &str, max_health: i32, prev: Option<i32>) -> i32 {
+    match sessionstate {
+        "playing" => max_health,
+        "dead" | "intermission" => prev.unwrap_or(0),
+        _ => 0,
+    }
+}
+
 pub(crate) fn spawn(
     world: &mut FrameWorld,
     tick: Tick,
@@ -32,6 +46,7 @@ pub(crate) fn spawn(
     };
     world.unlink_player_area(id);
     world.client_meta_mut(id).shield = None;
+    let prev_health = world.player(id).map(|p| p.health);
     let mut ps = spawn_player_state(origin, angles);
     if let Some(max) = world
         .client_meta(id)
@@ -39,8 +54,8 @@ pub(crate) fn spawn(
         .filter(|&n| n > 0)
     {
         ps.max_health = max;
-        ps.health = max;
     }
+    ps.health = spawned_health(sessionstate, ps.max_health, prev_health);
     if let Some(cmd) = world.old_cmd_angles(id) {
         ps.delta_angles = std::array::from_fn(|axis| angles[axis] - cmd[axis] as f32 * SHORT2ANGLE);
     }
@@ -1052,5 +1067,44 @@ mod weapon_switch_tests {
             primary_after_switch(GL_M4, true, GL_M4, M4_GL, &without_gun, alternate_of),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod spawn_health_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_playing_spawn_fills_health() {
+        assert_eq!(spawned_health("playing", 100, None), 100);
+        assert_eq!(spawned_health("playing", 30, Some(0)), 30);
+        assert_eq!(spawned_health("spectator", 100, None), 0);
+        assert_eq!(spawned_health("spectator", 100, Some(100)), 0);
+        assert_eq!(spawned_health("dead", 100, Some(0)), 0);
+        assert_eq!(spawned_health("intermission", 100, Some(100)), 100);
+        assert_eq!(spawned_health("intermission", 100, None), 0);
+    }
+
+    #[test]
+    fn spectators_are_not_alive_and_players_spawn_full() {
+        let mut sim = crate::SimWorld::default();
+        let mut frame = sim.frame();
+        let id = ClientId(3);
+        let health = |frame: &FrameWorld| frame.player(id).map(|ps| ps.health);
+        spawn(&mut frame, Tick(1), id, [0.0; 3], [0.0; 3], "spectator");
+        assert_eq!(health(&frame), Some(0));
+        spawn(&mut frame, Tick(2), id, [0.0; 3], [0.0; 3], "playing");
+        assert_eq!(health(&frame), Some(100));
+        spawn(&mut frame, Tick(3), id, [0.0; 3], [0.0; 3], "intermission");
+        assert_eq!(health(&frame), Some(100));
+        frame.client_meta_mut(id).max_health = 30;
+        spawn(&mut frame, Tick(4), id, [0.0; 3], [0.0; 3], "playing");
+        assert_eq!(health(&frame), Some(30));
+        frame.player_mut(id).unwrap().health = 0;
+        spawn(&mut frame, Tick(5), id, [0.0; 3], [0.0; 3], "dead");
+        assert_eq!(health(&frame), Some(0));
+        spawn(&mut frame, Tick(6), id, [0.0; 3], [0.0; 3], "spectator");
+        assert_eq!(health(&frame), Some(0));
+        assert_eq!(frame.player(id).map(|ps| ps.max_health), Some(30));
     }
 }
