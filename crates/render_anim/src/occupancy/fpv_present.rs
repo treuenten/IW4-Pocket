@@ -180,6 +180,19 @@ pub(crate) fn fpv_viewmodel_weapon(ps: &PlayerState, weapons: &FpvWeaponTable) -
     }
 }
 
+/// The inventory weapon whose camo the viewmodel wears. An alt mode (a
+/// grenade launcher or shotgun attachment) has no inventory slot and wears
+/// its parent gun's camo; every other weapon wears its own, whatever
+/// `weapon_primary` says, the same parent rule `FpvWeaponTable` uses to pick
+/// the alt-mode viewmodel.
+fn fpv_camo_owner(weapon: u32, parent: u32, weapon_is_alternate: bool) -> u32 {
+    if weapon_is_alternate && parent != 0 {
+        parent
+    } else {
+        weapon
+    }
+}
+
 fn fpv_rocket_should_attach(
     weapons: &FpvWeaponTable,
     weapon_id: u32,
@@ -782,11 +795,13 @@ pub fn tick_fpv_viewmodel(
         None
     };
     let weapon_id = session.weapon_id;
-    let held = if session.parent_weapon != 0 {
-        session.parent_weapon
-    } else {
-        weapon_id
-    };
+    let held = fpv_camo_owner(
+        weapon_id,
+        session.parent_weapon,
+        table
+            .and_then(|t| t.facts_of(weapon_id))
+            .is_some_and(|f| f.is_alternate()),
+    );
     product.camo = presented.viewweapon_player(local.0).map_or(0, |ps| {
         weapon_iw4::weapon_model_for_held(&ps.weapons, &ps.weapon_data, held)
     });
@@ -1291,4 +1306,23 @@ pub fn register_fpv_present_systems(app: &mut App) {
             )
                 .in_set(ClientSet::Present),
         );
+}
+
+#[cfg(test)]
+mod camo_owner_tests {
+    use super::fpv_camo_owner;
+
+    #[test]
+    fn a_held_gun_wears_its_own_camo_whatever_the_stale_primary() {
+        // SCAR-H held after a Predator, weapon_primary still the laptop.
+        assert_eq!(fpv_camo_owner(953, 417, false), 953);
+        assert_eq!(fpv_camo_owner(953, 0, false), 953);
+    }
+
+    #[test]
+    fn an_alt_mode_wears_its_parent_guns_camo() {
+        // Grenade launcher of a camo M4.
+        assert_eq!(fpv_camo_owner(380, 614, true), 614);
+        assert_eq!(fpv_camo_owner(380, 0, true), 380);
+    }
 }

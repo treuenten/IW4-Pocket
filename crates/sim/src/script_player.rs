@@ -607,12 +607,99 @@ pub(crate) fn switch_to_weapon_immediate(
 }
 
 pub(crate) fn switch_to_weapon(world: &mut FrameWorld, id: ClientId, weapon: u32) {
-    if world
-        .player(id)
-        .is_some_and(|ps| ps.weapons.contains(&(weapon as i32)))
-    {
+    if switch_target_parent(world, id, weapon).is_some() {
         world.client_meta_mut(id).controls.switch_to = weapon;
     }
+}
+
+/// Weapon inventory type of an alt mode (a grenade launcher or shotgun
+/// attachment), which hangs off a gun in the inventory instead of taking a
+/// slot of its own.
+const INVENTORY_ALT_MODE: i32 = 3;
+
+/// The owned gun an alt-mode weapon `alt` hangs off: `preferred` when it is
+/// one, otherwise the first owned weapon whose alternate is `alt`, otherwise
+/// 0.
+pub(crate) fn alt_mode_parent(
+    weapons: &[i32; 15],
+    alt: u32,
+    preferred: u32,
+    alternate_of: impl Fn(u32) -> u32,
+) -> u32 {
+    let hangs_off = |w: u32| {
+        alt != 0 && w != 0 && w != alt && weapons.contains(&(w as i32)) && alternate_of(w) == alt
+    };
+    if hangs_off(preferred) {
+        return preferred;
+    }
+    weapons
+        .iter()
+        .filter(|&&w| w > 0)
+        .map(|&w| w as u32)
+        .find(|&w| hangs_off(w))
+        .unwrap_or(0)
+}
+
+/// The inventory weapon a scripted switch to `target` selects: `target`
+/// itself when owned, or the owned gun an alt-mode `target` hangs off. MW2's
+/// `getLastWeapon` returns an alt mode when the player was in it (GSC
+/// `updateSavedLastWeapon` saves "altmode" weapons), and the killstreak,
+/// bomb and last-stand returns switch back to it.
+pub(crate) fn switch_parent(
+    weapons: &[i32; 15],
+    target: u32,
+    target_is_alt_mode: bool,
+    alternate_of: impl Fn(u32) -> u32,
+) -> Option<u32> {
+    if target == 0 {
+        return None;
+    }
+    if weapons.contains(&(target as i32)) {
+        return Some(target);
+    }
+    if !target_is_alt_mode {
+        return None;
+    }
+    match alt_mode_parent(weapons, target, 0, alternate_of) {
+        0 => None,
+        parent => Some(parent),
+    }
+}
+
+fn switch_target_parent(world: &FrameWorld, id: ClientId, target: u32) -> Option<u32> {
+    let ps = world.player(id)?;
+    switch_parent(
+        &ps.weapons,
+        target,
+        weapon_is_alt_mode(world, target),
+        |w| world.combat_facts_for(w).map_or(0, |f| f.alternate_weapon),
+    )
+}
+
+/// The `weapon_primary` a weapon change leaves behind. A weapon in the
+/// inventory is its own primary; an alt mode keeps the gun it hangs off,
+/// preferring the one the command named in `weapon_mapped` when the command
+/// chose this switch. MW2's `getCurrentPrimaryWeapon` and the viewmodel camo
+/// both read this, so it must never keep the weapon the player left.
+pub(crate) fn primary_after_switch(
+    new: u32,
+    new_is_alt_mode: bool,
+    cmd_weapon: u32,
+    cmd_mapped: u32,
+    weapons: &[i32; 15],
+    alternate_of: impl Fn(u32) -> u32,
+) -> u32 {
+    if !new_is_alt_mode {
+        return new;
+    }
+    let preferred = if new == cmd_weapon { cmd_mapped } else { 0 };
+    alt_mode_parent(weapons, new, preferred, alternate_of)
+}
+
+pub(crate) fn weapon_is_alt_mode(world: &FrameWorld, weapon: u32) -> bool {
+    world
+        .combat_facts_for(weapon)
+        .is_some_and(|f| f.inventory_type == INVENTORY_ALT_MODE)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -720,9 +807,7 @@ pub(crate) fn give_full_ammo(world: &mut FrameWorld, id: ClientId, weapon: u32) 
     {
         set_ammo_clip(world, id, weapon, facts.clip_size);
         // `set_ammo_clip` writes the right hand; an akimbo pair fills both.
-        if facts.dual_wield
-            || gsc_give_weapon_is_akimbo(world.weapon_script_name(weapon))
-        {
+        if facts.dual_wield || gsc_give_weapon_is_akimbo(world.weapon_script_name(weapon)) {
             let key = weapon_iw4::clip_table_key(facts.clip_index, weapon);
             if let Some(ps) = world.player_mut(id) {
                 let _ = weapon_iw4::set_clip_for_hand(&mut ps.ammoclip, key, 1, facts.clip_size);
@@ -838,9 +923,18 @@ pub(crate) fn constrain_cmd(
     let Some(mut controls) = world.client_meta(id).map(|m| m.controls) else {
         return;
     };
-    if controls.switch_to != 0 && controls.switch_to == held {
-        controls.switch_to = 0;
-        world.client_meta_mut(id).controls.switch_to = 0;
+    // The inventory gun a forced switch selects. A switch whose weapon has
+    // since gone (or, for an alt mode, whose gun has gone) is dropped, or it
+    // would pin cmd.weapon to a weapon the player cannot raise.
+    let mut switch_mapped = 0;
+    if controls.switch_to != 0 {
+        match switch_target_parent(world, id, controls.switch_to) {
+            Some(parent) if controls.switch_to != held => switch_mapped = parent,
+            _ => {
+                controls.switch_to = 0;
+                world.client_meta_mut(id).controls.switch_to = 0;
+            }
+        }
     }
     if controls.frozen {
         cmd.forwardmove = 0;
@@ -865,8 +959,98 @@ pub(crate) fn constrain_cmd(
         cmd.buttons &= !(buttons::USE | buttons::USE_RELOAD);
     }
     if controls.switch_to != 0 {
+        // The client's weapon_mapped still names the weapon it last chose
+        // (the killstreak laptop, the bomb), and the weapon change copies it
+        // into weapon_primary, so it has to follow the forced weapon.
         cmd.weapon = controls.switch_to as u16;
+        cmd.weapon_mapped = switch_mapped as u16;
     } else if controls.switch_disabled || controls.frozen {
         cmd.weapon = held as u16;
+    }
+}
+
+#[cfg(test)]
+mod weapon_switch_tests {
+    use super::*;
+
+    const M4_GL: u32 = 614;
+    const GL_M4: u32 = 380;
+    const SCAR: u32 = 953;
+    const LAPTOP: u32 = 417;
+
+    fn inventory(owned: &[u32]) -> [i32; 15] {
+        let mut weapons = [0; 15];
+        for (slot, &w) in owned.iter().enumerate() {
+            weapons[slot] = w as i32;
+        }
+        weapons
+    }
+
+    fn alternate_of(w: u32) -> u32 {
+        if w == M4_GL { GL_M4 } else { 0 }
+    }
+
+    #[test]
+    fn a_switch_to_an_owned_weapon_selects_it() {
+        let weapons = inventory(&[SCAR, LAPTOP]);
+        assert_eq!(
+            switch_parent(&weapons, SCAR, false, alternate_of),
+            Some(SCAR)
+        );
+        assert_eq!(switch_parent(&weapons, M4_GL, false, alternate_of), None);
+        assert_eq!(switch_parent(&weapons, 0, false, alternate_of), None);
+    }
+
+    #[test]
+    fn a_switch_back_to_an_alt_mode_selects_its_gun() {
+        let weapons = inventory(&[M4_GL, LAPTOP]);
+        assert_eq!(
+            switch_parent(&weapons, GL_M4, true, alternate_of),
+            Some(M4_GL)
+        );
+        let without_gun = inventory(&[SCAR, LAPTOP]);
+        assert_eq!(switch_parent(&without_gun, GL_M4, true, alternate_of), None);
+    }
+
+    #[test]
+    fn a_weapon_change_leaves_the_new_weapon_as_primary() {
+        let weapons = inventory(&[SCAR, LAPTOP]);
+        // Forced back from the laptop with the client still naming it.
+        assert_eq!(
+            primary_after_switch(SCAR, false, SCAR, LAPTOP, &weapons, alternate_of),
+            SCAR
+        );
+        // A switch the sim made on its own.
+        assert_eq!(
+            primary_after_switch(SCAR, false, LAPTOP, LAPTOP, &weapons, alternate_of),
+            SCAR
+        );
+        assert_eq!(
+            primary_after_switch(0, false, 0, 0, &weapons, alternate_of),
+            0
+        );
+    }
+
+    #[test]
+    fn an_alt_mode_keeps_the_gun_it_hangs_off_as_primary() {
+        let weapons = inventory(&[M4_GL, LAPTOP]);
+        assert_eq!(
+            primary_after_switch(GL_M4, true, GL_M4, M4_GL, &weapons, alternate_of),
+            M4_GL
+        );
+        // A stale or missing weapon_mapped still finds the gun.
+        assert_eq!(
+            primary_after_switch(GL_M4, true, GL_M4, LAPTOP, &weapons, alternate_of),
+            M4_GL
+        );
+        assert_eq!(
+            primary_after_switch(GL_M4, true, LAPTOP, 0, &weapons, alternate_of),
+            M4_GL
+        );
+        let without_gun = inventory(&[SCAR]);
+        assert_eq!(
+            primary_after_switch(GL_M4, true, GL_M4, M4_GL, &without_gun, alternate_of),
+            0
+        );
     }
 }
