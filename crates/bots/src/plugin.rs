@@ -617,7 +617,7 @@ fn refresh_hazards(nav: &mut BotNav, world: &mut SimWorld, tick: u32) {
         return;
     }
     let started = std::time::Instant::now();
-    nav.graph.set_hazards(pieces);
+    let marked = nav.graph.set_hazards(pieces);
     diag::info!(
         Sim,
         "bots: {} hazard pieces cover {} of {} nodes ({:.2} ms)",
@@ -626,6 +626,21 @@ fn refresh_hazards(nav: &mut BotNav, world: &mut SimWorld, tick: u32) {
         nav.graph.nodes.len(),
         started.elapsed().as_secs_f64() * 1000.0
     );
+    // Where each piece is and what it takes out of the graph, so a volume
+    // that marks more than it should can be found from the trace alone.
+    for (i, (piece, nodes)) in nav.graph.hazards.iter().zip(&marked).enumerate().take(64) {
+        diag::debug!(
+            Sim,
+            "bots: hazard piece {i}: ({:.0},{:.0},{:.0}) to ({:.0},{:.0},{:.0}), {} planes, marks {nodes} nodes",
+            piece.mins[0],
+            piece.mins[1],
+            piece.mins[2],
+            piece.maxs[0],
+            piece.maxs[1],
+            piece.maxs[2],
+            piece.planes.len(),
+        );
+    }
 }
 
 fn prepare_navigation(

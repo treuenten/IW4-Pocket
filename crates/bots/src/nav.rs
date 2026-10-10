@@ -240,7 +240,10 @@ impl NavGraph {
 
     /// Marks the nodes a standing player would touch one of these hazard
     /// volumes at. One pass over the nodes when the level's hazards change.
-    pub fn set_hazards(&mut self, hazards: Vec<HazardPiece>) {
+    /// Returns, per piece, the nodes it is the first piece to mark, so the
+    /// host can report what each volume takes out of the graph.
+    pub fn set_hazards(&mut self, hazards: Vec<HazardPiece>) -> Vec<u32> {
+        let mut marked = vec![0u32; hazards.len()];
         self.hazard = if hazards.is_empty() {
             Vec::new()
         } else {
@@ -252,12 +255,19 @@ impl NavGraph {
                 .iter()
                 .map(|&feet| {
                     let (mins, maxs) = standing_hull(feet);
-                    (0..3).all(|i| maxs[i] >= lo[i] && mins[i] <= hi[i])
-                        && hazards.iter().any(|h| hazard_touches(h, feet))
+                    if (0..3).any(|i| maxs[i] < lo[i] || mins[i] > hi[i]) {
+                        return false;
+                    }
+                    let piece = hazards.iter().position(|h| hazard_touches(h, feet));
+                    if let Some(piece) = piece {
+                        marked[piece] += 1;
+                    }
+                    piece.is_some()
                 })
                 .collect()
         };
         self.hazards = hazards;
+        marked
     }
 
     /// A player standing on this node touches a hazard volume.
@@ -2076,14 +2086,17 @@ mod hazard_tests {
     #[test]
     fn nodes_in_a_hazard_are_never_goals() {
         let mut graph = grid(20, 3);
-        // The far end of the strip is a radiation field.
-        graph.set_hazards(vec![box_piece(
-            [600.0, -100.0, -10.0],
-            [1000.0, 200.0, 60.0],
-        )]);
+        // The far end of the strip is a radiation field; a second piece over
+        // the same ground and one far off mark nothing more.
+        let per_piece = graph.set_hazards(vec![
+            box_piece([600.0, -100.0, -10.0], [1000.0, 200.0, 60.0]),
+            box_piece([700.0, -100.0, -10.0], [1000.0, 200.0, 60.0]),
+            box_piece([5000.0, -100.0, -10.0], [6000.0, 200.0, 60.0]),
+        ]);
         let marked = graph.hazard.iter().filter(|h| **h).count();
         // x = 624 to 912 on each of the three rows; 576 stays clear of it.
         assert_eq!(marked, 3 * 7, "{:?}", graph.hazard);
+        assert_eq!(per_piece, vec![3 * 7, 0, 0]);
         assert!(graph.in_hazard([700.0, 48.0, 0.0]) && !graph.in_hazard([300.0, 48.0, 0.0]));
         let from = [500.0, 48.0, 0.0];
         for salt in 0..32 {
