@@ -383,24 +383,48 @@ fn crushes(client: bool, drop: f32) -> bool {
 
 /// Euler angle rates (degrees a second) that carry `body`'s spin for a moment.
 /// Near pitch +-90 yaw and roll are ill-defined and their rates blow up (a
-/// look-ahead across the pole turns both by 180), so there the spin is not
-/// extrapolated: the body is still sent every tick, and only holds its
-/// angles between snapshots.
+/// look-ahead across the pole turns both by 180). There the rates are the
+/// ones that reach the next tick's angles, and only when going straight
+/// there in Euler angles stays with the real turn the whole way; otherwise
+/// the spin is not extrapolated, and the body only holds its angles between
+/// snapshots (it is still sent every tick).
 fn angle_rates(body: &RigidBody) -> [f32; 3] {
     const LOOK_AHEAD_S: f32 = 0.01;
     const POLE_PITCH: f32 = 80.0;
+    /// Near the pole: the most the straight Euler path may stray from the
+    /// real turn over a tick.
+    const POLE_STRAY_DEG: f32 = 6.0;
     if body.spin.length_squared() < 1e-8 {
         return [0.0; 3];
     }
-    let now = math_iw4::axis_to_angles(body.axis());
-    let mut ahead = *body;
-    let angle = body.spin.length() * LOOK_AHEAD_S;
-    ahead.rotation =
-        (glam::Quat::from_axis_angle(body.spin.normalize(), angle) * body.rotation).normalize();
-    let later = math_iw4::axis_to_angles(ahead.axis());
+    let turned = |dt: f32| {
+        (glam::Quat::from_axis_angle(body.spin.normalize(), body.spin.length() * dt)
+            * body.rotation)
+            .normalize()
+    };
+    let euler = |rotation: glam::Quat| {
+        let m = glam::Mat3::from_quat(rotation);
+        math_iw4::axis_to_angles([
+            m.x_axis.to_array(),
+            m.y_axis.to_array(),
+            m.z_axis.to_array(),
+        ])
+    };
+    let now = euler(body.rotation);
+    let later = euler(turned(LOOK_AHEAD_S));
     let near_pole = |angles: [f32; 3]| math_iw4::angle_subtract(angles[0], 0.0).abs() > POLE_PITCH;
     if near_pole(now) || near_pole(later) {
-        return [0.0; 3];
+        let next = euler(turned(TICK_S));
+        let rates: [f32; 3] =
+            std::array::from_fn(|i| math_iw4::angle_subtract(next[i], now[i]) / TICK_S);
+        let stays = [0.25f32, 0.5, 0.75].into_iter().all(|share| {
+            let t = TICK_S * share;
+            let along = super::rigid_body::rotation_from_axis(math_iw4::angles_to_axis(
+                std::array::from_fn(|i| now[i] + rates[i] * t),
+            ));
+            along.angle_between(turned(t)) < POLE_STRAY_DEG.to_radians()
+        });
+        return if stays { rates } else { [0.0; 3] };
     }
     // No Euler rate is faster than the spin itself could make it, away from
     // the pole; anything faster is a wrap.
@@ -1332,11 +1356,43 @@ mod tests {
         body.spin = Vec3::new(0.0, 0.0, 2.0);
         let level = angle_rates(body);
         assert!((level[1] - 2.0f32.to_degrees()).abs() < 1.0, "{level:?}");
-        // Pitched 85 degrees down, a turn about the world's up axis is all
-        // yaw and roll, which the look-ahead can flip by 180 each.
+        // Pitched 85 degrees down, a tumble across the pole is all yaw and
+        // roll, which flip by 180 each over the tick: not extrapolated.
         body.rotation = glam::Quat::from_rotation_y(85.0f32.to_radians());
-        body.spin = Vec3::new(3.0, 0.0, 8.0);
+        body.spin = Vec3::new(0.0, 8.0, 0.0);
         assert_eq!(angle_rates(body), [0.0; 3]);
+        // A turn about the world's up axis there is all yaw: it is sent, so
+        // a part standing on end and spinning does not step at 20 Hz.
+        body.rotation = glam::Quat::from_rotation_y(84.0f32.to_radians());
+        body.spin = Vec3::new(0.0, 0.0, 3.0);
+        let upright = angle_rates(body);
+        assert!(
+            (upright[1] - 3.0f32.to_degrees()).abs() < 2.0 && upright[0].abs() < 2.0,
+            "{upright:?}"
+        );
+        // And whatever is sent near the pole follows the real turn.
+        for spin in [
+            Vec3::new(3.0, 0.0, 8.0),
+            Vec3::new(1.0, 2.0, 5.0),
+            Vec3::new(-4.0, 1.0, 2.0),
+        ] {
+            body.rotation = glam::Quat::from_rotation_y(83.0f32.to_radians());
+            body.spin = spin;
+            let rates = angle_rates(body);
+            if rates != [0.0; 3] {
+                let now = math_iw4::axis_to_angles(body.axis());
+                let t = 0.025;
+                let along = super::super::rigid_body::rotation_from_axis(math_iw4::angles_to_axis(
+                    std::array::from_fn(|i| now[i] + rates[i] * t),
+                ));
+                let real = glam::Quat::from_axis_angle(spin.normalize(), spin.length() * t)
+                    * body.rotation;
+                assert!(
+                    along.angle_between(real).to_degrees() < 6.5,
+                    "{spin}: {rates:?}"
+                );
+            }
+        }
         body.rotation = glam::Quat::from_rotation_y(60.0f32.to_radians());
         let cap = 2.0 * super::super::rigid_body::MAX_ANG_SPEED.to_degrees();
         assert!(angle_rates(body).iter().all(|r| r.abs() <= cap));
