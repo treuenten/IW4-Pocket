@@ -545,13 +545,9 @@ pub(super) async fn walk_prepared_match(
         // The copy shares Arcs only; disabled mode adds no extra owner at all.
         let retention_batch = (budget != 0).then(|| batch.share());
         merge_image_batch(&mut global, label, batch, job, &mut report);
-        let mut retained = common
-            .fpv_retained
-            .lock()
+        let mut retained = common.fpv_retained.lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let kept = retention_batch
-            .as_ref()
-            .map_or(0, |batch| retained.keep_bounded(batch, budget));
+        let kept = retention_batch.as_ref().map_or(0, |batch| retained.keep_bounded(batch, budget));
         report.push(format!(
             "{label} optional FPV next-map cache: +{:.1}MiB ({} payloads, {:.1}MiB; budget_bytes={budget}; donor batches excluded)",
             kept as f64 / (1024.0 * 1024.0),
