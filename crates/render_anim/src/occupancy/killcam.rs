@@ -21,6 +21,36 @@ pub struct KillcamCamera {
     last_time: i32,
     last_pose: Option<WorldCameraPose>,
     blend_until: i32,
+    /// The killcam entity is a sentry, whose gun aim stays on the server.
+    sentry: bool,
+}
+
+/// How far the top of the sentry's gun sits above its base. The turret view
+/// sits ten units over it, clear of the gun model, which the client draws
+/// pointing the way the base faces.
+const SENTRY_GUN_TOP: f32 = 55.0;
+
+/// MW2 spawns its sentry with spawnTurret, so the engine sends it as a turret
+/// (eType 11) and the killcam looks from the gun. The port sends the sentry as
+/// a script mover, and its model is what tells the client it is a turret:
+/// `sentry_minigun` while it fires, `sentry_minigun_destroyed` once it blows.
+fn is_sentry(snapshot: &sim::Snapshot, number: i32) -> bool {
+    let Some(mover) = snapshot
+        .meta
+        .script_movers
+        .iter()
+        .find(|mover| mover.state.number == number)
+    else {
+        return false;
+    };
+    snapshot.meta.entity_dobjs.iter().any(|(owner, dobj)| {
+        owner.script_model() == Some(mover.id)
+            && dobj
+                .composition
+                .models
+                .first()
+                .is_some_and(|model| model.model.starts_with("sentry_"))
+    })
 }
 
 fn entity_origin(es: &EntityState, now: i32) -> Vec3 {
@@ -149,6 +179,7 @@ pub(super) fn classify_view(
         match entity?.e_type {
             12 => KillCamMode::Mode1Heli,
             11 => KillCamMode::Mode6Turret,
+            entity_iw4::ET_SCRIPTMOVER if is_sentry(snapshot, number) => KillCamMode::Mode6Turret,
             _ => KillCamMode::Mode2Airstrike,
         }
     };
@@ -196,6 +227,7 @@ impl KillcamCamera {
         let projectile = snapshot.projectiles.iter().find(|p| p.entnum == number);
         if self.entity != Some(number) {
             let mode = classify_view(presented, viewer, in_killcam, weapons)?;
+            self.sentry = mode == KillCamMode::Mode6Turret && is_sentry(snapshot, number);
             self.rest_ground = false;
             self.entity = Some(number);
             self.mode = Some(mode);
@@ -276,6 +308,20 @@ impl KillcamCamera {
             KillCamMode::Mode2Airstrike => {
                 let origin = anchor.with_z(anchor.z.max(self.target.z + 24.0));
                 (origin, look_angles(self.target - origin), 50.0)
+            }
+            // The client never sees where the sentry's gun points, but it is
+            // on the victim when it kills, so the view looks from the gun at
+            // the killcam target.
+            KillCamMode::Mode6Turret if self.sentry => {
+                let (_, _, base_up) = math_iw4::angle_vectors(self.angles);
+                let gun = anchor + Vec3::from_array(base_up) * SENTRY_GUN_TOP;
+                let aim = look_angles(self.target - gun);
+                let (aim_forward, _, aim_up) = math_iw4::angle_vectors(aim);
+                (
+                    gun - Vec3::from_array(aim_forward) * 10.0 + Vec3::from_array(aim_up) * 10.0,
+                    aim,
+                    50.0,
+                )
             }
             KillCamMode::Mode6Turret => (anchor - forward * 10.0 + up * 10.0, self.angles, 50.0),
             KillCamMode::Mode7Javelin => {
@@ -431,5 +477,87 @@ impl KillcamCamera {
         )
         .then_some((self.target - desired).length());
         Some((pose, fov, focus_distance))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use playerstate_iw4::PlayerState;
+    use sim::{AuthorityModelOwner, ScriptModelId, ScriptMoverGentity, Snapshot, Tick};
+
+    const LOCAL: ClientId = ClientId(0);
+    const KILLER: i32 = 139;
+
+    /// The local player, standing at (400, 0, -5), killed by entity 139: a
+    /// script mover at the origin facing +Y, drawn with `model` when given.
+    fn killed_by(model: Option<&str>) -> PresentedSnapshot {
+        let mut snapshot = Snapshot::unpublished(Tick(300));
+        let mut ps = PlayerState::ZERO;
+        ps.kill_cam_entity = KILLER;
+        ps.kill_cam_look_at_entity = ENTITYNUM_NONE;
+        snapshot.players.push((LOCAL, ps));
+        let mover = sim::init_script_mover_state(KILLER, [0.0; 3], [0.0, 90.0, 0.0]);
+        let victim = EntityState {
+            number: LOCAL.0 as i32,
+            tr_base: [400.0, 0.0, -5.0],
+            ..Default::default()
+        };
+        snapshot.meta.entities = vec![mover.clone(), victim];
+        let id = ScriptModelId::from_wire(0x4000_0001);
+        snapshot.meta.script_movers.push(ScriptMoverGentity {
+            id,
+            state: mover,
+            ..Default::default()
+        });
+        if let Some(model) = model {
+            snapshot.meta.entity_dobjs.push((
+                AuthorityModelOwner::ScriptModel(id),
+                xmodel_runtime::DObjSemanticState::bind_pose(model.to_owned(), 1, 1),
+            ));
+        }
+        let mut presented = PresentedSnapshot::default();
+        presented.publish_decoded(snapshot);
+        presented
+    }
+
+    #[test]
+    fn a_sentry_kill_plays_in_the_turret_view() {
+        let mode = |model| classify_view(&killed_by(model), LOCAL, true, None);
+        assert_eq!(mode(Some("sentry_minigun")), Some(KillCamMode::Mode6Turret));
+        assert_eq!(
+            mode(Some("sentry_minigun_destroyed")),
+            Some(KillCamMode::Mode6Turret)
+        );
+        // Any other script mover, such as an airstrike's bare killCamEnt,
+        // keeps the airstrike view.
+        assert_eq!(
+            mode(Some("vehicle_mig29_desert")),
+            Some(KillCamMode::Mode2Airstrike)
+        );
+        assert_eq!(mode(None), Some(KillCamMode::Mode2Airstrike));
+    }
+
+    #[test]
+    fn the_sentry_view_looks_from_the_gun_at_the_victim() {
+        let presented = killed_by(Some("sentry_minigun"));
+        let mut camera = KillcamCamera::default();
+        let (pose, fov, focus) = camera
+            .update(&presented, LOCAL, 15_000, true, None, None)
+            .unwrap();
+        // The gun's top is 55 over the base and the victim's head at its
+        // height straight down +X, so the camera sits 10 behind and 10 above
+        // it and looks along +X, whichever way the sentry's base faces.
+        for (got, want) in pose.origin.iter().zip([-10.0, 0.0, 65.0]) {
+            assert!((got - want).abs() < 0.01, "{:?}", pose.origin);
+        }
+        for angle in pose.angles {
+            assert!(
+                math_iw4::angle_subtract(angle, 0.0).abs() < 0.01,
+                "{:?}",
+                pose.angles
+            );
+        }
+        assert_eq!((fov, focus), (50.0, None));
     }
 }
