@@ -134,6 +134,8 @@ pub struct HostController {
     reposition_from: Option<[f32; 3]>,
     /// Enemies given up on, each with the tick it may be fought again.
     ignored: Vec<(ClientId, u32)>,
+    /// Health at the last think, to tell when the bot is being hurt.
+    last_health: Option<i32>,
     /// Where a bot standing in a hazard volume is walking out to.
     hazard_exit: Option<[f32; 3]>,
     /// Where and when a route last could not start: no baked node near
@@ -183,6 +185,7 @@ impl HostController {
             engagement: None,
             reposition_from: None,
             ignored: Vec::new(),
+            last_health: None,
             hazard_exit: None,
             no_start: None,
             now: 0,
@@ -296,6 +299,7 @@ impl HostController {
             self.engagement = None;
             self.reposition_from = None;
             self.ignored.clear();
+            self.last_health = None;
             self.hazard_exit = None;
             self.no_start = None;
             self.decision = Decision::default();
@@ -433,6 +437,17 @@ impl HostController {
         let events = self.memory.ingest(obs);
         self.prefer_weapon = None;
         self.ignored.retain(|(_, until)| obs.tick < *until);
+        let hurt = self
+            .last_health
+            .is_some_and(|health| obs.self_state.health < health);
+        self.last_health = Some(obs.self_state.health);
+        if hurt && !self.ignored.is_empty() {
+            // Giving up on an enemy is for one the bot cannot hurt, not one
+            // that is shooting it: a player who is hit turns and answers. The
+            // shooter is not named, so every one given up on in view counts.
+            let in_view: Vec<ClientId> = self.memory.currently_seen().map(|c| c.id).collect();
+            self.ignored.retain(|(id, _)| !in_view.contains(id));
+        }
         let touching_use = obs
             .objectives
             .iter()
@@ -3163,6 +3178,29 @@ mod weapon_fight_tests {
                 .iter()
                 .all(|cmd| cmd.buttons & buttons::ATTACK == 0)
         );
+    }
+
+    #[test]
+    fn a_bot_shot_by_an_enemy_it_gave_up_on_fights_back() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 500, 0);
+        run(&mut bot, 220, |tick| {
+            facing_enemy(tick, usp, vec![usp], 80.0)
+        });
+        assert!(bot.ignores(ClientId(0), 221));
+        // Left alone by him, it leaves him alone.
+        run(&mut bot, 10, |tick| {
+            facing_enemy(220 + tick, usp, vec![usp], 80.0)
+        });
+        assert_eq!(bot.task().kind, TaskKind::Hunt);
+        // Shot while he is in view, it turns on him again.
+        run(&mut bot, 10, |tick| {
+            let mut obs = facing_enemy(230 + tick, usp, vec![usp], 80.0);
+            obs.self_state.health = 70;
+            obs
+        });
+        assert!(!bot.ignores(ClientId(0), 240));
+        assert_eq!(bot.task().kind, TaskKind::Fight);
     }
 
     #[test]
