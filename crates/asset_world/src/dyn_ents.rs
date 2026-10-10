@@ -118,19 +118,30 @@ impl PhysPresetCatalog {
     }
 
     pub fn insert(&mut self, slot: Ptr, insert_slot: Option<Ptr>, owned: OwnedPhysPreset) {
-        if owned.name.starts_with(PRESET_REFERENCE_PREFIX) {
-            for slot in std::iter::once(slot).chain(insert_slot) {
+        let reference = owned.name.starts_with(PRESET_REFERENCE_PREFIX);
+        if !reference {
+            self.named
+                .entry(owned.name.clone())
+                .or_insert_with(|| owned.clone());
+        }
+        for slot in std::iter::once(slot).chain(insert_slot) {
+            self.clear_slot(slot);
+            if reference {
                 self.references.insert(slot, owned.clone());
+            } else {
+                self.direct.insert(slot, owned.clone());
             }
-            return;
         }
-        self.named
-            .entry(owned.name.clone())
-            .or_insert_with(|| owned.clone());
-        self.direct.insert(slot, owned.clone());
-        if let Some(insert_slot) = insert_slot {
-            self.direct.insert(insert_slot, owned);
-        }
+    }
+
+    /// A slot holds one binding at a time. Every asset is loaded into the
+    /// temp block from its start, so the physPreset field of one XModel sits
+    /// at the same slot as the next one's: an inline preset or an alias for a
+    /// later model must replace what the slot held for an earlier one.
+    fn clear_slot(&mut self, slot: Ptr) {
+        self.direct.remove(&slot);
+        self.references.remove(&slot);
+        self.aliases.remove(&slot);
     }
 
     /// Presets an earlier zone defined, for this zone's `,<name>` stand-ins.
@@ -148,6 +159,7 @@ impl PhysPresetCatalog {
     }
 
     pub fn alias(&mut self, slot: Ptr, target: Ptr) {
+        self.clear_slot(slot);
         self.aliases.insert(slot, target);
     }
 
@@ -499,5 +511,45 @@ mod tests {
         map.insert(slot(128), None, preset("weightless", 0.0));
         assert!(map.at_slot(slot(128)).is_some());
         assert!(map.model_phys(Some(slot(128))).is_none());
+    }
+
+    /// The order mp_favela loads its car parts in. Every XModel's physPreset
+    /// field is at the same temp-block slot, so each model must be read with
+    /// its own inline preset or alias, not an earlier model's.
+    #[test]
+    fn each_model_reads_its_own_preset_from_the_shared_temp_slot() {
+        let field = Ptr {
+            block: 0,
+            offset: 296,
+        };
+        let mut common = PhysPresetCatalog::default();
+        common.insert(slot(16), None, preset("car_door", 25.0));
+        common.insert(slot(32), None, preset("bucket_metal", 6.0));
+        let mut map = PhysPresetCatalog::default();
+        map.seed_named(common.named_presets());
+        let mut read = |map: &mut PhysPresetCatalog, load: &dyn Fn(&mut PhysPresetCatalog)| {
+            load(map);
+            map.model_phys(Some(field)).map(|p| p.mass)
+        };
+        // An earlier model loads the ",bucket_metal" stand-in inline.
+        let bucket = slot(1_278_400);
+        let mirror_stand_in = read(&mut map, &|m| {
+            m.insert(field, Some(bucket), preset(",bucket_metal", 0.0))
+        });
+        assert_eq!(mirror_stand_in, Some(6.0));
+        let (hood, door) = (slot(44_857_240), slot(44_874_244));
+        let pickup_hood = read(&mut map, &|m| {
+            m.insert(field, Some(hood), preset("car_hood", 15.0))
+        });
+        let pickup_door = read(&mut map, &|m| {
+            m.insert(field, Some(door), preset(",car_door", 0.0))
+        });
+        let mirror = read(&mut map, &|m| m.alias(field, bucket));
+        let hatch_hood = read(&mut map, &|m| m.alias(field, hood));
+        let hatch_door = read(&mut map, &|m| m.alias(field, door));
+        assert_eq!(
+            [pickup_hood, pickup_door, mirror, hatch_hood, hatch_door],
+            [Some(15.0), Some(25.0), Some(6.0), Some(15.0), Some(25.0)]
+        );
     }
 }
