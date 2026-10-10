@@ -44,6 +44,17 @@ baked support per sector around the threat, checked for line of fire and
 exposure, then reached through the ordinary route executor — reachability is
 never inferred from a component label.
 
+Every map's bake leaves a few dozen nodes with no walk edge (a prop or a clip
+brush fails every probe around them), each its own component, and a few tiny
+pockets. Roam goals, firing positions and fall-back points come from the
+component of the nearest node within snapping range that has at least 16 nodes,
+not from the nearest node outright, so a bot that spawns beside one of these is
+not sent to the node under its feet for good. A roam goal is at least 64 units
+away; with none, the bot steps 64 units onto clear floor instead of holding. A
+hunt or a search that holds for 2 s with no route that will move it (its goal
+reached, no goal, or a goal the graph cannot reach) counts as stuck and steps
+off the same way, and the periodic aggregate counts it.
+
 The weapon channel reloads the gun in hand or switches to a loaded one; with
 nothing loaded anywhere it switches to a gun that still has reserve ammunition
 and reloads it there instead of keeping the empty one. Only usable guns are

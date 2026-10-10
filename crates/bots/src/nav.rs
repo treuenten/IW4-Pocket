@@ -65,7 +65,16 @@ pub struct NavGraph {
     pub adj: Vec<Vec<NavEdge>>,
     pub drops: u32,
     pub component_links: Vec<Vec<u16>>,
+    /// Nodes carrying each component label, derived from `component` when the
+    /// graph is baked or read back, never stored.
+    pub component_size: Vec<u32>,
 }
+
+/// A component smaller than this is not somewhere to roam from or fight on.
+/// The bake leaves a few dozen nodes on every map with no walk edge at all,
+/// each its own component (a prop or a clip brush fails every probe around
+/// it), and a few tiny pockets; a bot that snaps to one finds nowhere to go.
+pub const ANCHOR_MIN_COMPONENT: u32 = 16;
 
 /// Layout tag for the blob below. The bake's own [`NAV_SCHEMA`] and
 /// [`NAV_HULL`] travel inside it, so only a change to the packing itself
@@ -200,12 +209,13 @@ impl NavGraph {
             }
             component_links.push(row);
         }
-        (at == blob.len() && nodes.iter().flatten().all(|v| v.is_finite())).then_some(Self {
+        (at == blob.len() && nodes.iter().flatten().all(|v| v.is_finite())).then(|| Self {
             generation: 0,
             truncated,
             digest,
             schema,
             hull,
+            component_size: component_sizes(&component),
             nodes,
             component,
             adj,
@@ -213,6 +223,33 @@ impl NavGraph {
             component_links,
         })
     }
+
+    /// How many nodes share this node's component.
+    pub fn component_len(&self, node: u16) -> u32 {
+        let Some(&label) = self.component.get(node as usize) else {
+            return 0;
+        };
+        match self.component_size.get(label as usize) {
+            Some(&size) => size,
+            // A graph assembled by hand carries no derived sizes.
+            None => self.component.iter().filter(|c| **c == label).count() as u32,
+        }
+    }
+}
+
+/// Nodes per component label. Labels saturate at `u16::MAX`, so the table has
+/// at most 65536 rows.
+fn component_sizes(component: &[u16]) -> Vec<u32> {
+    let rows = component
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |c| c as usize + 1);
+    let mut sizes = vec![0u32; rows];
+    for &label in component {
+        sizes[label as usize] += 1;
+    }
+    sizes
 }
 
 fn take<'a>(blob: &'a [u8], at: &mut usize, len: usize) -> Option<&'a [u8]> {
@@ -656,6 +693,7 @@ pub fn bake_seeded(
         schema: NAV_SCHEMA,
         hull: NAV_HULL,
         nodes,
+        component_size: component_sizes(&component),
         component,
         adj,
         drops,
@@ -783,18 +821,59 @@ pub fn nearest_within(graph: &NavGraph, feet: [f32; 3], max_dist: f32) -> Option
     best.map(|(id, _)| id)
 }
 
+/// The node a bot standing at `feet` roams and fights from: the nearest node
+/// within snapping range whose component has at least
+/// [`ANCHOR_MIN_COMPONENT`] nodes, scored as [`nearest_within`] scores (the
+/// current floor before a shelf overhead), else the nearest node of all.
+///
+/// A spawn a few units from a node with no walk edge snapped to that node,
+/// and every roam goal then came from its one-node component: the bot walked
+/// to the node it stood on and held there for the rest of the match (Estate's
+/// spawn at (-325,799,190), 18 units from node 21405, with the main graph 47
+/// units away). Like the component filter it feeds, this only chooses where
+/// candidates come from; the route still checks the bot can get there.
+pub fn anchor_node(graph: &NavGraph, feet: [f32; 3]) -> Option<u16> {
+    let max_d2 = SNAP_IN * SNAP_IN;
+    let mut nearest: Option<(u16, f32)> = None;
+    let mut anchored: Option<(u16, f32)> = None;
+    for (i, pos) in graph.nodes.iter().enumerate() {
+        let dx = pos[0] - feet[0];
+        let dy = pos[1] - feet[1];
+        let dz = pos[2] - feet[2];
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if d2 > max_d2 {
+            continue;
+        }
+        let score = d2 + 3.0 * dz * dz;
+        if nearest.is_none_or(|(_, best)| score < best) {
+            nearest = Some((i as u16, score));
+        }
+        if anchored.is_none_or(|(_, best)| score < best)
+            && graph.component_len(i as u16) >= ANCHOR_MIN_COMPONENT
+        {
+            anchored = Some((i as u16, score));
+        }
+    }
+    anchored.or(nearest).map(|(id, _)| id)
+}
+
+/// A roam goal closer than this is no goal: the bot counts it as reached.
+pub const ROAM_MIN_IN: f32 = 64.0;
+
 pub fn roam_node(graph: &NavGraph, from: [f32; 3], salt: u32) -> Option<[f32; 3]> {
-    let start = nearest_within(graph, from, SNAP_IN)?;
+    let start = anchor_node(graph, from)?;
     let comp = graph.component[start as usize];
     let mut best: Option<(u32, [f32; 3])> = None;
-    let mut fallback = None;
+    // With nothing in the band, the furthest node that is still a goal, so a
+    // small component does not send the bot to the node under its feet.
+    let mut fallback: Option<(f32, [f32; 3])> = None;
     for (i, pos) in graph.nodes.iter().enumerate() {
         if graph.component[i] != comp {
             continue;
         }
         let planar = dist_xy(*pos, from);
-        if planar > 8.0 && fallback.is_none() {
-            fallback = Some(*pos);
+        if planar >= ROAM_MIN_IN && fallback.is_none_or(|(far, _)| planar > far) {
+            fallback = Some((planar, *pos));
         }
         if !(128.0..=1024.0).contains(&planar) {
             continue;
@@ -807,7 +886,7 @@ pub fn roam_node(graph: &NavGraph, from: [f32; 3], salt: u32) -> Option<[f32; 3]
             best = Some((h, *pos));
         }
     }
-    best.map(|(_, pos)| pos).or(fallback)
+    best.map(|(_, pos)| pos).or(fallback.map(|(_, pos)| pos))
 }
 
 /// Baked supports that could serve as firing positions against a threat at
@@ -827,7 +906,7 @@ pub fn firing_supports(
     if max == 0 {
         return Vec::new();
     }
-    let Some(start) = nearest_within(graph, from, SNAP_IN) else {
+    let Some(start) = anchor_node(graph, from) else {
         return Vec::new();
     };
     let comp = graph.component[start as usize];
@@ -876,7 +955,7 @@ pub fn retreat_supports(
     if max == 0 {
         return Vec::new();
     }
-    let Some(start) = nearest_within(graph, from, SNAP_IN) else {
+    let Some(start) = anchor_node(graph, from) else {
         return Vec::new();
     };
     let comp = graph.component[start as usize];
@@ -1759,5 +1838,59 @@ mod retreat_tests {
         assert_eq!(back[0], [-192.0, 0.0, 0.0]);
         // Nothing further from a threat at the corridor's end.
         assert!(retreat_supports(&graph, [384.0, 0.0, 0.0], [0.0, 0.0, 0.0], 3).is_empty());
+    }
+
+    /// Standing 4 units from the node with no edges and 40 from the corridor.
+    const BY_THE_ISLAND: [f32; 3] = [198.0, 42.0, 0.0];
+
+    #[test]
+    fn a_bot_beside_a_node_with_no_edges_anchors_on_the_corridor() {
+        let graph = corridor();
+        assert_eq!(graph.component_len(17), 1);
+        assert_eq!(graph.component_len(0), 17);
+        assert_eq!(nearest_within(&graph, BY_THE_ISLAND, SNAP_IN), Some(17));
+        let anchor = anchor_node(&graph, BY_THE_ISLAND).unwrap();
+        assert_eq!(graph.nodes[anchor as usize], [192.0, 0.0, 0.0]);
+        for salt in 0..8 {
+            let goal = roam_node(&graph, BY_THE_ISLAND, salt).expect("a roam goal");
+            assert_eq!(goal[1], 0.0, "{goal:?}");
+            assert!(
+                (128.0..=1024.0).contains(&dist_xy(goal, BY_THE_ISLAND)),
+                "{goal:?}"
+            );
+        }
+        // Firing positions come off the corridor too.
+        let supports = firing_supports(&graph, BY_THE_ISLAND, [0.0, 0.0, 0.0], 160.0, 4);
+        assert!(!supports.is_empty() && supports.iter().all(|p| p[1] == 0.0));
+    }
+
+    #[test]
+    fn a_pocket_with_nowhere_to_go_gives_no_roam_goal() {
+        // Three linked nodes 24 units apart: the nearest is all there is.
+        let nodes = vec![[0.0, 0.0, 0.0], [24.0, 0.0, 0.0], [48.0, 0.0, 0.0]];
+        let edge = |to| NavEdge {
+            to,
+            cost: 24.0,
+            kind: TraversalKind::Walk,
+        };
+        let graph = NavGraph {
+            nodes,
+            component: vec![0; 3],
+            adj: vec![vec![edge(1)], vec![edge(0), edge(2)], vec![edge(1)]],
+            ..NavGraph::default()
+        };
+        assert_eq!(anchor_node(&graph, [2.0, 0.0, 0.0]), Some(0));
+        assert_eq!(roam_node(&graph, [2.0, 0.0, 0.0], 7), None);
+        // A node 64 units off is still a goal.
+        assert_eq!(
+            roam_node(&graph, [-20.0, 0.0, 0.0], 7),
+            Some([48.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn component_sizes_count_every_label() {
+        assert_eq!(component_sizes(&[0, 0, 2, 1, 2, 2]), vec![2, 1, 3]);
+        assert!(component_sizes(&[]).is_empty());
     }
 }

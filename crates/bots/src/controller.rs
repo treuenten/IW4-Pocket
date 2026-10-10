@@ -163,12 +163,22 @@ impl HostController {
     }
 
     /// A bot with a movement task that has not moved. Holding, interacting and
-    /// waiting to respawn are not navigation failures.
+    /// waiting to respawn are not navigation failures; a hunt or a search that
+    /// holds with nowhere to go is.
     pub fn stuck(&self, tick: u32) -> bool {
+        self.wants_to_move() && tick.saturating_sub(self.progress_tick) >= STUCK_TICKS
+    }
+
+    /// The intent asks for movement, or it is a hunt or a search standing
+    /// still with no route that will move it: a roam goal under its feet, no
+    /// roam goal at all, or a destination the graph cannot reach. A fight, an
+    /// objective, a recovery and a route waiting for quota hold on purpose.
+    fn wants_to_move(&self) -> bool {
         matches!(
             self.intent.move_mode,
             MoveMode::Walk | MoveMode::Drop | MoveMode::BreakGlass
-        ) && tick.saturating_sub(self.progress_tick) >= STUCK_TICKS
+        ) || self.intent.path == PathOutcome::Blocked
+            || idle_search(self.task.kind, self.intent.move_mode, self.intent.path)
     }
 
     /// The enemy this bot has committed to, for perception to refresh before it
@@ -571,14 +581,21 @@ impl HostController {
             self.committed.clear();
             self.roam = None;
         }
-        let moving = matches!(
-            self.intent.move_mode,
-            MoveMode::Walk | MoveMode::Drop | MoveMode::BreakGlass
-        ) || self.intent.path == PathOutcome::Blocked;
-        if !moving || obs.tick.saturating_sub(self.progress_tick) < 40 {
+        if !self.wants_to_move() || obs.tick.saturating_sub(self.progress_tick) < STUCK_TICKS {
             return None;
         }
         self.progress_tick = obs.tick;
+        self.escape_step(obs, world)
+    }
+
+    /// A short walk to clear floor 64 units away, in one of eight directions,
+    /// kept for 16 ticks.
+    fn escape_step(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+    ) -> Option<BotIntent> {
+        let here = obs.self_state.origin;
         // Pmove can be blocked by other players even when world traces are clear.
         // Different clients yield in different directions before rejoining their route.
         let salt = obs
@@ -742,7 +759,11 @@ impl HostController {
         astar_budget: &mut u32,
     ) -> BotIntent {
         let Some(goal) = self.ensure_roam(obs, nav) else {
-            return BotIntent::default();
+            // Nowhere on the graph to roam to: step off rather than stand.
+            return self.escape_step(obs, world).unwrap_or(BotIntent {
+                move_goal: Some(obs.self_state.origin),
+                ..BotIntent::default()
+            });
         };
         let (move_mode, path, move_goal) =
             self.route(obs.self_state.origin, goal, world, nav, astar_budget);
@@ -767,7 +788,7 @@ impl HostController {
 
     fn ensure_roam(&mut self, obs: &BotObservation, nav: Option<&NavGraph>) -> Option<[f32; 3]> {
         if let Some(goal) = self.roam
-            && dist2(obs.self_state.origin, goal) > 64.0 * 64.0
+            && dist2(obs.self_state.origin, goal) > nav::ROAM_MIN_IN * nav::ROAM_MIN_IN
         {
             return Some(goal);
         }
@@ -1760,6 +1781,21 @@ fn choose_objective(
     deferred
 }
 
+/// A hunt or a search that holds with no route that will move it: the roam
+/// goal is under its feet (a route that ends where the bot stands), there is
+/// no goal at all, or the graph cannot reach it. Waiting on quota is not this.
+fn idle_search(task: TaskKind, mode: MoveMode, path: PathOutcome) -> bool {
+    matches!(task, TaskKind::Hunt | TaskKind::Investigate)
+        && mode == MoveMode::Hold
+        && matches!(
+            path,
+            PathOutcome::Clear
+                | PathOutcome::None
+                | PathOutcome::Unreachable
+                | PathOutcome::IncompleteGraph
+        )
+}
+
 /// The gun in hand can shoot at this contact: loaded, a gun the bot can fight
 /// with, and not a launcher whose blast would reach the bot at this range.
 fn can_shoot(obs: &BotObservation, target: Contact) -> bool {
@@ -2185,6 +2221,82 @@ mod weapon_fight_tests {
         // The unreachable point was tried once, not on every think.
         let retreat = bot.retreat.as_ref().expect("a retreat");
         assert!(retreat.candidates.is_empty() && retreat.chosen.is_none());
+    }
+
+    /// Flat floor: level traces are clear, a trace downwards lands at once.
+    struct Floor;
+
+    impl WorldQuery for Floor {
+        fn sight_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn shot_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
+            let fraction = if end[2] < start[2] { 0.1 } else { 1.0 };
+            Ok(HullTrace {
+                fraction,
+                normal: [0.0, 0.0, 1.0],
+                endpos: std::array::from_fn(|i| start[i] + (end[i] - start[i]) * fraction),
+                startsolid: false,
+            })
+        }
+    }
+
+    #[test]
+    fn a_hunt_with_nowhere_on_the_graph_to_go_steps_off() {
+        // A pocket of two linked nodes: no roam goal 64 units away.
+        let edge = |to| nav::NavEdge {
+            to,
+            cost: 20.0,
+            kind: nav::TraversalKind::Walk,
+        };
+        let graph = NavGraph {
+            nodes: vec![[0.0; 3], [20.0, 0.0, 0.0]],
+            component: vec![0, 0],
+            adj: vec![vec![edge(1)], vec![edge(0)]],
+            ..NavGraph::default()
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 12, 24);
+        let mut alone = facing_enemy(1, usp, vec![usp], 300.0);
+        alone.seen.clear();
+        bot.drive_nav(&alone, &mut Floor, Some(&graph), &mut 512, 50);
+        assert_eq!(bot.task().kind, TaskKind::Hunt);
+        let intent = bot.intent();
+        assert_eq!(intent.move_mode, MoveMode::Walk, "{intent:?}");
+        let goal = intent.move_goal.expect("a step");
+        assert!((dist_xy(goal, [0.0; 3]) - 64.0).abs() < 1.0, "{goal:?}");
+    }
+
+    #[test]
+    fn a_search_holding_with_no_route_counts_as_stuck() {
+        for path in [
+            PathOutcome::Clear,
+            PathOutcome::None,
+            PathOutcome::Unreachable,
+            PathOutcome::IncompleteGraph,
+        ] {
+            assert!(idle_search(TaskKind::Hunt, MoveMode::Hold, path));
+            assert!(idle_search(TaskKind::Investigate, MoveMode::Hold, path));
+        }
+        // Waiting for quota, walking, fighting, recovering and objectives are not.
+        assert!(!idle_search(
+            TaskKind::Hunt,
+            MoveMode::Hold,
+            PathOutcome::BudgetExhausted
+        ));
+        assert!(!idle_search(
+            TaskKind::Hunt,
+            MoveMode::Walk,
+            PathOutcome::Clear
+        ));
+        for task in [TaskKind::Fight, TaskKind::Recover, TaskKind::TouchObj] {
+            assert!(!idle_search(task, MoveMode::Hold, PathOutcome::Clear));
+        }
     }
 
     #[test]
