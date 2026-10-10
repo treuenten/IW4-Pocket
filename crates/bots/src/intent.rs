@@ -26,6 +26,9 @@ pub struct BotIntent {
     pub desired_range: Option<f32>,
     pub move_mode: MoveMode,
     pub fire: bool,
+    /// The enemy to bash or knife, by its origin. The motor presses melee
+    /// only once it is in reach and in front of the bot.
+    pub melee_at: Option<[f32; 3]>,
     pub use_button: bool,
     pub reload: bool,
     pub crouch: bool,
@@ -44,6 +47,7 @@ impl Default for BotIntent {
             desired_range: None,
             move_mode: MoveMode::Hold,
             fire: false,
+            melee_at: None,
             use_button: false,
             reload: false,
             crouch: false,

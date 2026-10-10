@@ -60,6 +60,17 @@ actions, the AT4): down for one command, then up, pressed again after a gap of
 weapon fires once per press. Full-auto and burst weapons hold it. An akimbo
 pair gets both buttons: attack fires the left gun, throw the right one.
 
+Some bots fight with their melee. A riot shield's attack is the bash on the
+melee button (its fire button only clicks), so a shield bot walks up to the
+enemy, straight across clear floor or along its route, and bashes in reach, or
+lunges up to 128 units when the weapon can; against an enemy that stays beyond
+600 units or out of reach for 3 s it takes out its sidearm. A bot with no gun
+it can use at that range (all dry, or only a launcher too close) knifes the
+same way instead of backing off, and any bot with an enemy in knife reach
+knifes it. Each swing is its own press, and fire and melee never share a
+command. A bot backs off to reload or switch only while there is a reload or
+switch to make.
+
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a
 running match, which is where bot behaviour is judged: `make map mp_boneyard`

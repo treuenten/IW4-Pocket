@@ -7,10 +7,11 @@ use crate::motor::Motor;
 use crate::nav::{self, NavGraph, PathError};
 use crate::observation::{
     BotEvent, BotObservation, Contact, KnowledgeSource, ModeObjective, ObjectiveAction, TeamRole,
+    WeaponAction,
 };
 use crate::query::{QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
 use crate::task::{ActionStage, Decision, SwitchReason, Task, TaskKind};
-use crate::weapon::WeaponSkill;
+use crate::weapon::{WeaponAct, WeaponSkill, WeaponStatus};
 
 const THINK_PERIOD_TICKS: u32 = 2;
 const SWITCH_MARGIN: f32 = 12.0;
@@ -40,6 +41,20 @@ const STUCK_TICKS: u32 = 40;
 const USE_REPRESS_THINKS: u32 = 4;
 /// How close to a use objective's marker the final straight approach stops.
 const USE_APPROACH_IN: f32 = 16.0;
+/// A melee fighter stops this close: two player hulls apart, in bash reach.
+const MELEE_CLOSE_IN: f32 = 36.0;
+/// Within this the melee fighter walks straight at the enemy when the floor
+/// between them is clear, rather than following baked supports.
+const MELEE_DIRECT_IN: f32 = 256.0;
+/// A moving enemy is followed on the committed route until it has strayed
+/// this far from the route's end.
+const MELEE_REPLAN_IN: f32 = 96.0;
+/// Melee is armed (the motor still checks reach and aim) within this range.
+const MELEE_ARM_IN: f32 = crate::motor::LUNGE_REACH_IN + 32.0;
+/// A riot-shield bot takes out its sidearm against an enemy that stays this
+/// far away, or that it cannot reach, for `SIDEARM_THINKS` thinks.
+const SIDEARM_RANGE_IN: f32 = 600.0;
+const SIDEARM_THINKS: u32 = 30;
 
 #[derive(Clone, Debug)]
 pub struct HostController {
@@ -75,6 +90,10 @@ pub struct HostController {
     /// Thinks spent pressing Use at a use objective without the script
     /// linking the player to it yet.
     use_unlinked: u32,
+    /// A weapon change the fight asks the weapon skill for on this think.
+    prefer_weapon: Option<WeaponAct>,
+    /// Consecutive thinks a riot-shield bot's enemy has been far or unreachable.
+    shield_far: u32,
 }
 
 impl HostController {
@@ -110,6 +129,8 @@ impl HostController {
             progress_tick: 0,
             escape: None,
             use_unlinked: 0,
+            prefer_weapon: None,
+            shield_far: 0,
         }
     }
 
@@ -204,6 +225,8 @@ impl HostController {
             self.progress_origin = None;
             self.escape = None;
             self.use_unlinked = 0;
+            self.prefer_weapon = None;
+            self.shield_far = 0;
             self.decision = Decision::default();
             self.task = Task::default();
         }
@@ -237,6 +260,7 @@ impl HostController {
         self.gate_fire(obs);
         if self.intent.move_mode == MoveMode::BreakGlass {
             self.intent.fire = false;
+            self.intent.melee_at = None;
             self.intent.sprint = false;
             self.intent.use_button = false;
             if let Some(goal) = self.intent.move_goal {
@@ -272,12 +296,14 @@ impl HostController {
     /// A retained target is never a standing permission to shoot: the shot has
     /// to stay backed by a positive observation of that same client, refreshed
     /// on every tick perception actually looked.
+    /// A melee swing rests on the same authorization.
     fn gate_fire(&mut self, obs: &BotObservation) {
-        if !self.intent.fire {
+        if !self.intent.fire && self.intent.melee_at.is_none() {
             return;
         }
         let Some((id, since)) = self.fire_target.as_mut() else {
             self.intent.fire = false;
+            self.intent.melee_at = None;
             return;
         };
         if obs.seen.iter().any(|contact| contact.id == *id) {
@@ -285,6 +311,7 @@ impl HostController {
         }
         if obs.tick.saturating_sub(*since) > FIRE_FRESH_TICKS {
             self.intent.fire = false;
+            self.intent.melee_at = None;
         }
     }
 
@@ -332,6 +359,7 @@ impl HostController {
     ) {
         let started = std::time::Instant::now();
         let events = self.memory.ingest(obs);
+        self.prefer_weapon = None;
         let touching_use = obs
             .objectives
             .iter()
@@ -496,11 +524,13 @@ impl HostController {
     /// outcome; movement and looking stay with the task.
     fn apply_weapon_skill(&mut self, obs: &BotObservation) {
         // An interaction already under way is not displaced by an empty magazine.
-        self.weapon.update(obs, !self.intent.use_button);
+        self.weapon
+            .update(obs, !self.intent.use_button, self.prefer_weapon);
         self.intent.weapon = self.weapon.requested_weapon();
         self.intent.reload = self.weapon.wants_reload();
         if self.intent.weapon.is_some() {
             self.intent.fire = false;
+            self.intent.melee_at = None;
         }
         if self.intent.weapon.is_some() || self.intent.reload {
             self.intent.sprint = false;
@@ -598,7 +628,10 @@ impl HostController {
             },
             -1.0,
         ];
-        if seen && obs.self_state.clip_total() == 0 {
+        // Backing off to reload or switch only makes sense while there is one
+        // to make. A bot with nothing left to load stays in the fight and
+        // closes in with its melee, as a player out of ammunition knifes.
+        if seen && obs.self_state.clip_total() == 0 && self.rearming(obs) {
             scores[2] = 30.0;
             scores[3] = 100.0;
         }
@@ -658,6 +691,13 @@ impl HostController {
                 TaskKind::TouchObj => SwitchReason::ObjectiveReachable,
             },
         }
+    }
+
+    /// A reload or a weapon change is under way or about to start.
+    fn rearming(&self, obs: &BotObservation) -> bool {
+        self.weapon.status() == WeaponStatus::Running
+            || obs.self_state.weapon_action == WeaponAction::Reloading
+            || crate::weapon::choose(obs).is_some()
     }
 
     fn intent_for(
@@ -758,6 +798,13 @@ impl HostController {
         if self.wounded(obs) {
             return self.fight_break(obs, world, nav, astar_budget, target);
         }
+        let range = dist2(obs.self_state.origin, target.origin).sqrt();
+        // A riot shield is fought with by bashing, and a bot with no gun it
+        // can use at this range has only its knife.
+        if obs.holds_shield() || !obs.armed(Some(range)) {
+            return self.fight_melee(obs, world, nav, astar_budget, target);
+        }
+        self.shield_far = 0;
         // Perception can see a head over cover while the chest is occluded.
         // Aim only at a point validated by the weapon trace, not sight alone.
         world.enter(QuerySubsystem::Tactical);
@@ -795,14 +842,13 @@ impl HostController {
                 }
             }
         }
-        let fire = self.authorize_fire(
-            obs.tick >= self.reaction_until
-                && can_shoot(obs, target)
-                && fresh_contact(obs, target)
-                && shot_allowed(shot, target.id),
-            target,
-        );
-        let range = dist2(obs.self_state.origin, target.origin).sqrt();
+        let attack = obs.tick >= self.reaction_until
+            && fresh_contact(obs, target)
+            && shot_allowed(shot, target.id);
+        // An enemy in knife reach is knifed, whatever the gun: one stab kills.
+        let knife = attack && crate::motor::in_melee_reach(obs.self_state.origin, target.origin);
+        let fire =
+            self.authorize_fire(attack && (knife || can_shoot(obs, target)), target) && !knife;
         let hold = self.hold_range(obs);
         let (move_mode, path, move_goal) = self.fight_position(
             obs,
@@ -853,9 +899,102 @@ impl HostController {
             desired_range: Some(hold),
             move_mode,
             fire,
+            melee_at: knife.then_some(target.origin),
             path,
             ..BotIntent::default()
         }
+    }
+
+    /// The fight of a bot whose weapon is its melee: walk up to the enemy and
+    /// bash (riot shield) or knife it. MW2 riot-shield players close in behind
+    /// the shield and bash; out of reach they take out the sidearm.
+    fn fight_melee(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
+        astar_budget: &mut u32,
+        target: Contact,
+    ) -> BotIntent {
+        let here = obs.self_state.origin;
+        let aim_at = [target.origin[0], target.origin[1], target.origin[2] + 40.0];
+        world.enter(QuerySubsystem::Tactical);
+        let shot = world.shot_ray(obs.eye(), aim_at, obs.self_state.id);
+        let range = dist_xy(here, target.origin);
+        let melee = self.authorize_fire(
+            obs.tick >= self.reaction_until
+                && fresh_contact(obs, target)
+                && shot_allowed(shot, target.id)
+                && range <= MELEE_ARM_IN,
+            target,
+        );
+        let (move_mode, path, move_goal) =
+            self.melee_approach(obs, world, nav, astar_budget, target.origin, range);
+        let failed = matches!(
+            path,
+            PathOutcome::Unreachable | PathOutcome::IncompleteGraph
+        );
+        if obs.holds_shield() {
+            self.shield_far = if failed || range > SIDEARM_RANGE_IN {
+                self.shield_far.saturating_add(1)
+            } else {
+                0
+            };
+            if self.shield_far >= SIDEARM_THINKS {
+                self.prefer_weapon =
+                    crate::weapon::sidearm(obs, Some(range)).map(|to| WeaponAct::Switch { to });
+            }
+        }
+        if failed && !melee {
+            // Out of reach with nothing to shoot it with: go elsewhere rather
+            // than stand in front of it.
+            self.task = Task {
+                kind: TaskKind::Hunt,
+                reason: SwitchReason::PathFailed,
+            };
+            return self.hunt(obs, world, nav, astar_budget);
+        }
+        BotIntent {
+            look_at: Some(aim_at),
+            move_goal,
+            desired_range: Some(MELEE_CLOSE_IN),
+            move_mode,
+            melee_at: melee.then_some(target.origin),
+            path,
+            ..BotIntent::default()
+        }
+    }
+
+    /// Closing in for a melee: stop in reach, walk straight across a clear
+    /// floor, otherwise follow the route without re-planning for every step a
+    /// moving enemy takes.
+    fn melee_approach(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
+        astar_budget: &mut u32,
+        at: [f32; 3],
+        range: f32,
+    ) -> (MoveMode, PathOutcome, Option<[f32; 3]>) {
+        let here = obs.self_state.origin;
+        let same_floor = (at[2] - here[2]).abs() <= nav::STEP_Z_IN * 2.0;
+        if range <= MELEE_CLOSE_IN && same_floor {
+            return (MoveMode::Hold, PathOutcome::Clear, Some(here));
+        }
+        if range <= MELEE_DIRECT_IN
+            && same_floor
+            && world.walk_hull(here, at) == Ok(WalkSample::Clear)
+        {
+            return (MoveMode::Walk, PathOutcome::Clear, Some(at));
+        }
+        let goal = self
+            .route_goal
+            .filter(|goal| {
+                !self.committed.is_empty() && dist2(*goal, at) <= MELEE_REPLAN_IN * MELEE_REPLAN_IN
+            })
+            .unwrap_or(at);
+        self.route(here, goal, world, nav, astar_budget)
     }
 
     fn pick_fight_target(&self, obs: &BotObservation) -> Option<Contact> {
@@ -1727,5 +1866,217 @@ mod use_objective_tests {
             ..at_bomb
         };
         assert!(!too_late_to_defuse(&cover, false, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod weapon_fight_tests {
+    use super::*;
+    use crate::observation::{SelfState, Stance, WeaponClass, WeaponFacts, WeaponSlot};
+    use crate::query::HullTrace;
+    use playerstate_iw4::buttons;
+    use sim::{ClientId, LifeSequence};
+
+    /// Open ground: every ray and every hull trace is clear.
+    struct OpenGround;
+
+    impl WorldQuery for OpenGround {
+        fn sight_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn shot_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn hull_trace(&mut self, _: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
+            Ok(HullTrace {
+                fraction: 1.0,
+                normal: [0.0, 0.0, 1.0],
+                endpos: end,
+                startsolid: false,
+            })
+        }
+    }
+
+    const SHIELD: u16 = 836;
+    const USP: u16 = 1123;
+
+    fn gun(weapon: u16, clip: i32, stock: i32) -> WeaponSlot {
+        WeaponSlot {
+            weapon,
+            class: WeaponClass::Smg,
+            facts: WeaponFacts {
+                selectable: true,
+                bullet: true,
+                semi_auto: true,
+                clip_size: 12,
+                fire_time_ms: 100,
+                ..WeaponFacts::default()
+            },
+            clip,
+            stock,
+            akimbo: false,
+            clip_left: 0,
+        }
+    }
+
+    fn shield() -> WeaponSlot {
+        WeaponSlot {
+            weapon: SHIELD,
+            class: WeaponClass::Shield,
+            facts: WeaponFacts {
+                selectable: true,
+                shield: true,
+                clip_size: 1,
+                ..WeaponFacts::default()
+            },
+            clip: 1,
+            stock: 0,
+            akimbo: false,
+            clip_left: 0,
+        }
+    }
+
+    /// A bot at the origin facing +x, holding `weapon`, with an enemy in view
+    /// `range` units ahead.
+    fn facing_enemy(
+        tick: u32,
+        weapon: WeaponSlot,
+        inventory: Vec<WeaponSlot>,
+        range: f32,
+    ) -> BotObservation {
+        let enemy = [range, 0.0, 0.0];
+        BotObservation {
+            tick,
+            time_ms: tick as i32 * 50,
+            self_state: SelfState {
+                life_sequence: LifeSequence(1),
+                id: ClientId(3),
+                lifecycle: ClientLifecycle::Alive,
+                origin: [0.0; 3],
+                viewangles: [0.0; 3],
+                delta_angles: [0.0; 3],
+                view_height: 60.0,
+                stance: Stance::Stand,
+                health: 100,
+                weapon: weapon.weapon,
+                weapon_class: weapon.class,
+                weapon_action: crate::observation::WeaponAction::Ready,
+                ammo_clip: weapon.clip,
+                ammo_stock: weapon.stock,
+                team: 1,
+                linked: false,
+                akimbo: false,
+                ammo_clip_left: 0,
+            },
+            inventory,
+            seen: vec![Contact {
+                id: ClientId(0),
+                origin: enemy,
+                source: KnowledgeSource::CurrentlySeen,
+                seen_tick: tick,
+                confidence: 1.0,
+            }],
+            unsensed: Vec::new(),
+            events: Vec::new(),
+            objective: None,
+            objectives: Vec::new(),
+        }
+    }
+
+    /// Commands over `ticks` ticks of the same scene.
+    fn run(
+        bot: &mut HostController,
+        ticks: u32,
+        scene: impl Fn(u32) -> BotObservation,
+    ) -> Vec<UserCmd> {
+        (1..=ticks)
+            .map(|tick| bot.drive(&scene(tick), &mut OpenGround, 50))
+            .collect()
+    }
+
+    #[test]
+    fn a_shield_bot_walks_up_and_bashes_instead_of_clicking_fire() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let inventory = vec![shield(), gun(USP, 12, 24)];
+        let far = run(&mut bot, 12, |tick| {
+            facing_enemy(tick, shield(), inventory.clone(), 150.0)
+        });
+        assert_eq!(bot.task().kind, TaskKind::Fight);
+        assert_eq!(bot.intent().move_mode, MoveMode::Walk, "{:?}", bot.intent());
+        assert!(far.iter().all(|cmd| cmd.buttons & buttons::ATTACK == 0));
+        assert!(
+            far.iter()
+                .all(|cmd| cmd.forwardmove > 0 || cmd.buttons & buttons::MELEE_CHARGE != 0)
+        );
+        let close = run(&mut bot, 12, |tick| {
+            facing_enemy(12 + tick, shield(), inventory.clone(), 50.0)
+        });
+        let bashes: Vec<bool> = close
+            .iter()
+            .map(|cmd| cmd.buttons & buttons::MELEE_CHARGE != 0)
+            .collect();
+        assert!(bashes.iter().any(|b| *b), "{bashes:?}");
+        // Every bash is its own press.
+        assert!(bashes.windows(2).all(|w| !(w[0] && w[1])), "{bashes:?}");
+        assert!(close.iter().all(|cmd| cmd.buttons & buttons::ATTACK == 0));
+    }
+
+    #[test]
+    fn a_shield_bot_takes_out_its_sidearm_against_a_distant_enemy() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let inventory = vec![shield(), gun(USP, 12, 24)];
+        run(&mut bot, 80, |tick| {
+            facing_enemy(tick, shield(), inventory.clone(), 900.0)
+        });
+        assert_eq!(bot.intent().weapon, Some(USP), "{:?}", bot.intent());
+    }
+
+    #[test]
+    fn a_dry_bot_closes_in_to_knife_and_never_backs_off() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let dry = gun(USP, 0, 0);
+        let cmds = run(&mut bot, 12, |tick| {
+            facing_enemy(tick, dry, vec![dry], 300.0)
+        });
+        assert_eq!(bot.task().kind, TaskKind::Fight);
+        assert_eq!(bot.intent().move_mode, MoveMode::Walk);
+        assert!(cmds.iter().all(|cmd| cmd.buttons & buttons::CROUCH == 0));
+        let close = run(&mut bot, 12, |tick| {
+            facing_enemy(12 + tick, dry, vec![dry], 45.0)
+        });
+        assert!(
+            close
+                .iter()
+                .any(|cmd| cmd.buttons & buttons::MELEE_CHARGE != 0)
+        );
+    }
+
+    #[test]
+    fn a_pistol_bot_taps_and_knifes_in_reach() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 12, 24);
+        let cmds = run(&mut bot, 20, |tick| {
+            facing_enemy(tick, usp, vec![usp], 200.0)
+        });
+        let fire: Vec<bool> = cmds
+            .iter()
+            .map(|cmd| cmd.buttons & buttons::ATTACK != 0)
+            .collect();
+        assert!(fire.iter().filter(|f| **f).count() >= 3, "{fire:?}");
+        assert!(fire.windows(2).all(|w| !(w[0] && w[1])), "{fire:?}");
+        let close = run(&mut bot, 12, |tick| {
+            facing_enemy(20 + tick, usp, vec![usp], 50.0)
+        });
+        assert!(
+            close
+                .iter()
+                .any(|cmd| cmd.buttons & buttons::MELEE_CHARGE != 0)
+        );
+        assert!(
+            close.iter().all(|cmd| cmd.buttons & buttons::ATTACK == 0
+                || cmd.buttons & buttons::MELEE_CHARGE == 0)
+        );
     }
 }

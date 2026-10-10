@@ -16,6 +16,16 @@ const PITCH_LIMIT: f32 = 70.0;
 /// own gap in that band; the weapon's fire time is the floor.
 const TAP_MIN_MS: i32 = 150;
 const TAP_SPREAD_MS: i32 = 100;
+/// A melee needs a fresh press each time (weapon_iw4 melee.rs). A press while
+/// the last swing still runs is ignored, so the gap only paces the presses.
+const MELEE_GAP_MIN_MS: i32 = 400;
+const MELEE_GAP_SPREAD_MS: i32 = 150;
+/// player_meleeRange is 64 from the eye; the target's hull adds a little, the
+/// bot's aim error takes some back.
+pub const MELEE_REACH_IN: f32 = 60.0;
+/// The lunge reaches enemies this far away, as the human client asks for it
+/// (net client melee_charge_target, AIM_AUTOMELEE_RANGE).
+pub const LUNGE_REACH_IN: f32 = 128.0;
 
 #[derive(Clone, Debug)]
 pub struct Motor {
@@ -30,6 +40,8 @@ pub struct Motor {
     armed: Option<sim::LifeSequence>,
     trigger: Trigger,
     tap_ms: i32,
+    melee: Trigger,
+    melee_gap_ms: i32,
 }
 
 /// The fire button over successive commands. A single-shot weapon fires once
@@ -72,6 +84,9 @@ impl Motor {
             armed: None,
             trigger: Trigger::default(),
             tap_ms: TAP_MIN_MS + (((seed >> 24) & 0xff) as i32 * TAP_SPREAD_MS) / 255,
+            melee: Trigger::default(),
+            melee_gap_ms: MELEE_GAP_MIN_MS
+                + (((seed >> 32) & 0xff) as i32 * MELEE_GAP_SPREAD_MS) / 255,
         }
     }
 
@@ -114,6 +129,7 @@ impl Motor {
             self.pitch = angle_subtract(obs.self_state.viewangles[0], 0.0);
             self.armed = Some(obs.self_state.life_sequence);
             self.trigger = Trigger::default();
+            self.melee = Trigger::default();
         }
         let dt = dt_ms.max(1) as f32;
         if let Some(at) = intent.look_at {
@@ -176,7 +192,25 @@ impl Motor {
             ..UserCmd::default()
         };
         let held = obs.held();
-        let want_fire = intent.fire && self.weapon_on_target(obs, intent);
+        let lunge = held.is_some_and(|slot| slot.facts.lunge);
+        let reach = intent
+            .melee_at
+            .and_then(|at| melee_reach(obs.self_state.origin, at, lunge));
+        let on_target = self.weapon_on_target(obs, intent);
+        if self.melee.pull(
+            reach.is_some() && on_target,
+            true,
+            obs.time_ms,
+            self.melee_gap_ms,
+        ) {
+            cmd.buttons |= buttons::MELEE_CHARGE;
+            if let Some(Some((yaw, dist))) = reach {
+                cmd.melee_charge_yaw = yaw;
+                cmd.melee_charge_dist = dist;
+            }
+        }
+        // Never fire and swing on the same command.
+        let want_fire = intent.fire && on_target && cmd.buttons & buttons::MELEE_CHARGE == 0;
         let gap_ms = self
             .tap_ms
             .max(held.map_or(0, |slot| slot.facts.fire_time_ms));
@@ -203,6 +237,7 @@ impl Motor {
             && forwardmove > 110
             && rightmove.abs() < 45
             && !intent.fire
+            && intent.melee_at.is_none()
             && !intent.use_button
             && !intent.reload
             && !intent.crouch
@@ -223,6 +258,32 @@ impl Motor {
         angle_subtract(desire[1], self.yaw).abs() <= FIRE_CONE_DEG
             && (desire[0] - self.pitch).abs() <= FIRE_CONE_DEG
     }
+}
+
+/// An enemy at `at` is within a plain swing of a bot at `here`.
+pub fn in_melee_reach(here: [f32; 3], at: [f32; 3]) -> bool {
+    melee_reach(here, at, false).is_some()
+}
+
+/// Whether an enemy standing at `at` is in melee reach of a bot standing at
+/// `here`: `Some(None)` for a plain swing, `Some(Some((yaw, dist)))` for a lunge
+/// that asks the simulation to carry the bot `dist` units along `yaw`, the
+/// quantities the human client sends with its melee press.
+fn melee_reach(here: [f32; 3], at: [f32; 3], lunge: bool) -> Option<Option<(f32, u8)>> {
+    let delta = [at[0] - here[0], at[1] - here[1], at[2] - here[2]];
+    let planar = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
+    if delta[2].abs() > 48.0 {
+        return None;
+    }
+    if planar <= MELEE_REACH_IN {
+        return Some(None);
+    }
+    let dist = dist2(here, at).sqrt();
+    if !lunge || planar > LUNGE_REACH_IN || dist > LUNGE_REACH_IN {
+        return None;
+    }
+    let yaw = math_iw4::vec_to_yaw(delta[0], delta[1]);
+    Some(Some((yaw, dist as u8)))
 }
 
 fn look_angles(from: [f32; 3], to: [f32; 3]) -> [f32; 3] {
@@ -302,6 +363,21 @@ mod tests {
         assert_eq!(presses(true, 0, 4), [true, false, true, false]);
         // A long fire time (a bolt-action rifle) spaces the presses out.
         assert_eq!(presses(true, 1000, 22).iter().filter(|p| **p).count(), 2);
+    }
+
+    #[test]
+    fn melee_swings_in_reach_and_lunges_beyond_it() {
+        let here = [0.0, 0.0, 0.0];
+        assert_eq!(melee_reach(here, [50.0, 0.0, 0.0], false), Some(None));
+        assert_eq!(melee_reach(here, [50.0, 0.0, 0.0], true), Some(None));
+        assert_eq!(melee_reach(here, [100.0, 0.0, 0.0], false), None);
+        let Some(Some((yaw, dist))) = melee_reach(here, [0.0, 100.0, 0.0], true) else {
+            panic!("a lunge at 100 units");
+        };
+        assert!((yaw - 90.0).abs() < 0.01 && dist == 100, "{yaw} {dist}");
+        assert_eq!(melee_reach(here, [140.0, 0.0, 0.0], true), None);
+        // Another floor is out of reach however close across.
+        assert_eq!(melee_reach(here, [20.0, 0.0, 80.0], true), None);
     }
 
     #[test]

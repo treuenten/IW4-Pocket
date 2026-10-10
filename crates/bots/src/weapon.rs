@@ -89,7 +89,14 @@ impl WeaponSkill {
 
     /// One decision slice. `allow_start` is the caller's veto: an interaction
     /// close to completion is not displaced merely because a magazine is empty.
-    pub fn update(&mut self, obs: &BotObservation, allow_start: bool) -> WeaponStatus {
+    /// `prefer` is a change the fight asks for (a riot shield bot taking out its
+    /// sidearm); a magazine that needs attention comes first.
+    pub fn update(
+        &mut self,
+        obs: &BotObservation,
+        allow_start: bool,
+        prefer: Option<WeaponAct>,
+    ) -> WeaponStatus {
         if let Some(mut commitment) = self.commitment {
             let outcome = commitment.progress(obs);
             self.commitment = Some(commitment);
@@ -108,7 +115,11 @@ impl WeaponSkill {
         if !allow_start || obs.tick < self.retry_after_tick {
             return self.status;
         }
-        let Some(act) = choose(obs) else {
+        let prefer = prefer.filter(|act| match *act {
+            WeaponAct::Switch { to } => to != obs.self_state.weapon && obs.owns(to),
+            WeaponAct::Reload => true,
+        });
+        let Some(act) = choose(obs).or(prefer) else {
             return self.status;
         };
         self.commitment = Some(Commitment::begin(act, obs));
@@ -278,6 +289,19 @@ pub(crate) fn choose(obs: &BotObservation) -> Option<WeaponAct> {
                 .filter(|slot| slot.stock > 0),
         ),
     }
+}
+
+/// The gun a riot-shield bot takes out against an enemy `range` away: a usable
+/// gun with rounds anywhere, the quickest to raise.
+pub(crate) fn sidearm(obs: &BotObservation, range: Option<f32>) -> Option<u16> {
+    let held = held_slot(obs);
+    obs.inventory
+        .iter()
+        .filter(|slot| slot.weapon != obs.self_state.weapon && slot.is_armed_gun())
+        .filter(|slot| slot.usable_at(range))
+        .map(|slot| (slot.switch_ms(&held), slot.weapon))
+        .min()
+        .map(|(_, to)| to)
 }
 
 #[cfg(test)]
@@ -457,6 +481,13 @@ mod tests {
         assert_eq!(choose(&obs), None);
         assert!(!obs.held_gun_loaded());
         assert!(obs.armed(Some(150.0)));
+        assert_eq!(sidearm(&obs, Some(700.0)), Some(USP));
+        // The fight may ask for the sidearm; the skill commits to it.
+        let mut skill = WeaponSkill::default();
+        assert_eq!(skill.update(&obs, true, None), WeaponStatus::Idle);
+        let take_out = Some(WeaponAct::Switch { to: USP });
+        assert_eq!(skill.update(&obs, true, take_out), WeaponStatus::Running);
+        assert_eq!(skill.requested_weapon(), Some(USP));
         // A shield is never a gun to switch to either.
         let obs = spent_launcher(vec![slot(USP, true, 0, 0), shield(SHIELD)]);
         let obs = holding(obs, USP);

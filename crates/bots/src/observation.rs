@@ -55,6 +55,8 @@ pub enum WeaponClass {
     Shotgun,
     /// Keeps the launcher's own blast away from the bot.
     Launcher,
+    /// A riot shield fights at melee range.
+    Shield,
 }
 
 impl WeaponClass {
@@ -66,6 +68,7 @@ impl WeaponClass {
             Self::Assault => 160.0,
             Self::Smg => 112.0,
             Self::Shotgun => 72.0,
+            Self::Shield => 48.0,
         }
     }
 
@@ -90,9 +93,8 @@ impl WeaponClass {
             UniqueGroup::Shotgun => Self::Shotgun,
             UniqueGroup::Smg | UniqueGroup::MachinePistol | UniqueGroup::Pistol => Self::Smg,
             UniqueGroup::Projectile => Self::Launcher,
-            UniqueGroup::Assault | UniqueGroup::Riot | UniqueGroup::Cqb | UniqueGroup::Special => {
-                Self::Assault
-            }
+            UniqueGroup::Riot => Self::Shield,
+            UniqueGroup::Assault | UniqueGroup::Cqb | UniqueGroup::Special => Self::Assault,
         }
     }
 }
