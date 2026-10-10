@@ -163,9 +163,14 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     }
 
     let match_data = std::mem::take(&mut world.resource_mut::<Runtime>().engine.match_data);
+    // Precache survives map_restart: the stock gametype precaches some assets
+    // (the damage_heavy rumble among them) only in its first-round block, and
+    // a repeat precache must hand back the same index.
+    let precached = std::mem::take(&mut world.resource_mut::<Runtime>().precached);
     reset(world);
     {
         let mut runtime = world.resource_mut::<Runtime>();
+        runtime.precached = precached;
         runtime.dvars = dvars;
         runtime.local_presentation_dvars = local_presentation_dvars;
         runtime.local_presentation_client = local_presentation_client;
