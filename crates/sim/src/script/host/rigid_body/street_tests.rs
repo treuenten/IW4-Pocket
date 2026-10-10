@@ -404,6 +404,8 @@ struct Outcome {
     stuck_speed_gain: f32,
     travel: f32,
     flat: bool,
+    /// Standing on an edge on the floor: its thinnest axis lies level.
+    on_edge: bool,
 }
 
 /// Runs `body` the way Mechanics does: a 50 ms step a tick, sleeping when
@@ -483,6 +485,16 @@ fn simulate(street: &Street, mut body: RigidBody, efs: f32, blasts: &[Blast]) ->
         sweep(body.center, body.center, body.sweep_half(body.rotation)).start_solid;
     out.travel = (body.center - start).length();
     out.flat = super::nearest_face(body.rotation, Vec3::Z).is_some();
+    let thin = (0..3).fold(0, |best, k| {
+        if body.half[k] < body.half[best] {
+            k
+        } else {
+            best
+        }
+    });
+    let axes = Mat3::from_quat(body.rotation);
+    let thin_up = [axes.x_axis, axes.y_axis, axes.z_axis][thin].z.abs();
+    out.on_edge = thin_up < 0.5 && out.final_low - out.final_floor < 1.0;
     out
 }
 
@@ -603,6 +615,7 @@ fn random_car(rng: &mut Lcg) -> (Vec3, f32) {
 fn thrown_car_parts_stay_on_top_of_the_street_and_come_to_rest() {
     let mut rng = Lcg(0x5eed_ca75);
     let mut tally = Tally::default();
+    let (mut flat_parts, mut on_edge) = (0u32, 0u32);
     for case in 0..120 {
         let (car, car_yaw) = random_car(&mut rng);
         let street = Street::new(car, car_yaw);
@@ -623,10 +636,18 @@ fn thrown_car_parts_stay_on_top_of_the_street_and_come_to_rest() {
                 car.y,
                 second.is_some()
             );
+            if part.phys.mass >= HOOD.mass {
+                flat_parts += 1;
+                on_edge += u32::from(out.on_edge);
+            }
             tally.check(label, &out, false);
         }
     }
     tally.report("car parts");
+    // Doors and hoods end lying down; a few may stand leaning on the car or
+    // a wall, but not standing free on an edge as a matter of course.
+    eprintln!("doors and hoods standing on an edge on the floor: {on_edge} of {flat_parts}");
+    assert!(on_edge * 30 <= flat_parts, "{on_edge} of {flat_parts}");
 }
 
 /// A part spawned inside a clip with a slow or downward push: it has to

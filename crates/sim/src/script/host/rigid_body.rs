@@ -31,9 +31,15 @@ const UNSTICK_MAX_LIFT: f32 = 16.0;
 pub(crate) const LAUNCH_FORCE_SCALE: f32 = 1.0;
 /// Inferred cap on spin, in rad/s (about 860 degrees a second).
 pub(crate) const MAX_ANG_SPEED: f32 = 15.0;
-/// Inferred guard for very light presets (the coupe mirrors' can_metal is
-/// 0.1): no part moves faster than this, launched, pushed or falling.
-const MAX_SPEED: f32 = 1500.0;
+/// Inferred guard for light presets: no launch, blast or contact leaves a
+/// part faster than this. With the real presets a mirror (bucket_metal,
+/// mass 6) would leave at up to 1,500 u/s and land 2,500 units away, and
+/// the coupe mirrors' can_metal (mass 0.1) faster still; doors and hoods
+/// stay under it.
+const MAX_SPEED: f32 = 800.0;
+/// Fastest a part falls: a care package dropped from the helicopter is
+/// well under it; a part that has left the world is not.
+const MAX_FALL_SPEED: f32 = 3000.0;
 /// Longest a part spawned inside the world (its own car's clip) takes to fly
 /// out of it; after that it is moved to the nearest clear place.
 const ESCAPE_MAX_S: f32 = 0.5;
@@ -56,6 +62,12 @@ const SETTLE_KEEP: f32 = 0.7;
 /// A part resting within 15 degrees of a face turns onto it over about this
 /// long (inferred), rather than rocking on the corners.
 const LEVEL_S: f32 = 0.1;
+/// A face a body can lie on has its narrower side at least this share of the
+/// height of the centre above it (tipping angle about 27 degrees).
+const BROAD_FACE: f32 = 0.5;
+/// How fast a part balanced on an edge or a narrow face is tipped off it
+/// (inferred).
+const TIP_RATE: f32 = 3.0;
 /// Inferred, as MW2's physics also stops bodies that stay busy too long: a
 /// part still tumbling on the ground this long after its last push settles.
 const LATE_SETTLE_S: f32 = 3.0;
@@ -268,7 +280,7 @@ impl RigidBody {
         terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
     ) {
         self.velocity.z -= GRAVITY * dt;
-        self.clamp_speed();
+        self.clamp_speed(MAX_FALL_SPEED);
         self.awake_s += dt;
         if self.lost || self.center.z < self.launch_z - FALL_LIMIT {
             self.lost = true;
@@ -514,7 +526,7 @@ impl RigidBody {
         // it under its centre, so holding it up adds no turn. A single
         // corner taking the whole support would rock a lying part for good.
         let lying = (ground && resting)
-            .then(|| nearest_face(self.rotation, normal))
+            .then(|| stable_face(self.rotation, self.half, normal))
             .flatten();
         if lying.is_some() {
             lever = normal * lever.dot(normal);
@@ -564,6 +576,18 @@ impl RigidBody {
             let angle = axis.dot(target).clamp(-1.0, 1.0).acos();
             let level = level.try_normalize().unwrap_or(Vec3::ZERO) * angle / LEVEL_S;
             self.spin = normal * self.spin.dot(normal) + level;
+        } else if ground
+            && resting
+            && self.velocity.length() < SETTLE_SPEED
+            && self.spin.length() < SETTLE_SPIN
+        {
+            // Coming to rest on an edge, or on a narrow face like a door on
+            // its bottom edge: balanced, but only as long as nothing at all
+            // disturbs it, and these contacts never do. Tip it over onto the
+            // nearest face it can lie on.
+            if let Some(tip) = toward_broad_face(self.rotation, self.half, normal) {
+                self.spin = normal * self.spin.dot(normal) + tip * TIP_RATE;
+            }
         }
         self.clamp_spin();
     }
@@ -612,13 +636,13 @@ impl RigidBody {
         if speed > MAX_ANG_SPEED {
             self.spin *= MAX_ANG_SPEED / speed;
         }
-        self.clamp_speed();
+        self.clamp_speed(MAX_SPEED);
     }
 
-    fn clamp_speed(&mut self) {
+    fn clamp_speed(&mut self, max: f32) {
         let speed = self.velocity.length();
-        if speed > MAX_SPEED {
-            self.velocity *= MAX_SPEED / speed;
+        if speed > max {
+            self.velocity *= max / speed;
         }
     }
 
@@ -757,6 +781,42 @@ fn nearest_face(rotation: Quat, up: Vec3) -> Option<(Vec3, Vec3)> {
         .map(|a| (a, a.dot(up).abs()))
         .fold((up, -1.0), |best, c| if c.1 > best.1 { c } else { best });
     (cos >= FACE_SNAP_COS).then(|| (axis, up * axis.dot(up).signum()))
+}
+
+/// Like [`nearest_face`], but only a face broad enough to stand on: one
+/// whose narrower side is at least half the height of the centre above it.
+/// A door on its bottom edge is within 15 degrees of a face too, but it
+/// topples from there, so it is left to its corners.
+fn stable_face(rotation: Quat, half: Vec3, up: Vec3) -> Option<(Vec3, Vec3)> {
+    let (axis, target) = nearest_face(rotation, up)?;
+    let m = Mat3::from_quat(rotation);
+    let along = [m.x_axis, m.y_axis, m.z_axis].map(|a| a.dot(axis).abs());
+    let i = (0..3).fold(0, |best, k| if along[k] > along[best] { k } else { best });
+    let height = half[i];
+    let side = (0..3)
+        .filter(|&k| k != i)
+        .map(|k| half[k])
+        .fold(f32::INFINITY, f32::min);
+    (side >= BROAD_FACE * height).then_some((axis, target))
+}
+
+/// The axis to turn about to tip a body toward the face it can lie on (see
+/// [`stable_face`]) that is nearest to lying on `up`.
+fn toward_broad_face(rotation: Quat, half: Vec3, up: Vec3) -> Option<Vec3> {
+    let m = Mat3::from_quat(rotation);
+    let axes = [m.x_axis, m.y_axis, m.z_axis];
+    let broad = |i: usize| {
+        let side = (0..3)
+            .filter(|&k| k != i)
+            .map(|k| half[k])
+            .fold(f32::INFINITY, f32::min);
+        side >= BROAD_FACE * half[i]
+    };
+    let face = (0..3)
+        .filter(|&i| broad(i))
+        .max_by(|&a, &b| axes[a].dot(up).abs().total_cmp(&axes[b].dot(up).abs()))?;
+    let axis = axes[face] * if axes[face].dot(up) < 0.0 { -1.0 } else { 1.0 };
+    axis.cross(up).try_normalize()
 }
 
 /// The orientation with the body axis nearest to vertical made exactly
