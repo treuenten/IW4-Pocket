@@ -79,6 +79,11 @@ const REPOSITION_IN: f32 = 96.0;
 const NO_START_RETRY_TICKS: u32 = 20;
 /// A threat that moves this far gets a new set of fall-back points.
 const RETREAT_REPLAN_IN: f32 = 160.0;
+/// How long a bot wedged on ground too steep to stand on pushes one way
+/// before it tries the next of the eight.
+const WEDGE_PUSH_TICKS: u32 = 10;
+/// A wedged bot pushes only where there is floor within this far below.
+const WEDGE_FLOOR_IN: f32 = 64.0;
 
 #[derive(Clone, Debug)]
 pub struct HostController {
@@ -111,6 +116,8 @@ pub struct HostController {
     progress_origin: Option<[f32; 3]>,
     progress_tick: u32,
     escape: Option<([f32; 3], u32)>,
+    /// The next of the eight directions a bot wedged on steep ground pushes.
+    wedge_turn: u32,
     /// Thinks spent pressing Use at a use objective without the script
     /// linking the player to it yet.
     use_unlinked: u32,
@@ -168,6 +175,7 @@ impl HostController {
             progress_origin: None,
             progress_tick: 0,
             escape: None,
+            wedge_turn: 0,
             use_unlinked: 0,
             prefer_weapon: None,
             shield_far: 0,
@@ -713,7 +721,8 @@ impl HostController {
     /// A short walk 64 units away, in one of eight directions, over floor a
     /// player can stand on all the way and outside every hazard volume, kept
     /// for 16 ticks. With no such step, a walk to the nearest baked node over
-    /// such floor.
+    /// such floor. A bot wedged on ground too steep to stand on pushes each
+    /// way in turn instead.
     ///
     /// The floor is checked along the whole walk, not only at its end: a
     /// step whose end was floor at the bot's height but whose middle was a
@@ -741,6 +750,45 @@ impl HostController {
             path: PathOutcome::Clear,
             ..BotIntent::default()
         };
+        let Ok(ground) = world.hull_trace(
+            [here[0], here[1], here[2] + 1.0],
+            [here[0], here[1], here[2] - 4.0],
+        ) else {
+            return None;
+        };
+        if wedged(&ground) {
+            // Movement treats a player on such a slope as in the air, so no
+            // step can be walked from here, and where two slopes meet the
+            // slide stops dead. Air control is all there is: push one way
+            // for half a second, then the next. A way with no floor within
+            // a fall's reach, or into a hazard, is passed over.
+            for _ in 0..8 {
+                let angle = (self.wedge_turn % 8) as f32 * core::f32::consts::FRAC_PI_4;
+                self.wedge_turn = self.wedge_turn.wrapping_add(3);
+                let goal = [
+                    here[0] + angle.cos() * 64.0,
+                    here[1] + angle.sin() * 64.0,
+                    here[2],
+                ];
+                if nav.is_some_and(|graph| graph.in_hazard(goal)) {
+                    continue;
+                }
+                let Ok(below) =
+                    world.hull_trace(goal, [goal[0], goal[1], goal[2] - WEDGE_FLOOR_IN])
+                else {
+                    return None;
+                };
+                if !below.startsolid && below.fraction >= 1.0 {
+                    continue;
+                }
+                self.escape = Some((goal, obs.tick + WEDGE_PUSH_TICKS));
+                // The next push follows this one at once, not a stuck period later.
+                self.progress_tick = (obs.tick + WEDGE_PUSH_TICKS).saturating_sub(STUCK_TICKS);
+                self.log_escape(obs, "wedged, pushing", goal);
+                return Some(walk(goal));
+            }
+            return None;
+        }
         let mut denied = false;
         for offset in 0..4 {
             let angle = ((salt + offset * 2) % 8) as f32 * core::f32::consts::FRAC_PI_4;
@@ -2155,6 +2203,12 @@ fn idle_search(task: TaskKind, mode: MoveMode, path: PathOutcome) -> bool {
         )
 }
 
+/// The bot stands on ground too steep to stand on: the movement code counts
+/// it as in the air, so it can neither walk nor jump from there.
+fn wedged(ground: &crate::query::HullTrace) -> bool {
+    !ground.startsolid && ground.fraction < 1.0 && ground.normal[2] < 0.7
+}
+
 /// The gun in hand can shoot at this contact: loaded, a gun the bot can fight
 /// with, and not a launcher whose blast would reach the bot at this range.
 fn can_shoot(obs: &BotObservation, target: Contact) -> bool {
@@ -2839,6 +2893,65 @@ mod weapon_fight_tests {
             step.is_none_or(|s| s.move_goal.is_some_and(|g| g[1] <= 8.0)),
             "{step:?}"
         );
+    }
+
+    #[test]
+    fn a_bot_wedged_on_steep_ground_pushes_every_way_in_turn() {
+        let mut wedge = Terrain {
+            floor: |_, _| 0.0,
+            steep: true,
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 12, 24);
+        let scene = |tick| {
+            let mut obs = facing_enemy(tick, usp, vec![usp], 300.0);
+            obs.seen.clear();
+            obs
+        };
+        let mut pushes = Vec::new();
+        for tick in 1..=200 {
+            bot.drive(&scene(tick), &mut wedge, 50);
+            let intent = bot.intent();
+            if intent.move_mode == MoveMode::Walk
+                && let Some(goal) = intent.move_goal
+                && bot.escape.is_some()
+                && pushes.last().is_none_or(|(_, last)| *last != goal)
+            {
+                pushes.push((tick, goal));
+            }
+        }
+        // The first push comes once the bot has been stuck for a while; then
+        // one every WEDGE_PUSH_TICKS, each a different direction until all
+        // eight have been tried.
+        assert!(pushes.len() >= 8, "{pushes:?}");
+        for pair in pushes.windows(2).take(8) {
+            assert!(
+                pair[1].0 - pair[0].0 <= WEDGE_PUSH_TICKS + THINK_PERIOD_TICKS,
+                "{pushes:?}"
+            );
+        }
+        let mut headings: Vec<i32> = pushes[..8]
+            .iter()
+            .map(|(_, g)| (g[1].atan2(g[0]).to_degrees().round() as i32).rem_euclid(360))
+            .collect();
+        headings.sort_unstable();
+        headings.dedup();
+        assert_eq!(headings.len(), 8, "{pushes:?}");
+        // On a wedge at a cliff's edge it never pushes out over the cliff.
+        let mut rim = Terrain {
+            floor: |x, _| if x < 32.0 { 0.0 } else { DROP },
+            steep: true,
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        let mut goals = Vec::new();
+        for tick in 1..=200 {
+            bot.drive(&scene(tick), &mut rim, 50);
+            if let Some((goal, _)) = bot.escape {
+                goals.push(goal);
+            }
+        }
+        assert!(!goals.is_empty());
+        assert!(goals.iter().all(|g| g[0] < 32.0), "{goals:?}");
     }
 
     /// Walls everywhere, counting the hull traces asked of it.
