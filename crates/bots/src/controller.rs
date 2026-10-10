@@ -697,7 +697,8 @@ impl HostController {
     }
 
     /// A short walk to clear floor 64 units away, in one of eight directions,
-    /// outside every hazard volume, kept for 16 ticks.
+    /// outside every hazard volume, kept for 16 ticks. With no such step, a
+    /// walk straight at the nearest baked node.
     fn escape_step(
         &mut self,
         obs: &BotObservation,
@@ -713,6 +714,14 @@ impl HostController {
             .0
             .wrapping_mul(3)
             .wrapping_add(obs.tick / 40);
+        let walk = |goal: [f32; 3]| BotIntent {
+            look_at: Some(goal),
+            move_goal: Some(goal),
+            move_mode: MoveMode::Walk,
+            path: PathOutcome::Clear,
+            ..BotIntent::default()
+        };
+        let mut denied = false;
         for offset in 0..4 {
             let angle = ((salt + offset * 2) % 8) as f32 * core::f32::consts::FRAC_PI_4;
             let goal = [
@@ -720,30 +729,45 @@ impl HostController {
                 here[1] + angle.sin() * 64.0,
                 here[2],
             ];
-            if nav.is_some_and(|graph| graph.in_hazard(goal))
-                || world.walk_hull(here, goal) != Ok(WalkSample::Clear)
-            {
+            if nav.is_some_and(|graph| graph.in_hazard(goal)) {
                 continue;
+            }
+            match world.walk_hull(here, goal) {
+                Ok(WalkSample::Clear) => {}
+                Ok(_) => continue,
+                Err(_) => {
+                    denied = true;
+                    continue;
+                }
             }
             let Ok(floor) = world.hull_trace(
                 [goal[0], goal[1], goal[2] + 2.0],
                 [goal[0], goal[1], goal[2] - nav::STEP_Z_IN],
             ) else {
+                denied = true;
                 continue;
             };
             if floor.startsolid || floor.fraction >= 1.0 {
                 continue;
             }
             self.escape = Some((floor.endpos, obs.tick + 16));
-            return Some(BotIntent {
-                look_at: Some(floor.endpos),
-                move_goal: Some(floor.endpos),
-                move_mode: MoveMode::Walk,
-                path: PathOutcome::Clear,
-                ..BotIntent::default()
-            });
+            return Some(walk(floor.endpos));
         }
-        None
+        if denied {
+            return None;
+        }
+        // Every step came back blocked or with no floor at this height, as
+        // midway up a flight of stairs between two baked steps, where no node
+        // is within a step's height to route from either: walk straight at
+        // the nearest node and let the movement code take the stairs.
+        let graph = nav.filter(|graph| !graph.is_empty())?;
+        let node = nav::anchor_node(graph, here)?;
+        let goal = graph.nodes[node as usize];
+        if graph.is_hazard(node as usize) || dist_xy(here, goal) <= 8.0 {
+            return None;
+        }
+        self.escape = Some((goal, obs.tick + 16));
+        Some(walk(goal))
     }
 
     fn pick_task(&mut self, obs: &BotObservation, objective: Option<ModeObjective>) -> Task {
@@ -2620,6 +2644,29 @@ mod weapon_fight_tests {
         assert_eq!(intent.move_mode, MoveMode::Walk, "{intent:?}");
         let goal = intent.move_goal.expect("a step");
         assert!((dist_xy(goal, [0.0; 3]) - 64.0).abs() < 1.0, "{goal:?}");
+    }
+
+    #[test]
+    fn a_bot_with_no_clear_step_walks_to_the_nearest_node() {
+        // Midway up a flight of stairs: baked steps 24 units above and below,
+        // every level probe blocked.
+        let graph = NavGraph {
+            nodes: vec![[0.0, 22.0, 24.0], [0.0, -26.0, -24.0], [400.0, 0.0, -24.0]],
+            component: vec![0, 0, 0],
+            ..NavGraph::default()
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 12, 24);
+        let mut alone = facing_enemy(1, usp, vec![usp], 300.0);
+        alone.seen.clear();
+        let step = bot
+            .escape_step(&alone, &mut Walled, Some(&graph))
+            .expect("a walk");
+        assert_eq!(step.move_mode, MoveMode::Walk);
+        assert_eq!(step.move_goal, Some([0.0, 22.0, 24.0]));
+        assert_eq!(bot.escape.map(|(goal, _)| goal), Some([0.0, 22.0, 24.0]));
+        // No graph, nothing to walk at.
+        assert_eq!(bot.escape_step(&alone, &mut Walled, None), None);
     }
 
     #[test]
