@@ -1304,9 +1304,11 @@ impl HostController {
         if range <= MELEE_CLOSE_IN && same_floor {
             return (MoveMode::Hold, PathOutcome::Clear, Some(here));
         }
+        // Straight at the enemy only over floor all the way: a level sweep
+        // alone passes over a gap as readily as over a floor.
         if range <= MELEE_DIRECT_IN
             && same_floor
-            && world.walk_hull(here, at) == Ok(WalkSample::Clear)
+            && nav::supported_walk(world, here, at) == Ok(WalkSample::Clear)
         {
             return (MoveMode::Walk, PathOutcome::Clear, Some(at));
         }
@@ -2801,19 +2803,30 @@ mod weapon_fight_tests {
         }
     }
 
+    /// A ledge 32 units across, then a gap 32 wide, then floor again: the
+    /// far side is floor at the bot's own height, the middle is not.
+    fn ledge(x: f32, y: f32) -> f32 {
+        let on_ledge = (-16.0..=16.0).contains(&x) && y.abs() <= 16.0;
+        if on_ledge || (x >= 48.0 && y.abs() <= 64.0) {
+            0.0
+        } else {
+            DROP
+        }
+    }
+
+    /// The same ledge with the gap bridged.
+    fn bridge(x: f32, y: f32) -> f32 {
+        if (-16.0..=100.0).contains(&x) && y.abs() <= 16.0 {
+            0.0
+        } else {
+            DROP
+        }
+    }
+
     #[test]
     fn a_step_over_a_gap_is_not_an_escape() {
-        // A ledge 32 units across, then a gap 32 wide, then floor again: the
-        // far side is floor at the bot's own height, the middle is not.
-        let mut ledge = Terrain {
-            floor: |x, y| {
-                let on_ledge = (-16.0..=16.0).contains(&x) && y.abs() <= 16.0;
-                if on_ledge || (x >= 48.0 && y.abs() <= 64.0) {
-                    0.0
-                } else {
-                    DROP
-                }
-            },
+        let mut gap = Terrain {
+            floor: ledge,
             steep: false,
         };
         let mut bot = HostController::new(0x5eed_0042);
@@ -2821,21 +2834,11 @@ mod weapon_fight_tests {
         for tick in [1, 40] {
             let mut alone = facing_enemy(tick, usp, vec![usp], 300.0);
             alone.seen.clear();
-            assert_eq!(
-                bot.escape_step(&alone, &mut ledge, None),
-                None,
-                "tick {tick}"
-            );
+            assert_eq!(bot.escape_step(&alone, &mut gap, None), None, "tick {tick}");
         }
         // Bridged, the same step is taken.
         let mut bridged = Terrain {
-            floor: |x, y| {
-                if (-16.0..=100.0).contains(&x) && y.abs() <= 16.0 {
-                    0.0
-                } else {
-                    DROP
-                }
-            },
+            floor: bridge,
             steep: false,
         };
         let mut alone = facing_enemy(40, usp, vec![usp], 300.0);
@@ -2844,6 +2847,44 @@ mod weapon_fight_tests {
             .escape_step(&alone, &mut bridged, None)
             .expect("a step along the bridge");
         assert_eq!(step.move_goal, Some([64.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_melee_bot_walks_straight_at_its_enemy_only_over_floor() {
+        // The graph is far off, so a route cannot stand in for the walk.
+        let graph = NavGraph {
+            nodes: vec![[5000.0, 0.0, 0.0]],
+            component: vec![0],
+            ..NavGraph::default()
+        };
+        let enemy = [64.0, 0.0, 0.0];
+        let obs = facing_enemy(1, shield(), vec![shield()], enemy[0]);
+        let mut gap = Terrain {
+            floor: ledge,
+            steep: false,
+        };
+        let (mode, _, _) = HostController::new(0x5eed_0042).melee_approach(
+            &obs,
+            &mut gap,
+            Some(&graph),
+            &mut 512,
+            enemy,
+            enemy[0],
+        );
+        assert_ne!(mode, MoveMode::Walk);
+        let mut bridged = Terrain {
+            floor: bridge,
+            steep: false,
+        };
+        let moved = HostController::new(0x5eed_0042).melee_approach(
+            &obs,
+            &mut bridged,
+            Some(&graph),
+            &mut 512,
+            enemy,
+            enemy[0],
+        );
+        assert_eq!(moved, (MoveMode::Walk, PathOutcome::Clear, Some(enemy)));
     }
 
     #[test]
