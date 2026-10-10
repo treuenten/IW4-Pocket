@@ -710,9 +710,15 @@ impl HostController {
         })
     }
 
-    /// A short walk to clear floor 64 units away, in one of eight directions,
-    /// outside every hazard volume, kept for 16 ticks. With no such step, a
-    /// walk straight at the nearest baked node.
+    /// A short walk 64 units away, in one of eight directions, over floor a
+    /// player can stand on all the way and outside every hazard volume, kept
+    /// for 16 ticks. With no such step, a walk to the nearest baked node over
+    /// such floor.
+    ///
+    /// The floor is checked along the whole walk, not only at its end: a
+    /// step whose end was floor at the bot's height but whose middle was a
+    /// ledge walked bots over the gorge rim on Afghan into the trigger_hurt
+    /// below.
     fn escape_step(
         &mut self,
         obs: &BotObservation,
@@ -746,7 +752,7 @@ impl HostController {
             if nav.is_some_and(|graph| graph.in_hazard(goal)) {
                 continue;
             }
-            match world.walk_hull(here, goal) {
+            match nav::supported_walk(world, here, goal) {
                 Ok(WalkSample::Clear) => {}
                 Ok(_) => continue,
                 Err(_) => {
@@ -754,34 +760,48 @@ impl HostController {
                     continue;
                 }
             }
-            let Ok(floor) = world.hull_trace(
-                [goal[0], goal[1], goal[2] + 2.0],
-                [goal[0], goal[1], goal[2] - nav::STEP_Z_IN],
-            ) else {
-                denied = true;
-                continue;
-            };
-            if floor.startsolid || floor.fraction >= 1.0 {
-                continue;
-            }
-            self.escape = Some((floor.endpos, obs.tick + 16));
-            return Some(walk(floor.endpos));
+            self.escape = Some((goal, obs.tick + 16));
+            self.log_escape(obs, "stepping", goal);
+            return Some(walk(goal));
         }
         if denied {
             return None;
         }
-        // Every step came back blocked or with no floor at this height, as
-        // midway up a flight of stairs between two baked steps, where no node
-        // is within a step's height to route from either: walk straight at
-        // the nearest node and let the movement code take the stairs.
+        // Every level step came back blocked or off the floor, as midway up a
+        // flight of stairs between two baked steps, where no node is within a
+        // step's height to route from either: walk to the nearest node, if
+        // the floor carries the bot all the way there.
         let graph = nav.filter(|graph| !graph.is_empty())?;
         let node = nav::anchor_node(graph, here)?;
         let goal = graph.nodes[node as usize];
         if graph.is_hazard(node as usize) || dist_xy(here, goal) <= 8.0 {
             return None;
         }
+        if nav::supported_walk(world, here, goal) != Ok(WalkSample::Clear) {
+            return None;
+        }
         self.escape = Some((goal, obs.tick + 16));
+        self.log_escape(obs, "walking to the nearest node", goal);
         Some(walk(goal))
+    }
+
+    /// One line per way out of a stuck spot, which the decision lines do not
+    /// show: the task and stage stay as they were.
+    fn log_escape(&self, obs: &BotObservation, how: &str, goal: [f32; 3]) {
+        let here = obs.self_state.origin;
+        diag::debug!(
+            Sim,
+            "bots: id={} tick={} stuck at ({:.0},{:.0},{:.0}) task={:?}, {how} to ({:.0},{:.0},{:.0})",
+            obs.self_state.id.0,
+            obs.tick,
+            here[0],
+            here[1],
+            here[2],
+            self.task.kind,
+            goal[0],
+            goal[1],
+            goal[2],
+        );
     }
 
     fn pick_task(&mut self, obs: &BotObservation, objective: Option<ModeObjective>) -> Task {
@@ -2670,12 +2690,125 @@ mod weapon_fight_tests {
         assert!((dist_xy(goal, [0.0; 3]) - 64.0).abs() < 1.0, "{goal:?}");
     }
 
+    /// A height field: `floor(x, y)` is the floor's height there, far below
+    /// for a drop and far above for a wall. A vertical trace lands on the
+    /// floor; any other sweeps the hull's base along and stops where the
+    /// floor rises above it. `steep` gives every floor a 70 degree slope.
+    struct Terrain {
+        floor: fn(f32, f32) -> f32,
+        steep: bool,
+    }
+
+    const DROP: f32 = -10_000.0;
+    const WALL: f32 = 10_000.0;
+
+    impl WorldQuery for Terrain {
+        fn sight_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn shot_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
+            let normal = if self.steep {
+                [0.94, 0.0, 0.34]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            let at = |fraction: f32| -> [f32; 3] {
+                std::array::from_fn(|i| start[i] + (end[i] - start[i]) * fraction)
+            };
+            let trace = |fraction: f32, startsolid: bool| HullTrace {
+                fraction,
+                normal,
+                endpos: at(fraction),
+                startsolid,
+            };
+            if start[0] == end[0] && start[1] == end[1] {
+                let floor = (self.floor)(start[0], start[1]);
+                return Ok(if floor > start[2] {
+                    trace(0.0, true)
+                } else if floor >= end[2] {
+                    trace((start[2] - floor) / (start[2] - end[2]), false)
+                } else {
+                    trace(1.0, false)
+                });
+            }
+            let samples = (dist2(start, end).sqrt() / 2.0).ceil().max(1.0) as u32;
+            for i in 0..=samples {
+                let p = at(i as f32 / samples as f32);
+                if (self.floor)(p[0], p[1]) > p[2] {
+                    return Ok(trace(i.saturating_sub(1) as f32 / samples as f32, i == 0));
+                }
+            }
+            Ok(trace(1.0, false))
+        }
+    }
+
+    #[test]
+    fn a_step_over_a_gap_is_not_an_escape() {
+        // A ledge 32 units across, then a gap 32 wide, then floor again: the
+        // far side is floor at the bot's own height, the middle is not.
+        let mut ledge = Terrain {
+            floor: |x, y| {
+                let on_ledge = (-16.0..=16.0).contains(&x) && y.abs() <= 16.0;
+                if on_ledge || (x >= 48.0 && y.abs() <= 64.0) {
+                    0.0
+                } else {
+                    DROP
+                }
+            },
+            steep: false,
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 12, 24);
+        for tick in [1, 40] {
+            let mut alone = facing_enemy(tick, usp, vec![usp], 300.0);
+            alone.seen.clear();
+            assert_eq!(
+                bot.escape_step(&alone, &mut ledge, None),
+                None,
+                "tick {tick}"
+            );
+        }
+        // Bridged, the same step is taken.
+        let mut bridged = Terrain {
+            floor: |x, y| {
+                if (-16.0..=100.0).contains(&x) && y.abs() <= 16.0 {
+                    0.0
+                } else {
+                    DROP
+                }
+            },
+            steep: false,
+        };
+        let mut alone = facing_enemy(40, usp, vec![usp], 300.0);
+        alone.seen.clear();
+        let step = bot
+            .escape_step(&alone, &mut bridged, None)
+            .expect("a step along the bridge");
+        assert_eq!(step.move_goal, Some([64.0, 0.0, 0.0]));
+    }
+
     #[test]
     fn a_bot_with_no_clear_step_walks_to_the_nearest_node() {
-        // Midway up a flight of stairs: baked steps 24 units above and below,
-        // every level probe blocked.
+        // Midway up a narrow flight of stairs, 8 units a tread 16 deep: every
+        // level probe runs into the stairs, off them or into the walls, and
+        // no node is within a step's height to route from.
+        let mut stairs = Terrain {
+            floor: |x, y| {
+                if x.abs() > 20.0 {
+                    WALL
+                } else {
+                    8.0 * (y / 16.0).floor()
+                }
+            },
+            steep: false,
+        };
         let graph = NavGraph {
-            nodes: vec![[0.0, 22.0, 24.0], [0.0, -26.0, -24.0], [400.0, 0.0, -24.0]],
+            nodes: vec![[0.0, 32.0, 16.0], [0.0, -40.0, -24.0], [400.0, 0.0, -24.0]],
             component: vec![0, 0, 0],
             ..NavGraph::default()
         };
@@ -2684,13 +2817,28 @@ mod weapon_fight_tests {
         let mut alone = facing_enemy(1, usp, vec![usp], 300.0);
         alone.seen.clear();
         let step = bot
-            .escape_step(&alone, &mut Walled, Some(&graph))
+            .escape_step(&alone, &mut stairs, Some(&graph))
             .expect("a walk");
         assert_eq!(step.move_mode, MoveMode::Walk);
-        assert_eq!(step.move_goal, Some([0.0, 22.0, 24.0]));
-        assert_eq!(bot.escape.map(|(goal, _)| goal), Some([0.0, 22.0, 24.0]));
+        assert_eq!(step.move_goal, Some([0.0, 32.0, 16.0]));
+        assert_eq!(bot.escape.map(|(goal, _)| goal), Some([0.0, 32.0, 16.0]));
         // No graph, nothing to walk at.
-        assert_eq!(bot.escape_step(&alone, &mut Walled, None), None);
+        assert_eq!(bot.escape_step(&alone, &mut stairs, None), None);
+        // The nearest node across a drop is not walked at either.
+        let mut cliff = Terrain {
+            floor: |_, y| if y > 8.0 && y < 24.0 { DROP } else { 0.0 },
+            steep: false,
+        };
+        let across = NavGraph {
+            nodes: vec![[0.0, 32.0, 0.0]],
+            component: vec![0],
+            ..NavGraph::default()
+        };
+        let step = bot.escape_step(&alone, &mut cliff, Some(&across));
+        assert!(
+            step.is_none_or(|s| s.move_goal.is_some_and(|g| g[1] <= 8.0)),
+            "{step:?}"
+        );
     }
 
     /// Walls everywhere, counting the hull traces asked of it.
