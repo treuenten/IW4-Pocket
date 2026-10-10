@@ -4,6 +4,7 @@ use crate::script::Namespace::{Function, Method};
 use crate::script::{NativeRegistry, Runtime, Value};
 use crate::world::ClientId;
 use bevy_ecs::prelude::World;
+use playerstate_iw4::ENTITYNUM_NONE;
 
 const USE_RADIUS: f32 = 128.0;
 const HINTS: [&str; 5] = [
@@ -143,6 +144,12 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
 }
 
+/// Whether a usable's hint shows on the HUD: use_hint.rs draws a script hint
+/// only for a cursor other than HINT_NONE with a hint string.
+fn shows_hint(usable: &super::entities::Usable) -> bool {
+    usable.cursor > 0 && usable.hint >= 0
+}
+
 /// Whether a usable is offered to a player: a trigger_use_touch when his hull
 /// touches it (`touches` is `Some`), anything else within the use radius of
 /// his eye.
@@ -219,11 +226,20 @@ pub(crate) fn select_usables(world: &mut World) {
             continue;
         };
         selected.insert(client, object);
-        if let Some(ps) = frame.player_mut(id)
-            && ps.cursor_hint == 0
+        // The item code has written this tick's hint: a weapon in reach, or
+        // nothing. A use trigger the player stands in takes it from a weapon.
+        let item = crate::item::hints_item(ps.cursor_hint);
+        let in_hinted_trigger = shows_hint(usable)
+            && super::triggers::in_use_trigger(&mut runtime, &frame, object, client, player);
+        let offer = super::triggers::use_offer(item, Some(object), in_hinted_trigger);
+        if (ps.cursor_hint == 0 || item)
+            && offer == super::triggers::PressTarget::Usable(object)
+            && let Some(ps) = frame.player_mut(id)
         {
             ps.cursor_hint = usable.cursor;
             ps.cursor_hint_string = usable.hint;
+            ps.cursor_hint_ent_index = ENTITYNUM_NONE;
+            ps.cursor_hint_dual_wield = 0;
         }
     }
     runtime.use_selected = selected;
@@ -260,6 +276,18 @@ mod usable_tests {
         assert!(!is_use_trigger("trigger_once"));
         assert!(!is_use_trigger("trigger_damage"));
         assert!(!is_use_trigger("script_model"));
+    }
+
+    #[test]
+    fn a_hint_shows_with_a_cursor_and_a_string() {
+        let site = |cursor, hint| super::super::entities::Usable {
+            cursor,
+            hint,
+            ..new_usable("trigger_use_touch")
+        };
+        assert!(shows_hint(&site(1, 7)));
+        assert!(!shows_hint(&site(1, -1)));
+        assert!(!shows_hint(&site(0, 7)));
     }
 
     #[test]

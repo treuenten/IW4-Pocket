@@ -595,7 +595,7 @@ pub(crate) fn is_use_trigger(classname: &str) -> bool {
 
 /// What one Use press acts on.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum PressTarget {
+pub(crate) enum PressTarget {
     /// The hint offered a dropped weapon: the item code takes the press.
     Item,
     /// The usable select_usables chose, whose hint the player saw.
@@ -604,13 +604,35 @@ enum PressTarget {
     Touched,
 }
 
+/// What the one cursor hint offers, and so what a press made under it acts
+/// on. `item` is a dropped weapon in reach, `usable` the usable
+/// select_usables chose, and `in_hinted_trigger` whether that usable is a
+/// map use trigger with a hint whose volume holds the player.
+///
+/// Such a trigger comes before the weapon. A player standing in a bomb site
+/// or on a planted bomb is offered the plant or defuse, however many guns lie
+/// there: in MW2 guns dropped on Search and Destroy and Sabotage sites are
+/// routine and never stop a plant or a defuse, and pickup by Use works away
+/// from the site. No MW2 script makes that choice, so this order is inferred
+/// from MW2 gameplay, not read from code. Anywhere else the weapon comes
+/// first, as the HUD always had it, and script model usables (care packages,
+/// a sentry to pick up) keep that order.
+pub(crate) fn use_offer(item: bool, usable: Option<u64>, in_hinted_trigger: bool) -> PressTarget {
+    match usable {
+        Some(usable) if in_hinted_trigger => PressTarget::Usable(usable),
+        _ if item => PressTarget::Item,
+        Some(usable) => PressTarget::Usable(usable),
+        None => PressTarget::Touched,
+    }
+}
+
 /// A player sees one cursor hint, and a press acts on that one thing.
 /// _gameobjects.gsc useHoldThink relies on it: it keeps the weapon held at
 /// the press as lastWeapon and switches back to it when the bar fills, so a
 /// weapon swap on the same press leaves the player holding the empty
 /// briefcase. The press follows the hint shown when it came (`cursor_hint`,
-/// set last frame), in the HUD's order: an item first, then the usable
-/// select_usables chose.
+/// set last frame). select_usables chose that hint with use_offer, so a
+/// weapon hint here means no use trigger outranked it.
 fn press_target(cursor_hint: i32, selected: Option<u64>) -> PressTarget {
     if crate::item::hints_item(cursor_hint) {
         PressTarget::Item
@@ -930,6 +952,30 @@ pub(crate) fn touch_use_reach(
     Some(reaches(runtime, frame, &volume, look_at, client, player))
 }
 
+/// Whether a map use trigger (trigger_use or trigger_use_touch) holds this
+/// player: his hull touches its volume, and he looks into it when the script
+/// asked for that. False for every other entity.
+pub(crate) fn in_use_trigger(
+    runtime: &mut Runtime,
+    frame: &FrameWorld,
+    trigger: u64,
+    client: u32,
+    player: u64,
+) -> bool {
+    if !runtime
+        .entities
+        .get(&trigger)
+        .is_some_and(|entity| is_use_trigger(&entity.classname))
+    {
+        return false;
+    }
+    let Some(volume) = volume(runtime, frame, trigger) else {
+        return false;
+    };
+    let look_at = runtime.require_look_at.contains(&trigger);
+    reaches(runtime, frame, &volume, look_at, client, player)
+}
+
 pub(crate) fn entity_bounds(world: &mut World, object: u64) -> ([f32; 3], [f32; 3]) {
     let runtime = world.resource::<Runtime>();
     if runtime.player_client(object).is_some() {
@@ -1077,6 +1123,24 @@ mod press_tests {
             PressTarget::Usable(site)
         );
         assert_eq!(press_target(hint_none, None), PressTarget::Touched);
+    }
+
+    #[test]
+    fn a_site_the_player_stands_in_outranks_a_gun() {
+        let (site, crate_model) = (42, 77);
+        let gun = true;
+        assert_eq!(use_offer(gun, Some(site), true), PressTarget::Usable(site));
+        assert_eq!(
+            use_offer(false, Some(site), true),
+            PressTarget::Usable(site)
+        );
+        assert_eq!(use_offer(gun, Some(crate_model), false), PressTarget::Item);
+        assert_eq!(use_offer(gun, None, false), PressTarget::Item);
+        assert_eq!(
+            use_offer(false, Some(crate_model), false),
+            PressTarget::Usable(crate_model)
+        );
+        assert_eq!(use_offer(false, None, false), PressTarget::Touched);
     }
 
     #[test]
