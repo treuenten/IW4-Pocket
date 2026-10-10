@@ -96,6 +96,8 @@ pub struct CommonCensus {
     pub scripts: crate::ScriptSources,
     pub scene_models: asset_world::MapXModelSceneCatalog,
     pub shared_surfaces: asset_model::SharedXModelSurfaces,
+    /// Physics presets the common zone defines, for the map's `,<name>` stand-ins.
+    pub phys_presets: Vec<asset_world::OwnedPhysPreset>,
     pub weapons: WeaponBuild,
 
     pub cac_tables: Vec<asset_game::CapturedStringTable>,
@@ -197,6 +199,7 @@ pub trait ZoneLane: Send + Sync {
         progress: &LoadProgress,
 
         shared_surfaces: asset_model::SharedXModelSurfaces,
+        common_phys_presets: &[asset_world::OwnedPhysPreset],
 
         material_seed: asset_material::MaterialCatalog,
         common_film_visions: &FilmVisionCatalog,

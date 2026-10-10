@@ -88,6 +88,7 @@ pub(super) async fn walk_prepared_match(
         mut t5_scene_models,
         material_seed,
         shared_surfaces,
+        phys_presets: common_phys_presets,
         scene_models: mut common_scene_models,
         light_defs: common_light_defs,
         pen_table: common_pen_table,
@@ -169,6 +170,7 @@ pub(super) async fn walk_prepared_match(
                     &image,
                     &progress,
                     shared_surfaces,
+                    &common_phys_presets,
                     material_seed,
                     &common_film_visions,
                 ),
@@ -543,9 +545,13 @@ pub(super) async fn walk_prepared_match(
         // The copy shares Arcs only; disabled mode adds no extra owner at all.
         let retention_batch = (budget != 0).then(|| batch.share());
         merge_image_batch(&mut global, label, batch, job, &mut report);
-        let mut retained = common.fpv_retained.lock()
+        let mut retained = common
+            .fpv_retained
+            .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let kept = retention_batch.as_ref().map_or(0, |batch| retained.keep_bounded(batch, budget));
+        let kept = retention_batch
+            .as_ref()
+            .map_or(0, |batch| retained.keep_bounded(batch, budget));
         report.push(format!(
             "{label} optional FPV next-map cache: +{:.1}MiB ({} payloads, {:.1}MiB; budget_bytes={budget}; donor batches excluded)",
             kept as f64 / (1024.0 * 1024.0),

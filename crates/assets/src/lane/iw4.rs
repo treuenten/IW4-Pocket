@@ -67,6 +67,7 @@ impl ZoneLane for Iw4Lane {
         image: &ZoneImage,
         progress: &LoadProgress,
         shared_surfaces: asset_model::SharedXModelSurfaces,
+        common_phys_presets: &[asset_world::OwnedPhysPreset],
         material_seed: asset_material::MaterialCatalog,
         common_film_visions: &super::FilmVisionCatalog,
     ) -> LoadedWorld {
@@ -117,6 +118,8 @@ impl ZoneLane for Iw4Lane {
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
         sink.map_xmodels.shared_surfaces = shared_surfaces;
+        sink.phys_presets
+            .seed_named(common_phys_presets.iter().cloned());
         sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
         sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
@@ -359,16 +362,31 @@ impl ZoneLane for Iw4Lane {
                 g.def_materials = leftover;
                 g
             });
+            // Dyn ents keep a preset stand-in as the zone stores it (all zero,
+            // so they stay still): resolving it would wake clutter that is
+            // inert today, a frame-time change of its own.
+            let mut borrowed_presets = 0usize;
             dyn_ents = match stream.clip_map() {
                 Some(geometry) => asset_world::build_dyn_ent_catalog(
                     &stream,
                     geometry,
                     |slot| map_xmodels.name_at_slot(slot).map(str::to_owned),
                     |slot| fx.name_at_slot(slot).map(str::to_owned),
-                    |slot| phys_presets.at_slot(slot).cloned(),
+                    |slot| {
+                        let stored = phys_presets.at_slot_in_zone(slot);
+                        if stored.is_some_and(|p| p.mass <= 0.0)
+                            && phys_presets.at_slot(slot).is_some_and(|p| p.mass > 0.0)
+                        {
+                            borrowed_presets += 1;
+                        }
+                        stored.cloned()
+                    },
                 ),
                 None => asset_world::DynEntCatalog::default(),
             };
+            clip_report.push(format!(
+                "dynents: {borrowed_presets} name a preset owned by an earlier zone; kept as the zone's all-zero stand-in (no physics), as before"
+            ));
             clip_stage.done();
         });
         report.extend(image_report.into_iter().flatten());
@@ -814,6 +832,10 @@ impl ZoneLane for Iw4Lane {
             stream.unsettled_offsets()
         ));
         report.push(format!(
+            "common_mp physPresets: {} named (the map's ,<name> stand-ins resolve against them)",
+            sink.phys_presets.named_presets().len()
+        ));
+        report.push(format!(
             "s2 common walk: reuse_mat={} reuse_img={} pool_mat={} pool_img={}",
             sink.materials.link_reused_materials,
             sink.materials.link_reused_images,
@@ -1095,6 +1117,7 @@ impl ZoneLane for Iw4Lane {
                 pending_images,
                 scene_models: sink.scene_models,
                 shared_surfaces: sink.shared_surfaces,
+                phys_presets: sink.phys_presets.named_presets(),
                 weapons,
                 cac_tables: sink.stats_tables.into_values().collect(),
                 fpv: fpv_meshes,
@@ -1132,6 +1155,7 @@ impl ZoneLane for Iw4Lane {
                 pending_images: None,
                 scene_models: sink.scene_models,
                 shared_surfaces: sink.shared_surfaces,
+                phys_presets: sink.phys_presets.named_presets(),
                 weapons,
                 cac_tables: sink.stats_tables.into_values().collect(),
                 fpv: fpv_meshes,

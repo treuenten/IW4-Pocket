@@ -56,6 +56,18 @@ pub struct RetainedModelCapability {
     pub bounds: Option<([f32; 3], [f32; 3])>,
 
     pub radius: Option<f32>,
+
+    /// The model's physics preset, when it names one with a real mass.
+    pub phys: Option<ModelPhys>,
+}
+
+/// The scalars of an XModel's physics preset that a launched rigid body needs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelPhys {
+    pub mass: f32,
+    pub bounce: f32,
+    pub friction: f32,
+    pub explosive_force_scale: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -654,6 +666,7 @@ mod clip_track_memo_tests {
             movement_brushes: Vec::new(),
             bounds: None,
             radius: None,
+            phys: None,
         })
     }
 

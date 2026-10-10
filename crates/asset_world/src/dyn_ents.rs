@@ -92,10 +92,18 @@ pub struct OwnedPhysPreset {
     pub per_surface_snd_alias: bool,
 }
 
+/// A zone that uses a preset owned by an earlier zone stores an all-zero
+/// stand-in named `,<name>`; the real values live where the name was defined.
+const PRESET_REFERENCE_PREFIX: char = ',';
+
 #[derive(Clone, Debug, Default)]
 pub struct PhysPresetCatalog {
     direct: HashMap<Ptr, OwnedPhysPreset>,
     aliases: HashMap<Ptr, Ptr>,
+    /// Slots holding a `,<name>` stand-in, with the stand-in itself.
+    references: HashMap<Ptr, OwnedPhysPreset>,
+    /// Real presets by name: this zone's and those seeded from earlier zones.
+    named: HashMap<String, OwnedPhysPreset>,
 }
 
 impl PhysPresetCatalog {
@@ -106,25 +114,87 @@ impl PhysPresetCatalog {
         let Some(owned) = read_phys_preset(stream, geometry) else {
             return;
         };
+        self.insert(slot, insert_slot, owned);
+    }
+
+    pub fn insert(&mut self, slot: Ptr, insert_slot: Option<Ptr>, owned: OwnedPhysPreset) {
+        if owned.name.starts_with(PRESET_REFERENCE_PREFIX) {
+            for slot in std::iter::once(slot).chain(insert_slot) {
+                self.references.insert(slot, owned.clone());
+            }
+            return;
+        }
+        self.named
+            .entry(owned.name.clone())
+            .or_insert_with(|| owned.clone());
         self.direct.insert(slot, owned.clone());
         if let Some(insert_slot) = insert_slot {
             self.direct.insert(insert_slot, owned);
         }
     }
 
+    /// Presets an earlier zone defined, for this zone's `,<name>` stand-ins.
+    pub fn seed_named(&mut self, presets: impl IntoIterator<Item = OwnedPhysPreset>) {
+        for preset in presets {
+            self.named.entry(preset.name.clone()).or_insert(preset);
+        }
+    }
+
+    /// Every real preset this catalog knows, for the zones loaded after it.
+    pub fn named_presets(&self) -> Vec<OwnedPhysPreset> {
+        let mut presets: Vec<OwnedPhysPreset> = self.named.values().cloned().collect();
+        presets.sort_by(|a, b| a.name.cmp(&b.name));
+        presets
+    }
+
     pub fn alias(&mut self, slot: Ptr, target: Ptr) {
         self.aliases.insert(slot, target);
     }
 
+    /// The preset at `slot`, with a `,<name>` stand-in resolved to the real
+    /// preset of that name; `None` when no loaded zone defined it.
     pub fn at_slot(&self, slot: Ptr) -> Option<&OwnedPhysPreset> {
+        let at = self.target(slot)?;
+        if let Some(preset) = self.direct.get(&at) {
+            return Some(preset);
+        }
+        let stand_in = self.references.get(&at)?;
+        self.named
+            .get(stand_in.name.strip_prefix(PRESET_REFERENCE_PREFIX)?)
+    }
+
+    /// The preset at `slot` as this zone stores it: a `,<name>` stand-in is
+    /// returned as the all-zero stand-in.
+    pub fn at_slot_in_zone(&self, slot: Ptr) -> Option<&OwnedPhysPreset> {
+        self.in_zone(slot)
+    }
+
+    fn in_zone(&self, slot: Ptr) -> Option<&OwnedPhysPreset> {
+        let at = self.target(slot)?;
+        self.direct.get(&at).or_else(|| self.references.get(&at))
+    }
+
+    /// The slot that holds what `slot` points at, through aliases.
+    fn target(&self, slot: Ptr) -> Option<Ptr> {
         let mut at = slot;
         for _ in 0..self.aliases.len().saturating_add(1) {
-            if let Some(preset) = self.direct.get(&at) {
-                return Some(preset);
+            if self.direct.contains_key(&at) || self.references.contains_key(&at) {
+                return Some(at);
             }
             at = *self.aliases.get(&at)?;
         }
         None
+    }
+
+    /// The launch scalars of the preset at `slot`, when it has a real mass.
+    pub fn model_phys(&self, slot: Option<Ptr>) -> Option<xmodel_runtime::ModelPhys> {
+        let preset = self.at_slot(slot?)?;
+        (preset.mass.is_finite() && preset.mass > 0.0).then_some(xmodel_runtime::ModelPhys {
+            mass: preset.mass,
+            bounce: preset.bounce,
+            friction: preset.friction,
+            explosive_force_scale: preset.explosive_force_scale,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -370,4 +440,64 @@ fn u16_at(bytes: &[u8], off: usize) -> u16 {
 
 fn i32_at(bytes: &[u8], off: usize) -> i32 {
     i32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preset(name: &str, mass: f32) -> OwnedPhysPreset {
+        OwnedPhysPreset {
+            name: name.to_owned(),
+            preset_type: 0,
+            mass,
+            bounce: if mass > 0.0 { 0.1 } else { 0.0 },
+            friction: if mass > 0.0 { 0.25 } else { 0.0 },
+            bullet_force_scale: 0.0,
+            explosive_force_scale: if mass > 0.0 { 0.18 } else { 0.0 },
+            snd_alias_prefix: String::new(),
+            pieces_spread_fraction: 0.0,
+            pieces_upward_velocity: 0.0,
+            temp_default_to_cylinder: false,
+            per_surface_snd_alias: false,
+        }
+    }
+
+    fn slot(offset: u32) -> Ptr {
+        Ptr { block: 3, offset }
+    }
+
+    #[test]
+    fn a_reference_preset_resolves_by_name_against_an_earlier_zone() {
+        let mut common = PhysPresetCatalog::default();
+        common.insert(slot(16), None, preset("car_door", 25.0));
+        let mut map = PhysPresetCatalog::default();
+        map.seed_named(common.named_presets());
+        map.insert(slot(64), Some(slot(80)), preset(",car_door", 0.0));
+        map.insert(slot(96), None, preset("car_hood", 15.0));
+        assert_eq!(map.at_slot(slot(64)).map(|p| p.mass), Some(25.0));
+        assert_eq!(map.at_slot(slot(80)).map(|p| p.mass), Some(25.0));
+        assert_eq!(map.model_phys(Some(slot(96))).map(|p| p.mass), Some(15.0));
+        let door = map.model_phys(Some(slot(64))).unwrap();
+        assert_eq!(
+            (door.bounce, door.friction, door.explosive_force_scale),
+            (0.1, 0.25, 0.18)
+        );
+    }
+
+    #[test]
+    fn an_unresolved_reference_is_not_a_preset() {
+        let mut map = PhysPresetCatalog::default();
+        map.insert(slot(64), None, preset(",car_door", 0.0));
+        assert!(map.at_slot(slot(64)).is_none());
+        assert!(map.model_phys(Some(slot(64))).is_none());
+        assert_eq!(
+            map.at_slot_in_zone(slot(64)).map(|p| p.mass),
+            Some(0.0),
+            "the stand-in itself is still there for dyn ents"
+        );
+        map.insert(slot(128), None, preset("weightless", 0.0));
+        assert!(map.at_slot(slot(128)).is_some());
+        assert!(map.model_phys(Some(slot(128))).is_none());
+    }
 }

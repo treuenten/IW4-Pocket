@@ -2516,6 +2516,7 @@ mod model_visual_tests {
             rigid_verts: 0,
             blend_verts: 0,
             packed_vertices: Vec::new(),
+            phys: None,
             radius: None,
             bounds: None,
             contents: None,
