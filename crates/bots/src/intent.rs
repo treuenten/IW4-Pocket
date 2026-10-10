@@ -37,6 +37,10 @@ pub struct BotIntent {
     /// selection is held through every phase of the change, not pulsed once.
     pub weapon: Option<u16>,
     pub path: PathOutcome,
+    /// The move goal is a point to stop on, not a waypoint to pass: the edge
+    /// a drop starts from or the end of an objective's route. The motor
+    /// slows over the last stretch instead of running past it.
+    pub arrive: bool,
 }
 
 impl Default for BotIntent {
@@ -54,6 +58,7 @@ impl Default for BotIntent {
             sprint: false,
             weapon: None,
             path: PathOutcome::None,
+            arrive: false,
         }
     }
 }

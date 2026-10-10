@@ -143,6 +143,9 @@ pub struct HostController {
     no_start: Option<([f32; 3], u32)>,
     /// The tick of the think under way.
     now: u32,
+    /// The route step last handed out when it is a point to stop on: a drop's
+    /// edge or the end of an objective's route.
+    arrive_at: Option<[f32; 3]>,
 }
 
 impl HostController {
@@ -189,6 +192,7 @@ impl HostController {
             hazard_exit: None,
             no_start: None,
             now: 0,
+            arrive_at: None,
         }
     }
 
@@ -434,6 +438,7 @@ impl HostController {
     ) {
         let started = std::time::Instant::now();
         self.now = obs.tick;
+        self.arrive_at = None;
         let events = self.memory.ingest(obs);
         self.prefer_weapon = None;
         self.ignored.retain(|(_, until)| obs.tick < *until);
@@ -511,6 +516,10 @@ impl HostController {
         let previous = self.decision.objective;
         self.decision.objective = objective.filter(|_| self.task.kind == TaskKind::TouchObj);
         self.intent = self.intent_for(obs, world, nav, astar_budget, objective);
+        self.intent.arrive = self.intent.move_mode == MoveMode::Walk
+            && self
+                .arrive_at
+                .is_some_and(|at| self.intent.move_goal == Some(at));
         self.decision.stage = if matches!(
             self.intent.path,
             PathOutcome::Blocked | PathOutcome::Unreachable
@@ -1883,6 +1892,17 @@ impl HostController {
         let Some(step) = self.committed.first().copied() else {
             return (MoveMode::Hold, PathOutcome::Clear, Some(from));
         };
+        // A drop starts at its edge, within 4 units of it, and an objective's
+        // route ends on its last node: a bot that runs at such a point at
+        // full stride overshoots it. On Afghan's gorge rim the edge of the
+        // perch at (408,3144,190) is a stride from a crack down to the
+        // trigger_hurt, and bots running up to drop from it went down the
+        // crack instead.
+        let stop_on = match self.committed.get(1) {
+            Some(next) => next.kind != nav::TraversalKind::Walk,
+            None => self.decision.objective.is_some(),
+        };
+        self.arrive_at = stop_on.then_some(step.position);
         let sample = if step.kind == nav::TraversalKind::Drop {
             nav::drop_clear(world, from, step.position)
         } else {
@@ -2865,6 +2885,54 @@ mod weapon_fight_tests {
             .escape_step(&alone, &mut bridged, None)
             .expect("a step along the bridge");
         assert_eq!(step.move_goal, Some([64.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn the_edge_a_drop_starts_from_is_a_point_to_stop_on() {
+        let edge = |to, kind| nav::NavEdge {
+            to,
+            cost: 48.0,
+            kind,
+        };
+        // Two walk-linked nodes on a ledge, a drop off its end and a walk on
+        // past the second to a node too far off to start from.
+        let graph = NavGraph {
+            nodes: vec![
+                [0.0, 0.0, 0.0],
+                [48.0, 0.0, 0.0],
+                [144.0, 0.0, -40.0],
+                [48.0, 400.0, 0.0],
+            ],
+            component: vec![0; 4],
+            adj: vec![
+                vec![edge(1, nav::TraversalKind::Walk)],
+                vec![
+                    edge(0, nav::TraversalKind::Walk),
+                    edge(2, nav::TraversalKind::Drop),
+                    edge(3, nav::TraversalKind::Walk),
+                ],
+                Vec::new(),
+                vec![edge(1, nav::TraversalKind::Walk)],
+            ],
+            ..NavGraph::default()
+        };
+        let mut world = Terrain {
+            floor: |x, _| if x <= 72.0 { 0.0 } else { -40.0 },
+            steep: false,
+        };
+        let from = [-20.0, 0.0, 0.0];
+        let mut bot = HostController::new(0x5eed_0042);
+        let moved = bot.route(from, graph.nodes[2], &mut world, Some(&graph), &mut 4096);
+        assert_eq!(
+            moved,
+            (MoveMode::Walk, PathOutcome::Clear, Some(graph.nodes[1]))
+        );
+        assert_eq!(bot.arrive_at, Some(graph.nodes[1]));
+        // The same node on the way to somewhere else is only a waypoint.
+        let mut bot = HostController::new(0x5eed_0042);
+        let moved = bot.route(from, graph.nodes[3], &mut world, Some(&graph), &mut 4096);
+        assert_eq!(moved.2, Some(graph.nodes[1]));
+        assert_eq!(bot.arrive_at, None);
     }
 
     #[test]

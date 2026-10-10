@@ -11,6 +11,12 @@ const MAX_YAW_ACCEL_DEG_PER_MS2: f32 = 0.015;
 const MAX_PITCH_ACCEL_DEG_PER_MS2: f32 = 0.01;
 const FIRE_CONE_DEG: f32 = 8.0;
 const ARRIVE_IN: f32 = 24.0;
+/// A bot arriving on a point to stop on slows over this last stretch, in
+/// proportion to what is left of it, so it stops on the point instead of a
+/// running stride past it.
+const ARRIVE_SLOW_IN: f32 = 48.0;
+/// The slowest an arriving bot walks, as a share of full speed.
+const ARRIVE_MIN_SCALE: f32 = 0.25;
 const PITCH_LIMIT: f32 = 70.0;
 /// A human taps a semi-automatic trigger every 150 to 250 ms. Each bot gets its
 /// own gap in that band; the weapon's fire time is the floor.
@@ -172,6 +178,11 @@ impl Motor {
                 goal[1] - obs.self_state.origin[1],
             ];
             (forwardmove, rightmove) = wish_to_move(self.yaw, wish);
+            if intent.arrive {
+                let scale = arrive_scale((wish[0] * wish[0] + wish[1] * wish[1]).sqrt());
+                forwardmove = (f32::from(forwardmove) * scale).round() as i8;
+                rightmove = (f32::from(rightmove) * scale).round() as i8;
+            }
         }
         // A requested weapon has to survive the whole change: the simulator
         // settles a dropping hand back to ready when the command asks for the
@@ -320,6 +331,12 @@ fn slew_vel(err: f32, vel: f32, max_rate: f32, max_accel: f32, dt: f32) -> (f32,
     (vel * dt, vel)
 }
 
+/// The share of full speed for a bot `left` units short of a point it
+/// stops on.
+fn arrive_scale(left: f32) -> f32 {
+    (left / ARRIVE_SLOW_IN).clamp(ARRIVE_MIN_SCALE, 1.0)
+}
+
 fn wish_to_move(yaw_deg: f32, wish: [f32; 2]) -> (i8, i8) {
     let len = (wish[0] * wish[0] + wish[1] * wish[1]).sqrt();
     if len < 1.0 {
@@ -351,6 +368,14 @@ mod tests {
         (0..commands)
             .map(|i| trigger.pull(true, semi_auto, i * 50, gap_ms))
             .collect()
+    }
+
+    #[test]
+    fn an_arriving_bot_slows_over_the_last_stretch() {
+        assert_eq!(arrive_scale(200.0), 1.0);
+        assert_eq!(arrive_scale(ARRIVE_SLOW_IN), 1.0);
+        assert!((arrive_scale(ARRIVE_SLOW_IN / 2.0) - 0.5).abs() < 1e-6);
+        assert_eq!(arrive_scale(2.0), ARRIVE_MIN_SCALE);
     }
 
     #[test]
