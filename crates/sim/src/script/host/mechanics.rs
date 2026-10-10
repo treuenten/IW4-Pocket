@@ -1,7 +1,9 @@
 use super::entities::Link;
+use super::rigid_body::{RigidBody, Sweep};
 use crate::script::runtime::raise;
 use crate::script::{BTreeMap, Resource, Runtime, Value};
 use bevy_ecs::prelude::World;
+use glam::Vec3;
 
 /// Script-driven entity mechanics: timed moves, launched physics bodies and
 /// entity/player links. They run before the VM each tick and settle native
@@ -13,25 +15,68 @@ pub(crate) struct Mechanics {
     bodies: BTreeMap<u64, Body>,
     slides: BTreeMap<u64, Slide>,
     finished: Vec<(u64, &'static str)>,
+    cost: BodyCost,
+    /// Models already reported as launched without a physics preset.
+    fallback_logged: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Body {
-    velocity: [f32; 3],
+    motion: BodyMotion,
     ticks: u32,
-    offset: [f32; 3],
-    mins: [f32; 3],
-    maxs: [f32; 3],
     active: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BodyMotion {
+    /// A T5 destructible piece: a box that falls until it first touches.
+    Piece {
+        velocity: [f32; 3],
+        offset: [f32; 3],
+        mins: [f32; 3],
+        maxs: [f32; 3],
+    },
+    /// A model launched by PhysicsLaunchClient/Server.
+    Rigid {
+        body: RigidBody,
+        /// Client physics: no collision with players, never crushes.
+        client: bool,
+        explosive_force_scale: f32,
+    },
+}
+
+/// A PhysicsLaunchClient/Server request, with the launched model's box and preset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaunchSpec {
+    pub origin: [f32; 3],
+    pub angles: [f32; 3],
+    pub point: [f32; 3],
+    pub force: [f32; 3],
+    pub mid: [f32; 3],
+    pub half: [f32; 3],
+    pub phys: xmodel_runtime::ModelPhys,
+    pub client: bool,
+}
+
+/// What the launched bodies cost from when the first woke to when the last slept.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct BodyCost {
+    bodies: u32,
+    ticks: u32,
+    sweeps: u64,
+    busiest_tick_us: u64,
+    total_us: u64,
 }
 
 const TICK_S: f32 = crate::MATCH_TICK_MS as f32 / 1000.0;
 const SETTLE_TICKS: u32 = 200;
-const BODY_MINS: [f32; 3] = [-12.0, -12.0, 0.0];
-const BODY_MAXS: [f32; 3] = [12.0, 12.0, 24.0];
 const EXPLOSION_FORCE: f32 = 12500.0;
 const EXPLOSION_UPBIAS: f32 = 0.5;
 const EXPLOSION_MIN_FORCE: f32 = 40.0;
+/// Inferred: the share of an explosion's push that also turns a body.
+const EXPLOSION_SPIN_SHARE: f32 = 0.25;
+/// A server body crushes only when it really came down this far in a tick.
+const CRUSH_MIN_DROP: f32 = 1.0;
 
 impl Mechanics {
     pub(crate) fn start(&mut self, object: u64, motion: Motion) {
@@ -50,17 +95,31 @@ impl Mechanics {
         }
     }
 
-    pub(crate) fn launch(&mut self, object: u64, velocity: [f32; 3]) {
+    pub(crate) fn launch(&mut self, object: u64, spec: LaunchSpec) {
         self.motions.remove(&object);
         self.slides.remove(&object);
+        let body = RigidBody::launch(
+            Vec3::from_array(spec.origin),
+            math_iw4::angles_to_axis(spec.angles),
+            Vec3::from_array(spec.mid),
+            Vec3::from_array(spec.half),
+            super::rigid_body::Phys {
+                mass: spec.phys.mass,
+                bounce: spec.phys.bounce,
+                friction: spec.phys.friction,
+            },
+            Vec3::from_array(spec.point),
+            Vec3::from_array(spec.force),
+        );
         self.bodies.insert(
             object,
             Body {
-                velocity,
+                motion: BodyMotion::Rigid {
+                    body,
+                    client: spec.client,
+                    explosive_force_scale: spec.phys.explosive_force_scale,
+                },
                 ticks: 0,
-                offset: [0.0; 3],
-                mins: BODY_MINS,
-                maxs: BODY_MAXS,
                 active: true,
             },
         );
@@ -76,14 +135,21 @@ impl Mechanics {
         self.bodies.insert(
             object,
             Body {
-                velocity,
+                motion: BodyMotion::Piece {
+                    velocity,
+                    offset,
+                    mins: half.map(|h| -h),
+                    maxs: half,
+                },
                 ticks: 0,
-                offset,
-                mins: half.map(|h| -h),
-                maxs: half,
                 active: true,
             },
         );
+    }
+
+    /// Whether `model` is new to the no-preset report.
+    pub(crate) fn note_fallback_phys(&mut self, model: &str) -> bool {
+        self.fallback_logged.insert(model.to_owned())
     }
 
     pub(crate) fn cancel(&mut self, object: u64) {
@@ -111,7 +177,10 @@ impl Mechanics {
             return slide.velocity;
         }
         if let Some(body) = self.bodies.get(&object) {
-            return body.velocity;
+            return match body.motion {
+                BodyMotion::Piece { velocity, .. } => velocity,
+                BodyMotion::Rigid { body, .. } => body.velocity.to_array(),
+            };
         }
         self.motions
             .get(&object)
@@ -131,34 +200,178 @@ impl Mechanics {
             if !runtime.entities.contains_key(object) {
                 continue;
             }
-            let Value::Vector(origin) = runtime.object_field(*object, "origin") else {
+            let at = match &body.motion {
+                BodyMotion::Rigid { body, .. } => body.center.to_array(),
+                BodyMotion::Piece { .. } => match runtime.object_field(*object, "origin") {
+                    Value::Vector(origin) => origin,
+                    _ => continue,
+                },
+            };
+            let scale = match &body.motion {
+                BodyMotion::Rigid {
+                    explosive_force_scale,
+                    ..
+                } => *explosive_force_scale,
+                BodyMotion::Piece { .. } => 1.0,
+            };
+            let Some(impulse) = explosion_impulse(
+                Vec3::from_array(at),
+                Vec3::from_array(center),
+                outer,
+                inner,
+                magnitude,
+                scale,
+            ) else {
                 continue;
             };
-            if origin.iter().any(|v| !v.is_finite()) {
-                continue;
+            let delta = Vec3::from_array(at) - Vec3::from_array(center);
+            match &mut body.motion {
+                BodyMotion::Piece { velocity, .. } => {
+                    *velocity = (glam::Vec3::from_array(*velocity) + impulse).to_array();
+                }
+                BodyMotion::Rigid { body, .. } => {
+                    // Pushed hardest on the side that faces the blast.
+                    let toward = -delta.try_normalize().unwrap_or(glam::Vec3::NEG_Z);
+                    let lever = toward * body.half.min_element();
+                    body.push(impulse, lever, EXPLOSION_SPIN_SHARE);
+                }
             }
-            let delta = glam::Vec3::from_array(origin) - glam::Vec3::from_array(center);
-            let distance = delta.length();
-            if outer <= 0.0 || distance >= outer {
-                continue;
-            }
-            let fraction = if distance <= inner {
-                1.0
-            } else {
-                (outer - distance) / (outer - inner)
-            };
-            let force = magnitude * fraction * EXPLOSION_FORCE;
-            if !force.is_finite() || force < EXPLOSION_MIN_FORCE {
-                continue;
-            }
-            let mut direction = delta.try_normalize().unwrap_or(glam::Vec3::Z);
-            direction.z += EXPLOSION_UPBIAS;
-            let impulse = direction.normalize() * force;
-            body.velocity = (glam::Vec3::from_array(body.velocity) + impulse).to_array();
             body.ticks = 0;
             body.active = true;
         }
     }
+}
+
+/// A PhysicsExplosionSphere's push on a body at `at`: full strength inside
+/// `inner`, fading to nothing at `outer`, scaled by the body's preset, tipped
+/// upward, and nothing below the minimum force.
+fn explosion_impulse(
+    at: Vec3,
+    center: Vec3,
+    outer: f32,
+    inner: f32,
+    magnitude: f32,
+    scale: f32,
+) -> Option<Vec3> {
+    if !at.is_finite() {
+        return None;
+    }
+    let delta = at - center;
+    let distance = delta.length();
+    if outer <= 0.0 || distance >= outer {
+        return None;
+    }
+    let fraction = if distance <= inner {
+        1.0
+    } else {
+        (outer - distance) / (outer - inner)
+    };
+    let force = magnitude * fraction * EXPLOSION_FORCE * scale;
+    if !force.is_finite() || force < EXPLOSION_MIN_FORCE {
+        return None;
+    }
+    let mut direction = delta.try_normalize().unwrap_or(Vec3::Z);
+    direction.z += EXPLOSION_UPBIAS;
+    Some(direction.normalize() * force)
+}
+
+/// Whether a body that came down `drop` units this tick crushes who it
+/// passed through. Client parts never do; a body that barely moved (a part
+/// at rest nudged by a blast) does not either.
+fn crushes(client: bool, drop: f32) -> bool {
+    !client && drop > CRUSH_MIN_DROP
+}
+
+/// Inferred stand-in for a model without a usable physics preset: the common
+/// car door preset (mass 25, bounce 0.1, friction 0.25, explosion scale 0.18).
+const FALLBACK_PHYS: xmodel_runtime::ModelPhys = xmodel_runtime::ModelPhys {
+    mass: 25.0,
+    bounce: 0.1,
+    friction: 0.25,
+    explosive_force_scale: 0.18,
+};
+/// The old placeholder box, for a model without bounds.
+const FALLBACK_BOX: ([f32; 3], [f32; 3]) = ([0.0, 0.0, 12.0], [12.0; 3]);
+
+/// PhysicsLaunchClient/Server: hand the model to a rigid body pushed by
+/// `force` at the world `point`. Client parts live in client physics in the
+/// original, which the server's players and bullets never meet, so they are
+/// made non-solid here.
+pub(crate) fn physics_launch(
+    world: &mut World,
+    receiver: &Value,
+    args: &[Value],
+    client: bool,
+) -> Result<Value, String> {
+    let object = super::natives::engine::entity_id(world, receiver)?;
+    let point = super::args::vector(args, 0)?;
+    let force = super::args::vector(args, 1)?;
+    if point.iter().chain(&force).any(|v| !v.is_finite()) {
+        return Err("physics launch requires a finite point and force".into());
+    }
+    let (model, origin, angles) = {
+        let mut runtime = world.resource_mut::<Runtime>();
+        let model = match runtime.object_field(object, "model") {
+            Value::String(model) => model.to_string(),
+            _ => String::new(),
+        };
+        let vector = |runtime: &mut Runtime, name| match runtime.object_field(object, name) {
+            Value::Vector(v) => v,
+            _ => [0.0; 3],
+        };
+        let origin = vector(&mut runtime, "origin");
+        let angles = vector(&mut runtime, "angles");
+        (model, origin, angles)
+    };
+    let capability = crate::frame::FrameWorld::from_world(world)
+        .model_capability(&model)
+        .flatten();
+    let (mid, half) = capability
+        .as_ref()
+        .and_then(|c| c.bounds)
+        .unwrap_or(FALLBACK_BOX);
+    let phys = match capability.as_ref().and_then(|c| c.phys) {
+        Some(phys) => phys,
+        None => {
+            if world.resource_mut::<Mechanics>().note_fallback_phys(&model) {
+                diag::warn!(
+                    Sim,
+                    "physics launch: model `{model}` has no physics preset with a mass; using the car door preset"
+                );
+            }
+            FALLBACK_PHYS
+        }
+    };
+    diag::info!(
+        Sim,
+        "physics launch: {} `{model}` force {:.0} mass {} at ({:.0},{:.0},{:.0})",
+        if client { "client" } else { "server" },
+        glam::Vec3::from_array(force).length(),
+        phys.mass,
+        origin[0],
+        origin[1],
+        origin[2]
+    );
+    world.resource_mut::<Mechanics>().launch(
+        object,
+        LaunchSpec {
+            origin,
+            angles,
+            point,
+            force,
+            mid,
+            half,
+            phys,
+            client,
+        },
+    );
+    let mut runtime = world.resource_mut::<Runtime>();
+    let entity = runtime.entities.get_mut(&object).unwrap();
+    entity.linked_to = None;
+    if client {
+        entity.solid = false;
+    }
+    Ok(Value::Undefined)
 }
 
 pub(crate) fn advance_mechanics(world: &mut World) {
@@ -212,8 +425,14 @@ fn advance_bodies(world: &mut World) {
     let mut crushed = Vec::new();
     world.resource_scope::<Mechanics, _>(|world, mut mechanics| {
         let Mechanics {
-            bodies, finished, ..
+            bodies,
+            finished,
+            cost,
+            ..
         } = &mut *mechanics;
+        let started = std::time::Instant::now();
+        let mut awake = 0u32;
+        let mut sweeps = 0u64;
         bodies.retain(|object, body| {
             if !world.resource::<Runtime>().entities.contains_key(object) {
                 return false;
@@ -221,68 +440,182 @@ fn advance_bodies(world: &mut World) {
             if !body.active {
                 return true;
             }
-            let (origin, angles) = {
-                let mut runtime = world.resource_mut::<Runtime>();
-                if !runtime.entities.contains_key(object) {
-                    return false;
+            match body.motion {
+                BodyMotion::Piece { .. } => advance_piece(world, *object, body, finished, &mut crushed),
+                BodyMotion::Rigid { .. } => {
+                    awake += 1;
+                    sweeps += u64::from(advance_rigid(world, *object, body, finished, &mut crushed));
                 }
-                match (
-                    runtime.object_field(*object, "origin"),
-                    runtime.object_field(*object, "angles"),
-                ) {
-                    (Value::Vector(o), Value::Vector(a)) => (o, a),
-                    (Value::Vector(o), _) => (o, [0.0; 3]),
-                    _ => return true,
-                }
-            };
-            body.velocity[2] -= GRAVITY * TICK_S;
-            let start: [f32; 3] = std::array::from_fn(|i| origin[i] + body.offset[i]);
-            let end: [f32; 3] = std::array::from_fn(|i| start[i] + body.velocity[i] * TICK_S);
-            let trace = crate::frame::FrameWorld::from_world(world).trace_static_world(
-                start,
-                end,
-                body.mins,
-                body.maxs,
-                crate::bullet_collision::MASK_PHYS_WORLD,
-            );
-            let fraction = if trace.startsolid != 0 {
-                0.0
-            } else {
-                trace.fraction
-            };
-            let at: [f32; 3] =
-                std::array::from_fn(|i| origin[i] + body.velocity[i] * TICK_S * fraction);
-            if body.velocity[2] < 0.0 {
-                crushed.extend(
-                    crush_victims(world, *object, origin, at, body)
-                        .into_iter()
-                        .map(|(victim, point)| (victim, *object, point)),
-                );
-            }
-            body.ticks += 1;
-            let rested = fraction < 1.0 || body.ticks >= SETTLE_TICKS;
-            let mut runtime = world.resource_mut::<Runtime>();
-            runtime.set_object_field(*object, "origin", Value::Vector(at));
-            if rested {
-                runtime.set_object_field(*object, "angles", Value::Vector([0.0, angles[1], 0.0]));
-                finished.push((*object, "physics_finished"));
-                body.velocity = [0.0; 3];
-                body.active = false;
             }
             true
         });
+        if awake > 0 {
+            let spent = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            cost.bodies = cost.bodies.max(awake);
+            cost.ticks += 1;
+            cost.sweeps += sweeps;
+            cost.total_us += spent;
+            cost.busiest_tick_us = cost.busiest_tick_us.max(spent);
+            let still_awake = bodies
+                .values()
+                .any(|b| b.active && matches!(b.motion, BodyMotion::Rigid { .. }));
+            if !still_awake {
+                diag::info!(
+                    Sim,
+                    "physics bodies: up to {} launched parts settled over {} ticks: {} sweeps, {} us in all, busiest tick {} us",
+                    cost.bodies,
+                    cost.ticks,
+                    cost.sweeps,
+                    cost.total_us,
+                    cost.busiest_tick_us
+                );
+                *cost = BodyCost::default();
+            }
+        }
     });
     for (victim, pusher, point) in crushed {
         super::players::crush_player(world, victim, pusher, point);
     }
 }
 
+type Crushed = Vec<(crate::ClientId, u64, [f32; 3])>;
+
+fn advance_piece(
+    world: &mut World,
+    object: u64,
+    body: &mut Body,
+    finished: &mut Vec<(u64, &'static str)>,
+    crushed: &mut Crushed,
+) {
+    let BodyMotion::Piece {
+        velocity,
+        offset,
+        mins,
+        maxs,
+    } = &mut body.motion
+    else {
+        return;
+    };
+    let (origin, angles) = {
+        let mut runtime = world.resource_mut::<Runtime>();
+        match (
+            runtime.object_field(object, "origin"),
+            runtime.object_field(object, "angles"),
+        ) {
+            (Value::Vector(o), Value::Vector(a)) => (o, a),
+            (Value::Vector(o), _) => (o, [0.0; 3]),
+            _ => return,
+        }
+    };
+    velocity[2] -= GRAVITY * TICK_S;
+    let start: [f32; 3] = std::array::from_fn(|i| origin[i] + offset[i]);
+    let end: [f32; 3] = std::array::from_fn(|i| start[i] + velocity[i] * TICK_S);
+    let trace = crate::frame::FrameWorld::from_world(world).trace_static_world(
+        start,
+        end,
+        *mins,
+        *maxs,
+        crate::bullet_collision::MASK_PHYS_WORLD,
+    );
+    let fraction = if trace.startsolid != 0 {
+        0.0
+    } else {
+        trace.fraction
+    };
+    let at: [f32; 3] = std::array::from_fn(|i| origin[i] + velocity[i] * TICK_S * fraction);
+    if crushes(false, origin[2] - at[2]) {
+        crushed.extend(
+            crush_victims(world, object, origin, at, *mins, *maxs)
+                .into_iter()
+                .map(|(victim, point)| (victim, object, point)),
+        );
+    }
+    body.ticks += 1;
+    let rested = fraction < 1.0 || body.ticks >= SETTLE_TICKS;
+    let mut runtime = world.resource_mut::<Runtime>();
+    runtime.set_object_field(object, "origin", Value::Vector(at));
+    if rested {
+        runtime.set_object_field(object, "angles", Value::Vector([0.0, angles[1], 0.0]));
+        finished.push((object, "physics_finished"));
+        *velocity = [0.0; 3];
+        body.active = false;
+    }
+}
+
+/// One tick of a launched rigid body; returns the sweeps it took.
+fn advance_rigid(
+    world: &mut World,
+    object: u64,
+    body: &mut Body,
+    finished: &mut Vec<(u64, &'static str)>,
+    crushed: &mut Crushed,
+) -> u32 {
+    let BodyMotion::Rigid {
+        body: rigid,
+        client,
+        ..
+    } = &mut body.motion
+    else {
+        return 0;
+    };
+    let before = (rigid.origin(), rigid.center);
+    body.ticks += 1;
+    let (report, asleep) = {
+        let frame = crate::frame::FrameWorld::from_world(world);
+        let mut sweep = |start: Vec3, end: Vec3, half: Vec3| {
+            Sweep::from_trace(&frame.trace_static_world(
+                start.to_array(),
+                end.to_array(),
+                (-half).to_array(),
+                half.to_array(),
+                crate::bullet_collision::MASK_PHYS_WORLD,
+            ))
+        };
+        let report = rigid.step(TICK_S, &mut sweep);
+        let asleep = rigid.ready_to_sleep() || body.ticks >= SETTLE_TICKS;
+        if asleep {
+            rigid.settle(&mut sweep);
+        }
+        (report, asleep)
+    };
+    let origin = rigid.origin();
+    if crushes(*client, before.1.z - rigid.center.z) {
+        let half = rigid.world_half();
+        let offset = rigid.center - origin;
+        crushed.extend(
+            crush_victims(
+                world,
+                object,
+                before.0.to_array(),
+                origin.to_array(),
+                (offset - half).to_array(),
+                (offset + half).to_array(),
+            )
+            .into_iter()
+            .map(|(victim, point)| (victim, object, point)),
+        );
+    }
+    let angles = math_iw4::axis_to_angles(rigid.axis());
+    let mut runtime = world.resource_mut::<Runtime>();
+    runtime.set_object_field(object, "origin", Value::Vector(origin.to_array()));
+    runtime.set_object_field(object, "angles", Value::Vector(angles));
+    if asleep {
+        finished.push((object, "physics_finished"));
+        body.active = false;
+    }
+    report.sweeps
+}
+
+/// Live players a body sweeping from `origin` to `at` passes through. The box
+/// is the linked brush's, if the body carries one, else `mins..maxs` around
+/// the origin.
 fn crush_victims(
     world: &mut World,
     object: u64,
     origin: [f32; 3],
     at: [f32; 3],
-    body: &Body,
+    mins: [f32; 3],
+    maxs: [f32; 3],
 ) -> Vec<(crate::ClientId, [f32; 3])> {
     let presence = world.resource::<Runtime>().entities[&object].presence;
     let frame = crate::frame::FrameWorld::from_world(world);
@@ -314,9 +647,7 @@ fn crush_victims(
                 ],
             ))
         })
-        .unwrap_or((body.mins, body.maxs));
-    let lo: [f32; 3] = std::array::from_fn(|i| origin[i].min(at[i]) + mins[i]);
-    let hi: [f32; 3] = std::array::from_fn(|i| origin[i].max(at[i]) + maxs[i]);
+        .unwrap_or((mins, maxs));
     let (pmins, pmaxs) = (
         crate::bullet_collision::PLAYER_MINS,
         crate::bullet_collision::PLAYER_MAXS,
@@ -326,9 +657,16 @@ fn crush_victims(
         if ps.pm_type >= playerstate_iw4::PM_TYPE_DEAD {
             return;
         }
-        let inside =
-            (0..3).all(|i| ps.origin[i] + pmins[i] < hi[i] && ps.origin[i] + pmaxs[i] > lo[i]);
-        if inside {
+        let lo = Vec3::from_array(std::array::from_fn(|i| ps.origin[i] + pmins[i]));
+        let hi = Vec3::from_array(std::array::from_fn(|i| ps.origin[i] + pmaxs[i]));
+        if super::rigid_body::swept_box_overlaps(
+            Vec3::from_array(origin),
+            Vec3::from_array(at),
+            Vec3::from_array(mins),
+            Vec3::from_array(maxs),
+            lo,
+            hi,
+        ) {
             victims.push((id, ps.origin));
         }
     });
@@ -664,5 +1002,86 @@ impl Motion {
                 (p, v)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOOR: xmodel_runtime::ModelPhys = xmodel_runtime::ModelPhys {
+        mass: 25.0,
+        bounce: 0.1,
+        friction: 0.25,
+        explosive_force_scale: 0.18,
+    };
+
+    fn launched(mechanics: &mut Mechanics, object: u64, client: bool) {
+        mechanics.launch(
+            object,
+            LaunchSpec {
+                origin: [0.0, 0.0, 28.0],
+                angles: [0.0, 62.0, 0.0],
+                point: [0.0, 0.0, 28.0],
+                force: [1500.0, 4000.0, -1800.0],
+                mid: [-19.67, -3.56, 7.48],
+                half: [19.34, 5.04, 23.03],
+                phys: DOOR,
+                client,
+            },
+        );
+    }
+
+    #[test]
+    fn a_launched_part_starts_at_force_over_mass() {
+        let mut mechanics = Mechanics::default();
+        launched(&mut mechanics, 7, true);
+        let v = Vec3::from_array(mechanics.velocity(7, 0));
+        let expected = Vec3::new(1500.0, 4000.0, -1800.0) / 25.0;
+        assert!((v - expected).length() < 1e-3);
+    }
+
+    #[test]
+    fn an_explosion_push_scales_by_preset_and_fades_with_distance() {
+        let center = Vec3::new(0.0, 0.0, 80.0);
+        let near =
+            explosion_impulse(Vec3::new(30.0, 0.0, 10.0), center, 247.5, 0.0, 2.5, 0.18).unwrap();
+        let far =
+            explosion_impulse(Vec3::new(200.0, 0.0, 10.0), center, 247.5, 0.0, 2.5, 0.18).unwrap();
+        let full = 2.5 * EXPLOSION_FORCE * 0.18;
+        assert!(near.length() < full && near.length() > far.length());
+        assert!(
+            explosion_impulse(Vec3::new(300.0, 0.0, 0.0), center, 247.5, 0.0, 2.5, 0.18).is_none()
+        );
+        assert!(
+            explosion_impulse(Vec3::new(246.5, 0.0, 80.0), center, 247.5, 0.0, 2.5, 0.18).is_none(),
+            "below the minimum force"
+        );
+        let mut body = RigidBody::launch(
+            Vec3::ZERO,
+            math_iw4::angles_to_axis([0.0; 3]),
+            Vec3::ZERO,
+            Vec3::splat(10.0),
+            super::super::rigid_body::Phys {
+                mass: 25.0,
+                bounce: 0.1,
+                friction: 0.25,
+            },
+            Vec3::ZERO,
+            Vec3::ZERO,
+        );
+        body.push(near, Vec3::ZERO, EXPLOSION_SPIN_SHARE);
+        assert!((body.velocity - near / 25.0).length() < 1e-3);
+    }
+
+    #[test]
+    fn only_a_server_body_that_really_came_down_crushes() {
+        assert!(!crushes(true, 40.0), "client parts never crush");
+        assert!(crushes(false, 40.0), "a falling care package crushes");
+        assert!(
+            !crushes(false, 0.6),
+            "a resting body nudged by a blast does not"
+        );
+        assert!(!crushes(false, -30.0), "a body thrown upward does not");
     }
 }
