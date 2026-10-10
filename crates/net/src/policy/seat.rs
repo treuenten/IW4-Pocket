@@ -404,6 +404,17 @@ fn rebase_archived_world(out: &mut Snapshot, viewer: ClientId, delta_ms: i32) {
         p.detonate_at_ms = p.detonate_at_ms.map(|t| t.wrapping_add(delta_ms));
         p.cleanup_at_ms = p.cleanup_at_ms.wrapping_add(delta_ms);
     }
+    // A body falls along its trajectory and keys its death animation on its
+    // death time; both are the archived tick's level times.
+    let bodies = out.meta.corpses.slots.iter_mut();
+    for body in bodies.filter(|body| body.occupied) {
+        if body.tr_time != 0 {
+            body.tr_time = body.tr_time.wrapping_add(delta_ms);
+        }
+        if body.spawn_time_ms != 0 {
+            body.spawn_time_ms = body.spawn_time_ms.wrapping_add(delta_ms);
+        }
+    }
     for (id, ps) in &mut out.players {
         if *id != viewer {
             rebase_archived_timers(ps, delta_ms);
@@ -561,6 +572,27 @@ mod tests {
         assert!(!ps.is_live_frame());
         assert_eq!(ps.kill_cam_client_num, 1);
         assert_eq!(*ps, sample.player_state);
+    }
+
+    #[test]
+    fn a_replayed_body_runs_on_the_replay_clock() {
+        let mut out = snapshot(LIVE_TICK, &[(0, Alive), (1, Dead)]);
+        let slots = &mut out.meta.corpses.slots;
+        slots[0].occupied = true;
+        slots[0].tr_time = 4_000;
+        slots[0].spawn_time_ms = 3_950;
+        // A body at rest keeps its unset trajectory time.
+        slots[1].occupied = true;
+        slots[1].spawn_time_ms = 2_000;
+        slots[2].tr_time = 1_000;
+        rebase_archived_world(&mut out, ClientId(0), ARCHIVE_MS);
+        let slots = &out.meta.corpses.slots;
+        assert_eq!(slots[0].tr_time, 4_000 + ARCHIVE_MS);
+        assert_eq!(slots[0].spawn_time_ms, 3_950 + ARCHIVE_MS);
+        assert_eq!(slots[1].tr_time, 0);
+        assert_eq!(slots[1].spawn_time_ms, 2_000 + ARCHIVE_MS);
+        // An empty slot is left alone.
+        assert_eq!(slots[2].tr_time, 1_000);
     }
 
     #[test]
