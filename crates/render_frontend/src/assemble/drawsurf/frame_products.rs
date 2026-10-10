@@ -1631,6 +1631,7 @@ pub(crate) fn bake_spot_shadow_casters(
         &generation.catalog,
         retained_items,
         world_run_surfs,
+        retained.smodel_merge(),
         world_plan
             .as_ref()
             .map(|p| p.surface_ranges())
@@ -1816,6 +1817,7 @@ pub(crate) fn execute_camera_products(
             scene.as_deref(),
             gfx.as_deref().map(|g| &g.scene),
             world_run_surfs,
+            retained.smodel_merge(),
             &spot_lights.0,
             retained.generation_id,
             draw_method.tech_type(),
@@ -2014,6 +2016,7 @@ pub(crate) fn execute_camera_products(
         scene.as_deref(),
         gfx.as_deref().map(|g| &g.scene),
         world_run_surfs,
+        retained.smodel_merge(),
         &spot_lights.0,
         retained.generation_id,
         draw_method.tech_type(),
@@ -2052,6 +2055,7 @@ fn fill_dlight_light(
     scene: Option<&crate::prepare::scene::world::WorldScene>,
     gfx: Option<&render_scene::GfxScene>,
     world_run_surfs: &[u16],
+    smodel_merge: &super::retained_list::SmodelMergeMap,
     spot_shadowed: &[u8],
     generation_id: MaterialGenerationId,
     tech_type: TechType,
@@ -2083,6 +2087,7 @@ fn fill_dlight_light(
                 scene,
                 gfx,
                 world_run_surfs,
+                smodel_merge,
             ) {
                 let mut row = *draw;
                 row.key = super::with_scene_light_index(draw.key, index);

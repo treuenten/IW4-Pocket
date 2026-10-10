@@ -676,6 +676,7 @@ pub(super) fn consume_smodel_buckets(
     pretess: &mut SmodelPretessBuilder,
     out: &mut Vec<SmodelDestinationRecord>,
     mut custom_skip: Option<&mut HashSet<u32>>,
+    mut defer: Option<&mut Vec<SmodelBucketEmitSource>>,
 ) -> SmodelConsumeResult {
     let mut consumed = [None; lighting_iw4::SMODEL_BUCKET_LIST_N];
     let n = lighting_iw4::smodel_bucket_lists_consume(lists, active_mask, &mut consumed);
@@ -698,6 +699,13 @@ pub(super) fn consume_smodel_buckets(
             let source = sources[i];
             if source.payload != bucket.ids[i] || source.lod != bucket.lod {
                 result.context_refused = result.context_refused.saturating_add(1);
+                i += 1;
+                continue;
+            }
+            if bucket.source == lighting_iw4::SmodelSurfPath::Cached
+                && let Some(defer) = defer.as_mut()
+            {
+                defer.push(source);
                 i += 1;
                 continue;
             }
@@ -763,6 +771,7 @@ pub(super) fn consume_smodel_bucket_tail(
     pretess: &mut SmodelPretessBuilder,
     out: &mut Vec<SmodelDestinationRecord>,
     custom_skip: Option<&mut HashSet<u32>>,
+    defer: Option<&mut Vec<SmodelBucketEmitSource>>,
 ) -> SmodelConsumeResult {
     let mut mask = 0u32;
     for (bucket, count) in lists.count.iter().enumerate() {
@@ -782,5 +791,383 @@ pub(super) fn consume_smodel_bucket_tail(
         pretess,
         out,
         custom_skip,
+        defer,
     )
+}
+
+/// `IW4L_STATIC_MERGE=1`: cached static models are drawn MW2's way, every
+/// visible instance of a model that shares a bank, LOD, lighting state and
+/// materials with others drawn by one pretessellated draw per surface, instead
+/// of only runs that happen to be neighbours in a 128-entry bucket. Read once.
+pub(super) fn static_merge_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| perf::switch(STATIC_MERGE_ENV))
+}
+
+pub(super) const STATIC_MERGE_ENV: &str = "IW4L_STATIC_MERGE";
+
+/// Instances of one merged draw share everything their records read but the
+/// vertices: a cached model's positions and lighting are baked into its own
+/// vertices in the static model cache, so only the bank (the vertex window the
+/// u16 indices address), the surfaces (mesh and LOD), the lit material choice
+/// and probe, the primary light, the per-placement grid SH and the placement
+/// flags (a spot light finds its casters by them) must agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct CachedMergeKey {
+    bank: u16,
+    mesh: usize,
+    lod: u8,
+    lit: bool,
+    probe: u8,
+    light: u8,
+    flags: u8,
+    sh: Option<[u32; 12]>,
+}
+
+/// Indices one merged draw may hold per surface: its triangle count is packed
+/// as a u16.
+pub(super) const MERGE_SURFACE_INDEX_CAP: u32 = u16::MAX as u32 * 3;
+
+/// Group `entries` (key, placement, index count per surface) into chunks to
+/// merge: sorted by key then placement, a chunk ends where the key changes or
+/// where any surface would pass `cap` indices. Returns ranges into the sorted
+/// order, and that order.
+pub(super) fn plan_merge_chunks(
+    entries: &[(CachedMergeKey, u32, Vec<u32>)],
+    cap: u32,
+) -> (Vec<usize>, Vec<std::ops::Range<usize>>) {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&i| (entries[i].0, entries[i].1));
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut sums: Vec<u32> = Vec::new();
+    for (at, &i) in order.iter().enumerate() {
+        let (key, _, counts) = &entries[i];
+        let same = at > start && entries[order[start]].0 == *key;
+        let fits = same
+            && sums.len() == counts.len()
+            && sums
+                .iter()
+                .zip(counts)
+                .all(|(sum, n)| sum.saturating_add(*n) <= cap);
+        if at > start && !fits {
+            chunks.push(start..at);
+            start = at;
+            sums.clear();
+        }
+        if sums.is_empty() {
+            sums.extend_from_slice(counts);
+        } else {
+            for (sum, n) in sums.iter_mut().zip(counts) {
+                *sum = sum.saturating_add(*n);
+            }
+        }
+    }
+    if start < order.len() {
+        chunks.push(start..order.len());
+    }
+    (order, chunks)
+}
+
+/// What one frame's merge did, for the log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct StaticMergeStats {
+    pub(super) instances: u32,
+    pub(super) chunks: u32,
+    pub(super) merged_instances: u32,
+    pub(super) single: u32,
+    pub(super) blended: u32,
+    pub(super) incomplete: u32,
+    pub(super) records: u32,
+}
+
+/// The instances each merged record draws, so dynamic lights and spot shadow
+/// casters find every instance and not only the first.
+#[derive(Clone, Debug, Default)]
+pub struct SmodelMergeMap {
+    first_of: std::collections::HashMap<u32, u32>,
+    members: std::collections::HashMap<u32, Vec<u32>>,
+}
+
+impl SmodelMergeMap {
+    pub fn is_empty(&self) -> bool {
+        self.first_of.is_empty()
+    }
+
+    /// The placement whose record draws `placement`, when it is merged.
+    pub fn first_of(&self, placement: u32) -> Option<u32> {
+        self.first_of.get(&placement).copied()
+    }
+
+    /// Every instance the record of `first` draws, when it is merged.
+    pub fn members(&self, first: u32) -> Option<&[u32]> {
+        self.members.get(&first).map(Vec::as_slice)
+    }
+
+    fn note(&mut self, first: u32, members: &[u32]) {
+        for &member in members {
+            self.first_of.insert(member, first);
+        }
+        self.members.insert(first, members.to_vec());
+    }
+}
+
+/// Whether every surface of a LOD draws in the lit opaque region, where the
+/// order of instances inside one draw cannot show: a translucent, emissive or
+/// unknown material keeps its instances apart.
+fn lod_merges_order_free(
+    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
+    surfs: &[(u32, Option<assets::MaterialIndex>)],
+) -> bool {
+    surfs.iter().all(|&(_, authored)| {
+        authored
+            .and_then(|id| catalog.derived(id))
+            .is_some_and(|material| {
+                material.draw_rules.colour_camera_region == asset_iw4::CAMERA_REGION_LIT_OPAQUE
+            })
+    })
+}
+
+/// `IW4L_STATIC_MERGE`: the cached instances the colour buckets deferred,
+/// grouped across the whole frame and handed to
+/// [`expand_cached_destination_batch`] one group at a time. An instance whose
+/// index runs are not all baked yet, or whose materials blend, is drawn on its
+/// own exactly as without the switch.
+pub(super) fn consume_deferred_cached_merged(
+    deferred: &[SmodelBucketEmitSource],
+    smodel_plan: &SmodelGpuPlan,
+    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
+    cache: Option<&WorldStaticModelCache>,
+    pretess: &mut SmodelPretessBuilder,
+    out: &mut Vec<SmodelDestinationRecord>,
+    merge_map: &mut SmodelMergeMap,
+) -> StaticMergeStats {
+    let mut stats = StaticMergeStats {
+        instances: deferred.len() as u32,
+        ..StaticMergeStats::default()
+    };
+    let mut entries: Vec<(CachedMergeKey, u32, Vec<u32>)> = Vec::with_capacity(deferred.len());
+    let mut sources: Vec<SmodelBucketEmitSource> = Vec::with_capacity(deferred.len());
+    for &source in deferred {
+        let alone = |pretess: &mut SmodelPretessBuilder, out: &mut Vec<SmodelDestinationRecord>| {
+            expand_cached_destination_batch(
+                std::slice::from_ref(&source),
+                smodel_plan,
+                catalog,
+                cache,
+                pretess,
+                out,
+                None,
+            )
+        };
+        let Some(placement) = smodel_plan.placements.get(source.placement as usize) else {
+            alone(pretess, out);
+            continue;
+        };
+        let surfs = smodel_plan
+            .meshes
+            .get(placement.mesh)
+            .and_then(|mesh| mesh.surfaces_by_lod.get(usize::from(source.lod)))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let counts: Option<Vec<u32>> = surfs
+            .iter()
+            .map(|&(surface, _)| {
+                cached_index_run(cache, placement, surface).map(|run| run.len() as u32)
+            })
+            .collect();
+        let Some(counts) = counts.filter(|counts| !counts.is_empty()) else {
+            stats.incomplete += 1;
+            alone(pretess, out);
+            continue;
+        };
+        if !lod_merges_order_free(catalog, surfs) {
+            stats.blended += 1;
+            alone(pretess, out);
+            continue;
+        }
+        let sh = smodel_plan
+            .lighting_sh
+            .get(source.placement as usize)
+            .copied()
+            .flatten()
+            .map(|rows| {
+                let mut bits = [0u32; 12];
+                for (i, v) in rows.iter().flatten().enumerate() {
+                    bits[i] = v.to_bits();
+                }
+                bits
+            });
+        entries.push((
+            CachedMergeKey {
+                bank: source.payload.wrapping_sub(1) & lighting_iw4::SMODEL_CACHE_INDEX_BANK_MASK,
+                mesh: placement.mesh,
+                lod: source.lod,
+                lit: placement.lit,
+                probe: placement.reflection_probe_index,
+                light: placement.primary_light_index,
+                flags: placement.flags,
+                sh,
+            },
+            source.placement,
+            counts,
+        ));
+        sources.push(source);
+    }
+    let (order, chunks) = plan_merge_chunks(&entries, MERGE_SURFACE_INDEX_CAP);
+    let mut chunk_sources = Vec::new();
+    let mut members = Vec::new();
+    for chunk in chunks {
+        chunk_sources.clear();
+        chunk_sources.extend(order[chunk].iter().map(|&i| sources[i]));
+        let before = out.len();
+        expand_cached_destination_batch(
+            &chunk_sources,
+            smodel_plan,
+            catalog,
+            cache,
+            pretess,
+            out,
+            None,
+        );
+        stats.chunks += 1;
+        if chunk_sources.len() == 1 {
+            stats.single += 1;
+            continue;
+        }
+        let merged = out[before..]
+            .iter()
+            .all(|record| record.stream == Some(lighting_iw4::SmodelSurfPath::Pretess));
+        if merged && out.len() > before {
+            stats.merged_instances += chunk_sources.len() as u32;
+            members.clear();
+            members.extend(chunk_sources.iter().map(|source| source.placement));
+            merge_map.note(chunk_sources[0].placement, &members);
+        }
+    }
+    stats.records = out.len() as u32;
+    stats
+}
+
+#[cfg(test)]
+mod static_merge_tests {
+    use super::*;
+
+    fn key(bank: u16, mesh: usize, probe: u8) -> CachedMergeKey {
+        CachedMergeKey {
+            bank,
+            mesh,
+            lod: 0,
+            lit: true,
+            probe,
+            light: 1,
+            flags: 0,
+            sh: None,
+        }
+    }
+
+    fn groups(entries: &[(CachedMergeKey, u32, Vec<u32>)], cap: u32) -> Vec<Vec<u32>> {
+        let (order, chunks) = plan_merge_chunks(entries, cap);
+        chunks
+            .into_iter()
+            .map(|chunk| order[chunk].iter().map(|&i| entries[i].1).collect())
+            .collect()
+    }
+
+    #[test]
+    fn instances_far_apart_in_the_walk_are_grouped_by_key() {
+        let entries = vec![
+            (key(0, 7, 2), 40, vec![30, 6]),
+            (key(0, 3, 2), 11, vec![12]),
+            (key(0, 7, 2), 5, vec![30, 6]),
+            (key(0, 3, 2), 90, vec![12]),
+            (key(0, 7, 2), 23, vec![30, 6]),
+        ];
+        assert_eq!(
+            groups(&entries, MERGE_SURFACE_INDEX_CAP),
+            vec![vec![11, 90], vec![5, 23, 40]]
+        );
+    }
+
+    #[test]
+    fn bank_probe_and_lighting_state_split_groups() {
+        let mut lit_off = key(0, 1, 0);
+        lit_off.lit = false;
+        let mut sh = key(0, 1, 0);
+        sh.sh = Some([1; 12]);
+        let mut no_shadow = key(0, 1, 0);
+        no_shadow.flags = 0x10;
+        let entries = vec![
+            (key(0, 1, 0), 1, vec![3]),
+            (key(0x1000, 1, 0), 2, vec![3]),
+            (key(0, 1, 4), 3, vec![3]),
+            (lit_off, 4, vec![3]),
+            (sh, 5, vec![3]),
+            (key(0, 1, 0), 6, vec![3]),
+            (no_shadow, 7, vec![3]),
+        ];
+        let got = groups(&entries, MERGE_SURFACE_INDEX_CAP);
+        assert_eq!(got.len(), 6);
+        assert!(got.contains(&vec![1, 6]));
+    }
+
+    #[test]
+    fn a_group_ends_before_any_surface_passes_the_index_cap() {
+        let entries = vec![
+            (key(0, 1, 0), 1, vec![6, 300]),
+            (key(0, 1, 0), 2, vec![6, 300]),
+            (key(0, 1, 0), 3, vec![6, 300]),
+            (key(0, 1, 0), 4, vec![6, 300]),
+        ];
+        assert_eq!(groups(&entries, 600), vec![vec![1, 2], vec![3, 4]]);
+        assert_eq!(groups(&entries, 900), vec![vec![1, 2, 3], vec![4]]);
+    }
+
+    #[test]
+    fn grouping_does_not_depend_on_the_walk_order() {
+        let mut entries: Vec<_> = (0..12u32)
+            .map(|p| {
+                (
+                    key((p % 2) as u16 * 0x1000, (p % 3) as usize, 0),
+                    p,
+                    vec![3],
+                )
+            })
+            .collect();
+        let a = groups(&entries, MERGE_SURFACE_INDEX_CAP);
+        entries.reverse();
+        entries.rotate_left(5);
+        assert_eq!(groups(&entries, MERGE_SURFACE_INDEX_CAP), a);
+        assert!(groups(&[], MERGE_SURFACE_INDEX_CAP).is_empty());
+    }
+
+    #[test]
+    fn the_bank_key_matches_the_cached_command_bank() {
+        for (a, b) in [
+            (1u16, 0x1000u16),
+            (0x1001, 0x2000),
+            (0x0fff, 0x1000),
+            (0x1000, 0x1001),
+        ] {
+            let same_key = (a.wrapping_sub(1) & lighting_iw4::SMODEL_CACHE_INDEX_BANK_MASK)
+                == (b.wrapping_sub(1) & lighting_iw4::SMODEL_CACHE_INDEX_BANK_MASK);
+            assert_eq!(
+                same_key,
+                lighting_iw4::smodel_same_bank_count(&[a, b]) == 2,
+                "{a:#x} {b:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_merged_record_names_every_instance_for_lights_and_casters() {
+        let mut map = SmodelMergeMap::default();
+        assert!(map.is_empty());
+        map.note(3, &[3, 8, 21]);
+        assert_eq!(map.first_of(8), Some(3));
+        assert_eq!(map.first_of(3), Some(3));
+        assert_eq!(map.first_of(4), None);
+        assert_eq!(map.members(3), Some(&[3, 8, 21][..]));
+        assert_eq!(map.members(8), None);
+    }
 }

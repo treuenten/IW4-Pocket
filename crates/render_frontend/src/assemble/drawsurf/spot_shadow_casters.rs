@@ -284,11 +284,13 @@ fn retained_smodel_for_lod_in(
     plan: Option<&SmodelGpuPlan>,
     eye: Vec3,
     ramp: LodRampArgs,
+    merge: &super::retained_list::SmodelMergeMap,
 ) -> Vec<RetainedDrawItem> {
     let Some(plan) = plan else {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let mut merged_seen = HashSet::new();
     for &want in ids {
         let Some(placement) = plan.placements.get(usize::from(want)) else {
             continue;
@@ -307,7 +309,18 @@ fn retained_smodel_for_lod_in(
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         for &(surface, _) in lod_surfs {
-            if let Some(&item) = index.smodel(u32::from(want), surface) {
+            if merge.is_empty() {
+                if let Some(&item) = index.smodel(u32::from(want), surface) {
+                    out.push(item);
+                }
+                continue;
+            }
+            // A merged instance is drawn by the record of the first instance of
+            // its group, which draws every instance: that record goes in once.
+            let owner = merge.first_of(u32::from(want)).unwrap_or(u32::from(want));
+            if let Some(&item) = index.smodel(owner, surface)
+                && merged_seen.insert((owner, surface))
+            {
                 out.push(item);
             }
         }
@@ -382,6 +395,7 @@ pub fn fill_spot_shadow_caster_plan(
     catalog: &super::RuntimeMaterialCatalog,
     retained: &[RetainedDrawItem],
     world_run_surfs: &[u16],
+    smodel_merge: &super::retained_list::SmodelMergeMap,
     world_ranges: &[(u32, u32)],
     world_vertex_count: u32,
     smodel_ranges: &[(u32, u32)],
@@ -613,6 +627,7 @@ pub fn fill_spot_shadow_caster_plan(
             smodel,
             view.eye,
             lod_ramp,
+            smodel_merge,
         ));
         for brush in &world.dyn_ent_brushes {
             if brush.brush_model == 0 {

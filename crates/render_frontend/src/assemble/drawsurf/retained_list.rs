@@ -7,6 +7,7 @@ use common::{merge_presorted_retained, with_catalog};
 pub(crate) use common::{mix_draw_membership, pack_draw, retained_draw_order_tie};
 pub use fx_lane::FxDrawLane;
 pub(crate) use fx_lane::rebuild_fx_draw_lane;
+pub use smodel::SmodelMergeMap;
 use smodel::{
     SmodelBucketEmitQueues, SmodelBucketEmitSource, SmodelDestinationPass, SmodelDestinationRecord,
     SmodelPretessBuilder, consume_smodel_bucket_tail, consume_smodel_buckets,
@@ -401,6 +402,7 @@ fn emit_smodel_sun_shadow_one(
             pretess,
             destinations,
             Some(custom_skip),
+            None,
         );
         plan.smodel_bucket_consume_n = plan
             .smodel_bucket_consume_n
@@ -531,6 +533,7 @@ pub fn bake_sun_shadow_caster_plan(
         &mut pretess,
         &mut destinations,
         Some(&mut custom_skip),
+        None,
     );
     plan.smodel_bucket_consume_n = plan
         .smodel_bucket_consume_n

@@ -194,10 +194,11 @@ pub use smodel_cache::{
     smodel_surf_sun_shadow_emits, smodel_surf_type,
 };
 pub use smodel_cmd::{
-    SMODEL_CACHED_CMD_MAX_BYTES, SMODEL_PRETESS_CMD_BYTES, SmodelCachedCmdPlan, SmodelCmdKind,
-    SmodelPretessAlloc, SmodelPretessAllocError, smodel_cached_cmd_bytes, smodel_cached_cmd_plan,
-    smodel_cmd_reserve, smodel_pretess_indices_copy, smodel_same_bank_count,
-    write_smodel_cached_cmd, write_smodel_pretess_cmd,
+    SMODEL_CACHE_INDEX_BANK_MASK, SMODEL_CACHED_CMD_MAX_BYTES, SMODEL_PRETESS_CMD_BYTES,
+    SmodelCachedCmdPlan, SmodelCmdKind, SmodelPretessAlloc, SmodelPretessAllocError,
+    smodel_cached_cmd_bytes, smodel_cached_cmd_plan, smodel_cmd_reserve,
+    smodel_pretess_indices_copy, smodel_same_bank_count, write_smodel_cached_cmd,
+    write_smodel_pretess_cmd,
 };
 pub use smodel_inst::GfxStaticModelInst;
 pub use smodel_lighting::{

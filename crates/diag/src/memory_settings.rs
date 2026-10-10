@@ -229,6 +229,10 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         // matches' first shots, decals and kills needed during play (off by
         // default).
         "IW4L_PREWARM" => matches!(value, "0" | "1"),
+        // Draw every visible instance of a cached static model that shares
+        // its bank, LOD, lighting and materials with others in one draw per
+        // surface (off by default).
+        "IW4L_STATIC_MERGE" => matches!(value, "0" | "1"),
         // Health fields in the logs: memory, thermal state, Low Power Mode,
         // main-thread CPU, graphics-chip time, sim tick timing and memory
         // warnings (see crate::health). On by default; 0 turns all of it off.
@@ -388,6 +392,9 @@ mod tests {
         assert!(valid_file_setting("IW4L_PREWARM", "0"));
         assert!(valid_file_setting("IW4L_PREWARM", "1"));
         for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_PREWARM", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_STATIC_MERGE", "0"));
+        assert!(valid_file_setting("IW4L_STATIC_MERGE", "1"));
+        for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_STATIC_MERGE", v), "{v:?}"); }
         for name in ["IW4L_THREAD_QOS", "IW4L_TICK_ON_MAIN"] {
             assert!(valid_file_setting(name, "0"));
             assert!(valid_file_setting(name, "1"));

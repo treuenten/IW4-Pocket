@@ -123,6 +123,9 @@ pub struct StaticDrawLane {
     pub(crate) smodel_pretess_indices: Arc<Vec<u16>>,
 
     pub(crate) smodel_index_layout_revision: u64,
+
+    smodel_merge: Arc<super::smodel::SmodelMergeMap>,
+    merge_log_n: u64,
 }
 
 impl StaticDrawLane {
@@ -408,6 +411,7 @@ fn emit_smodel_static_lane(
     pretess_enabled: bool,
     catalog: &crate::assemble::drawsurf::material_runtime::RuntimeMaterialCatalog,
 ) {
+    let mut deferred = (pretess_enabled && super::smodel::static_merge_enabled()).then(Vec::new);
     let mut queues = SmodelBucketEmitQueues::default();
     let mut destinations = Vec::new();
     let mut pretess = SmodelPretessBuilder::new(pretess_enabled);
@@ -484,6 +488,7 @@ fn emit_smodel_static_lane(
                 &mut pretess,
                 &mut destinations,
                 None,
+                deferred.as_mut(),
             );
             list.census.smodel_bucket_consume_n = list
                 .census
@@ -512,7 +517,35 @@ fn emit_smodel_static_lane(
         &mut pretess,
         &mut destinations,
         None,
+        deferred.as_mut(),
     );
+    if let Some(deferred) = deferred {
+        let mut merge = super::smodel::SmodelMergeMap::default();
+        let stats = super::smodel::consume_deferred_cached_merged(
+            &deferred,
+            plan,
+            catalog,
+            smc_cache,
+            &mut pretess,
+            &mut destinations,
+            &mut merge,
+        );
+        list.smodel_merge = Arc::new(merge);
+        if list.merge_log_n.is_multiple_of(300) {
+            diag::info!(
+                World,
+                "static merge: cached={} groups={} merged={} alone={} blended={} unbaked={} smodel_records={}",
+                stats.instances,
+                stats.chunks,
+                stats.merged_instances,
+                stats.single,
+                stats.blended,
+                stats.incomplete,
+                stats.records,
+            );
+        }
+        list.merge_log_n = list.merge_log_n.wrapping_add(1);
+    }
     list.census.smodel_bucket_consume_n = list
         .census
         .smodel_bucket_consume_n
@@ -694,6 +727,7 @@ pub(crate) fn rebuild_static_draw_lane(
                 list.smodel_index_layout_revision =
                     list.smodel_index_layout_revision.wrapping_add(1);
                 list.last_smodel_picks.clear();
+                list.smodel_merge = Arc::default();
             }
             list.static_items.clear();
             list.colour.clear();
@@ -743,5 +777,11 @@ impl StaticDrawLane {
 
     pub fn smodel_index_layout_revision(&self) -> u64 {
         self.smodel_index_layout_revision
+    }
+
+    /// With `IW4L_STATIC_MERGE`: which instance's record draws each merged
+    /// instance, and the bounds each merged record covers.
+    pub fn smodel_merge(&self) -> &Arc<super::smodel::SmodelMergeMap> {
+        &self.smodel_merge
     }
 }

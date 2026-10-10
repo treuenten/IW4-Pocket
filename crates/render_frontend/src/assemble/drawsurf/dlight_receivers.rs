@@ -29,6 +29,7 @@ pub(crate) fn dlight_receiver_keep(
     scene: Option<&WorldScene>,
     gfx: Option<&GfxScene>,
     world_run_surfs: &[u16],
+    smodel_merge: &super::retained_list::SmodelMergeMap,
 ) -> bool {
     match draw.kind {
         RetainedDrawKind::World {
@@ -54,16 +55,27 @@ pub(crate) fn dlight_receiver_keep(
         }
         RetainedDrawKind::Smodel {
             placement,
-            stream: Some(_),
+            stream: Some(stream),
             ..
         } => {
             let Some(cull) = scene.and_then(|scene| scene.cull.as_ref()) else {
                 return false;
             };
-            cull.dpvs
-                .smodel_bounds
-                .get(placement as usize)
-                .is_some_and(|bounds| dlight_hits_aabb(origin, radius, bounds.mid(), bounds.half()))
+            let hits = |placement: u32| {
+                cull.dpvs
+                    .smodel_bounds
+                    .get(placement as usize)
+                    .is_some_and(|bounds| {
+                        dlight_hits_aabb(origin, radius, bounds.mid(), bounds.half())
+                    })
+            };
+            match (stream == lighting_iw4::SmodelSurfPath::Pretess)
+                .then(|| smodel_merge.members(placement))
+                .flatten()
+            {
+                Some(members) => members.iter().any(|&member| hits(member)),
+                None => hits(placement),
+            }
         }
         RetainedDrawKind::XModel { scene_entnum, .. } => {
             let Some(entnum) = scene_entnum else {
