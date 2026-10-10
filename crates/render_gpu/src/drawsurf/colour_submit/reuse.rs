@@ -349,8 +349,19 @@ impl ReuseState {
         smc: SmcLayoutKey,
         exec: &MaterialExecFrame,
     ) {
-        self.frame.on = enabled();
-        self.frame.verify = self.frame.on && verify();
+        self.open_as(enabled(), verify(), key, smc, exec);
+    }
+
+    fn open_as(
+        &mut self,
+        on: bool,
+        verify: bool,
+        key: Option<ReuseFrameKey>,
+        smc: SmcLayoutKey,
+        exec: &MaterialExecFrame,
+    ) {
+        self.frame.on = on;
+        self.frame.verify = on && verify;
         if !self.frame.on {
             self.frame.valid = false;
             self.frame.store = false;
@@ -1271,6 +1282,57 @@ mod tests {
         assert!(!lights.contains(200));
         lights.fill(&now, &now);
         assert_eq!(lights.count(), 0);
+    }
+
+    #[test]
+    fn rows_are_kept_from_the_second_still_frame_and_stored_only_while_still() {
+        let key = ReuseFrameKey {
+            scene_epoch: Default::default(),
+            binding_clears: 0,
+            material_generation: Default::default(),
+            catalog: 1,
+            prepared_table: 2,
+            pipeline_generation: Default::default(),
+            pipeline_ports: 3,
+            registry_world: Default::default(),
+            geometry_generation: Default::default(),
+            world_generation: Default::default(),
+            smodel_index_count: 4,
+            world_ready: true,
+            smodel_ready: true,
+            world_vertex_refused: false,
+            smodel_vertex_refused: false,
+            sun_shadow_view_ready: true,
+            target: bevy::render::render_resource::TextureFormat::Bgra8UnormSrgb,
+            samples: 1,
+        };
+        let smc = SmcLayoutKey {
+            revision: 1,
+            pretess_indices: 0,
+            baked: 0,
+        };
+        let still = MaterialExecFrame::default();
+        let mut moved = still.clone();
+        moved.view_origin.x = 8.0;
+        let mut state = ReuseState::default();
+        let mut open = |on, key, exec: &MaterialExecFrame| {
+            state.open_as(on, false, key, smc, exec);
+            (state.frame.valid, state.frame.store)
+        };
+        assert_eq!(open(false, Some(key), &still), (false, false), "off");
+        assert_eq!(open(true, Some(key), &still), (false, false), "first frame");
+        assert_eq!(open(true, Some(key), &still), (true, true), "still");
+        assert_eq!(open(true, Some(key), &moved), (false, false), "moving");
+        assert_eq!(open(true, Some(key), &moved), (true, true), "stopped");
+        let mut rebound = key;
+        rebound.binding_clears = 1;
+        assert_eq!(
+            open(true, Some(rebound), &moved),
+            (false, true),
+            "a new key keeps nothing but stores this frame's rows"
+        );
+        assert_eq!(open(true, Some(rebound), &moved), (true, true));
+        assert_eq!(open(true, None, &moved), (false, true), "no material tables");
     }
 
     #[test]
