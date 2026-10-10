@@ -1880,9 +1880,14 @@ impl HostController {
                 if next.kind != nav::TraversalKind::Walk && dist2(from, next.entry) > 4.0 * 4.0 {
                     break;
                 }
+                // Cutting the corner to the next node needs floor all the
+                // way, not only a clear level sweep: a bot that landed short
+                // of the perch at (408,3144,190) on Afghan's gorge rim cut
+                // across the crack beside it to the next node and fell to
+                // the trigger_hurt below.
                 if next.kind == nav::TraversalKind::Walk
-                    && world.walk_hull(from, next.position) != Ok(WalkSample::Clear)
                     && dist_xy(from, step.position) > 4.0
+                    && nav::supported_walk(world, from, next.position) != Ok(WalkSample::Clear)
                 {
                     break;
                 }
@@ -2933,6 +2938,64 @@ mod weapon_fight_tests {
         let moved = bot.route(from, graph.nodes[3], &mut world, Some(&graph), &mut 4096);
         assert_eq!(moved.2, Some(graph.nodes[1]));
         assert_eq!(bot.arrive_at, None);
+    }
+
+    #[test]
+    fn a_waypoint_is_cut_only_over_floor() {
+        let walk = |to| nav::NavEdge {
+            to,
+            cost: 40.0,
+            kind: nav::TraversalKind::Walk,
+        };
+        let graph = NavGraph {
+            nodes: vec![[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]],
+            component: vec![0; 2],
+            adj: vec![vec![walk(1)], vec![walk(0)]],
+            ..NavGraph::default()
+        };
+        // 18 units short of the first node, with a pit between the bot and
+        // the second that the edge between the two nodes passes north of.
+        let from = [-10.0, -15.0, 0.0];
+        let mut pit = Terrain {
+            floor: |x, y| {
+                if (5.0..35.0).contains(&x) && y < -5.0 {
+                    DROP
+                } else {
+                    0.0
+                }
+            },
+            steep: false,
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        let moved = bot.route(from, graph.nodes[1], &mut pit, Some(&graph), &mut 4096);
+        assert_eq!(
+            moved,
+            (MoveMode::Walk, PathOutcome::Clear, Some(graph.nodes[0]))
+        );
+        // With floor all the way, the corner is cut.
+        let mut flat = Terrain {
+            floor: |_, _| 0.0,
+            steep: false,
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        bot.committed = vec![
+            nav::RouteStep {
+                entry: from,
+                position: graph.nodes[0],
+                kind: nav::TraversalKind::Walk,
+            },
+            nav::RouteStep {
+                entry: graph.nodes[0],
+                position: graph.nodes[1],
+                kind: nav::TraversalKind::Walk,
+            },
+        ];
+        bot.route_goal = Some(graph.nodes[1]);
+        let moved = bot.route(from, graph.nodes[1], &mut flat, Some(&graph), &mut 4096);
+        assert_eq!(
+            moved,
+            (MoveMode::Walk, PathOutcome::Clear, Some(graph.nodes[1]))
+        );
     }
 
     #[test]
