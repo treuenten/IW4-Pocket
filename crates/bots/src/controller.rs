@@ -2205,19 +2205,22 @@ fn choose_objective(
     deferred
 }
 
-/// A hunt or a search that holds with no route that will move it: the roam
-/// goal is under its feet (a route that ends where the bot stands), there is
-/// no goal at all, or the graph cannot reach it. Waiting on quota is not this.
+/// A hunt or a search that holds with no route that will move it: a hunt's
+/// roam goal under its feet (a route that ends where the bot stands) or no
+/// goal at all, or a destination the graph cannot reach. A search that holds
+/// on a clear path has reached the last-seen spot and is looking round,
+/// which is its job; waiting on quota is not stuck either.
 fn idle_search(task: TaskKind, mode: MoveMode, path: PathOutcome) -> bool {
-    matches!(task, TaskKind::Hunt | TaskKind::Investigate)
-        && mode == MoveMode::Hold
-        && matches!(
-            path,
-            PathOutcome::Clear
-                | PathOutcome::None
-                | PathOutcome::Unreachable
-                | PathOutcome::IncompleteGraph
-        )
+    let unreachable = matches!(
+        path,
+        PathOutcome::Unreachable | PathOutcome::IncompleteGraph
+    );
+    mode == MoveMode::Hold
+        && match task {
+            TaskKind::Hunt => unreachable || matches!(path, PathOutcome::Clear | PathOutcome::None),
+            TaskKind::Investigate => unreachable,
+            _ => false,
+        }
 }
 
 /// The bot stands on ground too steep to stand on: the movement code counts
@@ -3090,8 +3093,16 @@ mod weapon_fight_tests {
             PathOutcome::IncompleteGraph,
         ] {
             assert!(idle_search(TaskKind::Hunt, MoveMode::Hold, path));
+        }
+        for path in [PathOutcome::Unreachable, PathOutcome::IncompleteGraph] {
             assert!(idle_search(TaskKind::Investigate, MoveMode::Hold, path));
         }
+        // A search standing at the last-seen spot is looking, not stuck.
+        assert!(!idle_search(
+            TaskKind::Investigate,
+            MoveMode::Hold,
+            PathOutcome::Clear
+        ));
         // Waiting for quota, walking, fighting, recovering and objectives are not.
         assert!(!idle_search(
             TaskKind::Hunt,
