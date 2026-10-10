@@ -55,6 +55,16 @@ hunt or a search that holds for 2 s with no route that will move it (its goal
 reached, no goal, or a goal the graph cannot reach) counts as stuck and steps
 off the same way, and the periodic aggregate counts it.
 
+Some map volumes kill: MW2's scripts suicide any player touching a
+`trigger_hurt`, poison and then kill players in the `radiation` fields and blow
+up players in the `minefield` ones. The host reads those triggers' volumes
+from the live level (`SimWorld::hazard_pieces`, every 20 s) and marks the nodes
+a standing player would touch them at. Marked nodes are never roam goals,
+firing positions, fall-back points or escape steps, and a route pays a large
+cost for stepping into one, so it goes round unless the detour is very long.
+A bot that finds itself inside one anyway walks out to the nearest node
+outside before anything else.
+
 The weapon channel reloads the gun in hand or switches to a loaded one; with
 nothing loaded anywhere it switches to a gun that still has reserve ammunition
 and reloads it there instead of keeping the empty one. Only usable guns are

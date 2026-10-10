@@ -2,7 +2,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sim::{ClientId, SimBrush};
+use sim::script::host::triggers::HazardPiece;
+use sim::{ClientId, PLAYER_MAXS, PLAYER_MINS, SimBrush};
 
 use crate::observation::ModeObjective;
 use crate::query::{HullTrace, QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
@@ -68,7 +69,18 @@ pub struct NavGraph {
     /// Nodes carrying each component label, derived from `component` when the
     /// graph is baked or read back, never stored.
     pub component_size: Vec<u32>,
+    /// The map volumes that hurt or kill a player standing in them, as the
+    /// host read them from the level. Never stored with the graph.
+    pub hazards: Vec<HazardPiece>,
+    /// Per node: a player standing there touches one of `hazards`. Empty when
+    /// there are none.
+    pub hazard: Vec<bool>,
 }
+
+/// What entering a node inside a hazard adds to a route's cost: a detour of
+/// up to about 85 grid steps is taken rather than walking through one, and a
+/// bot already inside still gets a route out.
+const HAZARD_COST: f32 = 4096.0;
 
 /// A component smaller than this is not somewhere to roam from or fight on.
 /// The bake leaves a few dozen nodes on every map with no walk edge at all,
@@ -215,6 +227,8 @@ impl NavGraph {
             digest,
             schema,
             hull,
+            hazards: Vec::new(),
+            hazard: Vec::new(),
             component_size: component_sizes(&component),
             nodes,
             component,
@@ -222,6 +236,38 @@ impl NavGraph {
             drops,
             component_links,
         })
+    }
+
+    /// Marks the nodes a standing player would touch one of these hazard
+    /// volumes at. One pass over the nodes when the level's hazards change.
+    pub fn set_hazards(&mut self, hazards: Vec<HazardPiece>) {
+        self.hazard = if hazards.is_empty() {
+            Vec::new()
+        } else {
+            let lo: [f32; 3] =
+                std::array::from_fn(|i| hazards.iter().map(|h| h.mins[i]).fold(f32::MAX, f32::min));
+            let hi: [f32; 3] =
+                std::array::from_fn(|i| hazards.iter().map(|h| h.maxs[i]).fold(f32::MIN, f32::max));
+            self.nodes
+                .iter()
+                .map(|&feet| {
+                    let (mins, maxs) = standing_hull(feet);
+                    (0..3).all(|i| maxs[i] >= lo[i] && mins[i] <= hi[i])
+                        && hazards.iter().any(|h| hazard_touches(h, feet))
+                })
+                .collect()
+        };
+        self.hazards = hazards;
+    }
+
+    /// A player standing on this node touches a hazard volume.
+    pub fn is_hazard(&self, node: usize) -> bool {
+        self.hazard.get(node).copied().unwrap_or(false)
+    }
+
+    /// A player standing at `feet` touches a hazard volume.
+    pub fn in_hazard(&self, feet: [f32; 3]) -> bool {
+        self.hazards.iter().any(|h| hazard_touches(h, feet))
     }
 
     /// How many nodes share this node's component.
@@ -235,6 +281,29 @@ impl NavGraph {
             None => self.component.iter().filter(|c| **c == label).count() as u32,
         }
     }
+}
+
+fn standing_hull(feet: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    (
+        std::array::from_fn(|i| feet[i] + PLAYER_MINS[i]),
+        std::array::from_fn(|i| feet[i] + PLAYER_MAXS[i]),
+    )
+}
+
+/// Whether a standing player at `feet` touches this piece: the hull's box
+/// against the piece's bounds, then against each plane pushed out by the
+/// hull's reach along it, the test the scripts' isTouching makes.
+pub fn hazard_touches(piece: &HazardPiece, feet: [f32; 3]) -> bool {
+    let (mins, maxs) = standing_hull(feet);
+    if (0..3).any(|i| maxs[i] < piece.mins[i] || mins[i] > piece.maxs[i]) {
+        return false;
+    }
+    let mid: [f32; 3] = std::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5);
+    let half: [f32; 3] = std::array::from_fn(|i| (maxs[i] - mins[i]) * 0.5);
+    piece.planes.iter().all(|p| {
+        let reach = p[0].abs() * half[0] + p[1].abs() * half[1] + p[2].abs() * half[2];
+        p[0] * mid[0] + p[1] * mid[1] + p[2] * mid[2] - p[3] <= reach
+    })
 }
 
 /// Nodes per component label. Labels saturate at `u16::MAX`, so the table has
@@ -693,6 +762,8 @@ pub fn bake_seeded(
         schema: NAV_SCHEMA,
         hull: NAV_HULL,
         nodes,
+        hazards: Vec::new(),
+        hazard: Vec::new(),
         component_size: component_sizes(&component),
         component,
         adj,
@@ -822,7 +893,7 @@ pub fn nearest_within(graph: &NavGraph, feet: [f32; 3], max_dist: f32) -> Option
 }
 
 /// The node a bot standing at `feet` roams and fights from: the nearest node
-/// within snapping range whose component has at least
+/// within snapping range, outside every hazard, whose component has at least
 /// [`ANCHOR_MIN_COMPONENT`] nodes, scored as [`nearest_within`] scores (the
 /// current floor before a shelf overhead), else the nearest node of all.
 ///
@@ -849,6 +920,7 @@ pub fn anchor_node(graph: &NavGraph, feet: [f32; 3]) -> Option<u16> {
             nearest = Some((i as u16, score));
         }
         if anchored.is_none_or(|(_, best)| score < best)
+            && !graph.is_hazard(i)
             && graph.component_len(i as u16) >= ANCHOR_MIN_COMPONENT
         {
             anchored = Some((i as u16, score));
@@ -868,7 +940,7 @@ pub fn roam_node(graph: &NavGraph, from: [f32; 3], salt: u32) -> Option<[f32; 3]
     // small component does not send the bot to the node under its feet.
     let mut fallback: Option<(f32, [f32; 3])> = None;
     for (i, pos) in graph.nodes.iter().enumerate() {
-        if graph.component[i] != comp {
+        if graph.component[i] != comp || graph.is_hazard(i) {
             continue;
         }
         let planar = dist_xy(*pos, from);
@@ -887,6 +959,31 @@ pub fn roam_node(graph: &NavGraph, from: [f32; 3], salt: u32) -> Option<[f32; 3]
         }
     }
     best.map(|(_, pos)| pos).or(fallback.map(|(_, pos)| pos))
+}
+
+/// Where a bot standing in a hazard volume walks out to: the nearest node
+/// outside every hazard on a component of at least [`ANCHOR_MIN_COMPONENT`]
+/// nodes, at any distance, else the nearest node outside every hazard.
+pub fn safe_node(graph: &NavGraph, feet: [f32; 3]) -> Option<[f32; 3]> {
+    let mut nearest: Option<(f32, [f32; 3])> = None;
+    let mut anchored: Option<(f32, [f32; 3])> = None;
+    for (i, pos) in graph.nodes.iter().enumerate() {
+        if graph.is_hazard(i) {
+            continue;
+        }
+        let dz = pos[2] - feet[2];
+        let planar = dist_xy(*pos, feet);
+        let score = planar * planar + 4.0 * dz * dz;
+        if nearest.is_none_or(|(best, _)| score < best) {
+            nearest = Some((score, *pos));
+        }
+        if anchored.is_none_or(|(best, _)| score < best)
+            && graph.component_len(i as u16) >= ANCHOR_MIN_COMPONENT
+        {
+            anchored = Some((score, *pos));
+        }
+    }
+    anchored.or(nearest).map(|(_, pos)| pos)
 }
 
 /// Baked supports that could serve as firing positions against a threat at
@@ -919,7 +1016,7 @@ pub fn firing_supports(
     // of fire has just failed.
     let mut sectors: Vec<Option<(f32, [f32; 3])>> = vec![None; max];
     for (i, pos) in graph.nodes.iter().enumerate() {
-        if graph.component[i] != comp {
+        if graph.component[i] != comp || graph.is_hazard(i) {
             continue;
         }
         let range = dist_xy(*pos, at);
@@ -969,7 +1066,10 @@ pub fn retreat_supports(
     ];
     let mut picked: Vec<(f32, [f32; 3])> = Vec::with_capacity(max + 1);
     for (i, pos) in graph.nodes.iter().enumerate() {
-        if graph.component[i] != comp || graph.adj.get(i).is_none_or(Vec::is_empty) {
+        if graph.component[i] != comp
+            || graph.adj.get(i).is_none_or(Vec::is_empty)
+            || graph.is_hazard(i)
+        {
             continue;
         }
         let travel = dist_xy(*pos, from);
@@ -1588,7 +1688,14 @@ impl RouteSearch {
             }
             for edge in &graph.adj[i as usize] {
                 let j = edge.to as usize;
-                let ng = self.g[i as usize] + edge.cost;
+                // Only stepping in costs: a bot already inside walks out freely.
+                let hazard =
+                    if graph.is_hazard(j) && !graph.is_hazard(i as usize) && !self.is_goal[j] {
+                        HAZARD_COST
+                    } else {
+                        0.0
+                    };
+                let ng = self.g[i as usize] + edge.cost + hazard;
                 if !self.closed[j] && ng + 0.01 < self.g[j] {
                     self.g[j] = ng;
                     self.parent[j] = Some((i, edge.kind));
@@ -1892,5 +1999,130 @@ mod retreat_tests {
     fn component_sizes_count_every_label() {
         assert_eq!(component_sizes(&[0, 0, 2, 1, 2, 2]), vec![2, 1, 3]);
         assert!(component_sizes(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod hazard_tests {
+    use super::*;
+
+    fn box_piece(mins: [f32; 3], maxs: [f32; 3]) -> HazardPiece {
+        HazardPiece {
+            mins,
+            maxs,
+            planes: vec![
+                [1.0, 0.0, 0.0, maxs[0]],
+                [-1.0, 0.0, 0.0, -mins[0]],
+                [0.0, 1.0, 0.0, maxs[1]],
+                [0.0, -1.0, 0.0, -mins[1]],
+                [0.0, 0.0, 1.0, maxs[2]],
+                [0.0, 0.0, -1.0, -mins[2]],
+            ],
+        }
+    }
+
+    /// A grid of walk-linked nodes every 48 units, `w` by `h`.
+    fn grid(w: usize, h: usize) -> NavGraph {
+        let nodes: Vec<[f32; 3]> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| [x as f32 * 48.0, y as f32 * 48.0, 0.0]))
+            .collect();
+        let adj = (0..nodes.len())
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let mut row = Vec::new();
+                let mut link = |j: usize| {
+                    row.push(NavEdge {
+                        to: j as u16,
+                        cost: 48.0,
+                        kind: TraversalKind::Walk,
+                    })
+                };
+                if x > 0 {
+                    link(i - 1);
+                }
+                if x + 1 < w {
+                    link(i + 1);
+                }
+                if y > 0 {
+                    link(i - w);
+                }
+                if y + 1 < h {
+                    link(i + w);
+                }
+                row
+            })
+            .collect();
+        let count = nodes.len();
+        NavGraph {
+            nodes,
+            component: vec![0; count],
+            component_size: vec![count as u32],
+            adj,
+            ..NavGraph::default()
+        }
+    }
+
+    #[test]
+    fn a_standing_hull_touches_a_hazard_it_reaches_into() {
+        let piece = box_piece([100.0, -50.0, -10.0], [200.0, 50.0, 40.0]);
+        assert!(hazard_touches(&piece, [150.0, 0.0, 0.0]));
+        // The hull is 15 units wide either side: touching from 10 units out.
+        assert!(hazard_touches(&piece, [90.0, 0.0, 0.0]));
+        assert!(!hazard_touches(&piece, [80.0, 0.0, 0.0]));
+        // Standing on a floor above it.
+        assert!(!hazard_touches(&piece, [150.0, 0.0, 60.0]));
+    }
+
+    #[test]
+    fn nodes_in_a_hazard_are_never_goals() {
+        let mut graph = grid(20, 3);
+        // The far end of the strip is a radiation field.
+        graph.set_hazards(vec![box_piece(
+            [600.0, -100.0, -10.0],
+            [1000.0, 200.0, 60.0],
+        )]);
+        let marked = graph.hazard.iter().filter(|h| **h).count();
+        // x = 624 to 912 on each of the three rows; 576 stays clear of it.
+        assert_eq!(marked, 3 * 7, "{:?}", graph.hazard);
+        assert!(graph.in_hazard([700.0, 48.0, 0.0]) && !graph.in_hazard([300.0, 48.0, 0.0]));
+        let from = [500.0, 48.0, 0.0];
+        for salt in 0..32 {
+            let goal = roam_node(&graph, from, salt).unwrap();
+            assert!(!graph.in_hazard(goal), "{goal:?}");
+        }
+        let supports = firing_supports(&graph, from, [800.0, 48.0, 0.0], 160.0, 6);
+        assert!(
+            supports.iter().all(|p| !graph.in_hazard(*p)),
+            "{supports:?}"
+        );
+        let back = retreat_supports(&graph, from, [300.0, 48.0, 0.0], 4);
+        assert!(back.iter().all(|p| !graph.in_hazard(*p)), "{back:?}");
+        // Standing inside, the way out is the nearest node outside.
+        assert_eq!(
+            safe_node(&graph, [700.0, 48.0, 0.0]),
+            Some([576.0, 48.0, 0.0])
+        );
+        let anchor = anchor_node(&graph, [610.0, 48.0, 0.0]).unwrap();
+        assert!(!graph.is_hazard(anchor as usize));
+    }
+
+    #[test]
+    fn routes_go_round_a_hazard_and_out_of_one() {
+        let mut graph = grid(9, 5);
+        // A minefield across the middle rows, open at the bottom row.
+        graph.set_hazards(vec![box_piece([180.0, 40.0, -10.0], [200.0, 400.0, 60.0])]);
+        let start = 2 * 9; // (0, 96)
+        let goal = 2 * 9 + 8; // (384, 96)
+        let path = search(&graph, &[(start, 0.0)], &[goal], &mut 4096).unwrap();
+        assert!(
+            path.iter().all(|step| !graph.in_hazard(step.position)),
+            "{path:?}"
+        );
+        // From inside, the route out costs nothing extra to start.
+        let inside = 2 * 9 + 4; // (192, 96)
+        assert!(graph.is_hazard(inside as usize));
+        let out = search(&graph, &[(inside, 0.0)], &[goal], &mut 4096).unwrap();
+        assert_eq!(out.last().unwrap().position, graph.nodes[goal as usize]);
+        assert!(out.len() <= 6, "{out:?}");
     }
 }

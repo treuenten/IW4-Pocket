@@ -149,6 +149,13 @@ impl SimWorld {
         crate::frame::script_mover_by_id(&self.ecs, id)
     }
 
+    /// The map volumes whose scripts hurt or kill a player standing in them
+    /// (trigger_hurt, and MW2's radiation and minefield fields), as convex
+    /// pieces in world space, read from the live script entities.
+    pub fn hazard_pieces(&mut self) -> Vec<crate::script::host::triggers::HazardPiece> {
+        crate::script::host::triggers::hazard_pieces(&mut self.ecs)
+    }
+
     pub fn install_gsc_program(
         &mut self,
         program: crate::script::Program,

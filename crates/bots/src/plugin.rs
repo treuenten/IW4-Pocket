@@ -22,11 +22,16 @@ const ASTAR_QUOTA: u32 = 2048;
 /// Ten seconds of authority ticks between aggregates. Compact enough to leave
 /// in a match, coarse enough not to be a per-query log in the hot path.
 const METER_PERIOD_TICKS: u32 = 200;
+/// How often the level's hazard volumes are read again, so a trigger the
+/// scripts move or remove is followed. Nodes are re-marked only on a change.
+const HAZARD_REREAD_TICKS: u32 = 400;
 
 #[derive(Resource, Default)]
 struct BotNav {
     graph: NavGraph,
     pending: Option<(u64, Task<NavGraph>, Option<asset_transport::StageHandle>)>,
+    /// The graph the hazard volumes were last read for, and the tick.
+    hazards_read: Option<((u64, u64), u32)>,
 }
 
 /// Where the shared quota went and whether pending work actually advanced.
@@ -448,7 +453,7 @@ fn apply_bot_tp(
 struct ThinkBots<'w> {
     clock: Res<'w, AuthorityClock>,
     world: ResMut<'w, AuthorityWorld>,
-    nav: Res<'w, BotNav>,
+    nav: ResMut<'w, BotNav>,
     roster: ResMut<'w, BotRoster>,
     cmds: ResMut<'w, ClientCommandInbox>,
     actions: ResMut<'w, ClientActionInbox>,
@@ -472,6 +477,7 @@ fn think_bots(mut p: ThinkBots) {
         return;
     }
 
+    refresh_hazards(&mut p.nav, &mut p.world.0, p.clock.tick);
     let snapshot = p.world.0.snapshot(Tick(p.clock.tick.saturating_sub(1)));
     let fires = p.fire.drain();
     let mut budget = TraceBudget::new(TRACE_QUOTA);
@@ -588,6 +594,38 @@ fn think_bots(mut p: ThinkBots) {
     if meter.ticks >= METER_PERIOD_TICKS {
         meter.report(routes, count);
     }
+}
+
+/// Marks the level's hazard volumes (trigger_hurt, MW2's radiation and
+/// minefield fields) on the graph the bots read, so roaming, fighting and
+/// retreating stay out of them and routes go round. Read from the live
+/// script entities, which exist once the level has loaded.
+fn refresh_hazards(nav: &mut BotNav, world: &mut SimWorld, tick: u32) {
+    if nav.graph.is_empty() {
+        return;
+    }
+    let key = (nav.graph.generation, nav.graph.digest);
+    if nav
+        .hazards_read
+        .is_some_and(|(read, at)| read == key && tick.saturating_sub(at) < HAZARD_REREAD_TICKS)
+    {
+        return;
+    }
+    nav.hazards_read = Some((key, tick));
+    let pieces = world.hazard_pieces();
+    if pieces == nav.graph.hazards {
+        return;
+    }
+    let started = std::time::Instant::now();
+    nav.graph.set_hazards(pieces);
+    diag::info!(
+        Sim,
+        "bots: {} hazard pieces cover {} of {} nodes ({:.2} ms)",
+        nav.graph.hazards.len(),
+        nav.graph.hazard.iter().filter(|h| **h).count(),
+        nav.graph.nodes.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 fn prepare_navigation(

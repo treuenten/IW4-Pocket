@@ -122,6 +122,8 @@ pub struct HostController {
     reposition_from: Option<[f32; 3]>,
     /// Enemies given up on, each with the tick it may be fought again.
     ignored: Vec<(ClientId, u32)>,
+    /// Where a bot standing in a hazard volume is walking out to.
+    hazard_exit: Option<[f32; 3]>,
 }
 
 impl HostController {
@@ -163,6 +165,7 @@ impl HostController {
             engagement: None,
             reposition_from: None,
             ignored: Vec::new(),
+            hazard_exit: None,
         }
     }
 
@@ -273,6 +276,7 @@ impl HostController {
             self.engagement = None;
             self.reposition_from = None;
             self.ignored.clear();
+            self.hazard_exit = None;
             self.decision = Decision::default();
             self.task = Task::default();
         }
@@ -417,7 +421,17 @@ impl HostController {
             self.use_unlinked = 0;
         }
         if touching_use.is_none()
-            && let Some(intent) = self.unstick(obs, world)
+            && !obs.self_state.linked
+            && let Some(intent) = self.leave_hazard(obs, world, nav, astar_budget)
+        {
+            self.intent = intent;
+            self.task.reason = SwitchReason::InHazard;
+            self.decision.stage = ActionStage::Approach;
+            self.apply_weapon_skill(obs);
+            return;
+        }
+        if touching_use.is_none()
+            && let Some(intent) = self.unstick(obs, world, nav)
         {
             self.intent = intent;
             self.task.reason = SwitchReason::ProgressLost;
@@ -587,7 +601,12 @@ impl HostController {
         }
     }
 
-    fn unstick(&mut self, obs: &BotObservation, world: &mut impl WorldQuery) -> Option<BotIntent> {
+    fn unstick(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
+    ) -> Option<BotIntent> {
         let here = obs.self_state.origin;
         if self
             .progress_origin
@@ -614,15 +633,76 @@ impl HostController {
             return None;
         }
         self.progress_tick = obs.tick;
-        self.escape_step(obs, world)
+        self.escape_step(obs, world, nav)
+    }
+
+    /// A bot standing in a hazard volume walks out to the nearest node outside
+    /// it before anything else. MW2's radiation poisons in stages and kills
+    /// within seconds, a minefield goes off half a second after the click and
+    /// a trigger_hurt kills within half a second, so a player who strays into
+    /// one turns round at once.
+    fn leave_hazard(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
+        astar_budget: &mut u32,
+    ) -> Option<BotIntent> {
+        let graph = nav.filter(|graph| !graph.hazards.is_empty())?;
+        let here = obs.self_state.origin;
+        if !graph.in_hazard(here) {
+            self.hazard_exit = None;
+            return None;
+        }
+        let exit = match self.hazard_exit {
+            Some(exit) => exit,
+            None => {
+                let exit = nav::safe_node(graph, here)?;
+                diag::debug!(
+                    Sim,
+                    "bots: id={} tick={} in a hazard at ({:.0},{:.0},{:.0}), leaving for ({:.0},{:.0},{:.0})",
+                    obs.self_state.id.0,
+                    obs.tick,
+                    here[0],
+                    here[1],
+                    here[2],
+                    exit[0],
+                    exit[1],
+                    exit[2],
+                );
+                // Whatever led here leads back in: pick the next goal afresh.
+                self.hazard_exit = Some(exit);
+                self.roam = None;
+                self.committed.clear();
+                exit
+            }
+        };
+        let mut moved = self.route(here, exit, world, nav, astar_budget);
+        if matches!(
+            moved.1,
+            PathOutcome::Unreachable | PathOutcome::IncompleteGraph | PathOutcome::Blocked
+        ) {
+            // No route out: walk straight at the way out.
+            moved = walk_step(here, exit, world);
+        }
+        let (move_mode, path, move_goal) = moved;
+        Some(BotIntent {
+            look_at: Some([exit[0], exit[1], obs.eye()[2]]),
+            move_goal,
+            move_mode,
+            path,
+            sprint: move_mode == MoveMode::Walk,
+            ..BotIntent::default()
+        })
     }
 
     /// A short walk to clear floor 64 units away, in one of eight directions,
-    /// kept for 16 ticks.
+    /// outside every hazard volume, kept for 16 ticks.
     fn escape_step(
         &mut self,
         obs: &BotObservation,
         world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
     ) -> Option<BotIntent> {
         let here = obs.self_state.origin;
         // Pmove can be blocked by other players even when world traces are clear.
@@ -640,7 +720,9 @@ impl HostController {
                 here[1] + angle.sin() * 64.0,
                 here[2],
             ];
-            if world.walk_hull(here, goal) != Ok(WalkSample::Clear) {
+            if nav.is_some_and(|graph| graph.in_hazard(goal))
+                || world.walk_hull(here, goal) != Ok(WalkSample::Clear)
+            {
                 continue;
             }
             let Ok(floor) = world.hull_trace(
@@ -792,7 +874,7 @@ impl HostController {
     ) -> BotIntent {
         let Some(goal) = self.ensure_roam(obs, nav) else {
             // Nowhere on the graph to roam to: step off rather than stand.
-            return self.escape_step(obs, world).unwrap_or(BotIntent {
+            return self.escape_step(obs, world, nav).unwrap_or(BotIntent {
                 move_goal: Some(obs.self_state.origin),
                 ..BotIntent::default()
             });
@@ -2605,6 +2687,63 @@ mod weapon_fight_tests {
         });
         assert!(shot_allowed(on_body, ClientId(4)));
         assert!(!shot_allowed(on_body, ClientId(5)));
+    }
+
+    #[test]
+    fn a_bot_in_a_hazard_walks_out_before_anything_else() {
+        // A corridor along x, its far end a radiation field.
+        let count = 20;
+        let edge = |to: usize| nav::NavEdge {
+            to: to as u16,
+            cost: 48.0,
+            kind: nav::TraversalKind::Walk,
+        };
+        let mut graph = NavGraph {
+            nodes: (0..count).map(|i| [i as f32 * 48.0, 0.0, 0.0]).collect(),
+            component: vec![0; count],
+            adj: (0..count)
+                .map(|i| {
+                    [i.checked_sub(1), (i + 1 < count).then_some(i + 1)]
+                        .into_iter()
+                        .flatten()
+                        .map(edge)
+                        .collect()
+                })
+                .collect(),
+            ..NavGraph::default()
+        };
+        graph.set_hazards(vec![sim::script::host::triggers::HazardPiece {
+            mins: [600.0, -100.0, -10.0],
+            maxs: [2000.0, 100.0, 60.0],
+            planes: vec![
+                [1.0, 0.0, 0.0, 2000.0],
+                [-1.0, 0.0, 0.0, -600.0],
+                [0.0, 1.0, 0.0, 100.0],
+                [0.0, -1.0, 0.0, 100.0],
+                [0.0, 0.0, 1.0, 60.0],
+                [0.0, 0.0, -1.0, 10.0],
+            ],
+        }]);
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 12, 24);
+        // Standing in it, with an enemy in view: the bot walks out, unarmed.
+        let mut scene = facing_enemy(1, usp, vec![usp], 300.0);
+        scene.self_state.origin = [720.0, 0.0, 0.0];
+        scene.seen[0].origin = [1020.0, 0.0, 0.0];
+        bot.drive_nav(&scene, &mut Floor, Some(&graph), &mut 4096, 50);
+        let intent = bot.intent();
+        assert_eq!(bot.task().reason, SwitchReason::InHazard);
+        assert_eq!(intent.move_mode, MoveMode::Walk, "{intent:?}");
+        assert!(!intent.fire);
+        assert!(intent.move_goal.unwrap()[0] < 720.0, "{intent:?}");
+        assert_eq!(bot.hazard_exit, Some([576.0, 0.0, 0.0]));
+        // Outside it, the fight goes on.
+        let mut out = facing_enemy(3, usp, vec![usp], 300.0);
+        out.self_state.origin = [500.0, 0.0, 0.0];
+        out.seen[0].origin = [800.0, 0.0, 0.0];
+        bot.drive_nav(&out, &mut Floor, Some(&graph), &mut 4096, 50);
+        assert_eq!(bot.task().kind, TaskKind::Fight);
+        assert_eq!(bot.hazard_exit, None);
     }
 
     #[test]

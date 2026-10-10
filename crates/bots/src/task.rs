@@ -21,6 +21,8 @@ pub enum SwitchReason {
     Died,
     /// A fight that hurt the enemy no more for all the attacking was left.
     GaveUp,
+    /// Standing in a map volume that hurts or kills: walking out of it.
+    InHazard,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

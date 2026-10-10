@@ -641,6 +641,54 @@ fn press_target(cursor_hint: i32, selected: Option<u64>) -> PressTarget {
     }
 }
 
+/// One convex piece of a map volume whose scripts hurt or kill a player who
+/// stands in it, in world coordinates. A point is inside when it is on the
+/// inner side of every plane (`[nx, ny, nz, d]` with `n·p <= d`); `mins` and
+/// `maxs` bound it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HazardPiece {
+    pub mins: [f32; 3],
+    pub maxs: [f32; 3],
+    pub planes: Vec<[f32; 4]>,
+}
+
+/// A map trigger whose scripts hurt or kill the players inside it. MW2's
+/// _load.gsc suicides any player touching a trigger_hurt every half second,
+/// _radiation.gsc poisons and then kills players in the "radiation" fields,
+/// and _minefields.gsc blows up players in the "minefield" ones.
+fn is_hazard(classname: &str, targetname: Option<&str>) -> bool {
+    classname == "trigger_hurt" || matches!(targetname, Some("radiation" | "minefield"))
+}
+
+/// Every hazard volume in the level, as convex pieces. Read-only: the script
+/// state is taken out and put back unchanged.
+pub(crate) fn hazard_pieces(world: &mut World) -> Vec<HazardPiece> {
+    let mut runtime = std::mem::take(&mut *world.resource_mut::<Runtime>());
+    let mut pieces = Vec::new();
+    if runtime.program.is_some() {
+        let frame = FrameWorld::from_world(world);
+        let candidates: Vec<(u64, std::sync::Arc<str>)> = runtime
+            .entities
+            .iter()
+            .map(|(object, entity)| (*object, entity.classname.clone()))
+            .collect();
+        for (object, classname) in candidates {
+            let targetname = match runtime.object_field(object, "targetname") {
+                Value::String(name) => Some(name),
+                _ => None,
+            };
+            if !is_hazard(&classname, targetname.as_deref()) {
+                continue;
+            }
+            if let Some(volume) = volume(&mut runtime, &frame, object) {
+                pieces.extend(volume.pieces());
+            }
+        }
+    }
+    *world.resource_mut::<Runtime>() = runtime;
+    pieces
+}
+
 fn volume<'f>(runtime: &mut Runtime, frame: &'f FrameWorld, object: u64) -> Option<Volume<'f>> {
     let entity = runtime.entities.get(&object)?;
     let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
@@ -701,6 +749,26 @@ enum Volume<'f> {
     },
 }
 
+/// The box a brush's axial planes cut, unbounded on an axis it has none for.
+fn axial_bounds(planes: &[[f32; 4]]) -> ([f32; 3], [f32; 3]) {
+    let mut mins = [f32::NEG_INFINITY; 3];
+    let mut maxs = [f32::INFINITY; 3];
+    for plane in planes {
+        for axis in 0..3 {
+            let off_axis = (0..3).all(|i| i == axis || plane[i] == 0.0);
+            if !off_axis {
+                continue;
+            }
+            if plane[axis] == 1.0 {
+                maxs[axis] = maxs[axis].min(plane[3]);
+            } else if plane[axis] == -1.0 {
+                mins[axis] = mins[axis].max(-plane[3]);
+            }
+        }
+    }
+    (mins, maxs)
+}
+
 fn box_planes(mins: [f32; 3], maxs: [f32; 3]) -> impl Iterator<Item = [f32; 4]> {
     (0..3).flat_map(move |i| {
         let mut positive = [0.0; 4];
@@ -749,6 +817,68 @@ fn segment_planes(start: [f32; 3], end: [f32; 3], planes: impl Iterator<Item = [
 }
 
 impl Volume<'_> {
+    /// The volume as convex pieces in world space. A cylinder becomes the
+    /// octagonal prism around it, a little larger and never smaller.
+    fn pieces(&self) -> Vec<HazardPiece> {
+        let shift = |plane: [f32; 4], origin: [f32; 3]| {
+            [
+                plane[0],
+                plane[1],
+                plane[2],
+                plane[3] + plane[0] * origin[0] + plane[1] * origin[1] + plane[2] * origin[2],
+            ]
+        };
+        match *self {
+            Volume::Box { mins, maxs } => vec![HazardPiece {
+                mins,
+                maxs,
+                planes: box_planes(mins, maxs).collect(),
+            }],
+            Volume::Brushes {
+                origin,
+                ids,
+                brushes,
+            } => ids
+                .iter()
+                .filter_map(|id| brushes.get(usize::from(*id)))
+                .filter(|brush| !brush.planes.is_empty())
+                .map(|brush| {
+                    let planes: Vec<[f32; 4]> =
+                        brush.planes.iter().map(|p| shift(*p, origin)).collect();
+                    let (mins, maxs) = axial_bounds(&planes);
+                    HazardPiece { mins, maxs, planes }
+                })
+                .collect(),
+            Volume::Hulls { origin, hulls } => hulls
+                .iter()
+                .map(|hull| {
+                    let mins = std::array::from_fn(|i| origin[i] + hull.mid[i] - hull.half[i]);
+                    let maxs = std::array::from_fn(|i| origin[i] + hull.mid[i] + hull.half[i]);
+                    let mut planes: Vec<[f32; 4]> = box_planes(mins, maxs).collect();
+                    for &(dir, at, width) in &hull.slabs {
+                        planes.push(shift([dir[0], dir[1], dir[2], at + width], origin));
+                        planes.push(shift([-dir[0], -dir[1], -dir[2], width - at], origin));
+                    }
+                    HazardPiece { mins, maxs, planes }
+                })
+                .collect(),
+            Volume::Cylinder {
+                origin,
+                radius,
+                height,
+            } => {
+                let mins = [origin[0] - radius, origin[1] - radius, origin[2]];
+                let maxs = [origin[0] + radius, origin[1] + radius, origin[2] + height];
+                let mut planes: Vec<[f32; 4]> = box_planes(mins, maxs).collect();
+                let d = std::f32::consts::FRAC_1_SQRT_2;
+                for (x, y) in [(d, d), (d, -d), (-d, d), (-d, -d)] {
+                    planes.push(shift([x, y, 0.0, radius], origin));
+                }
+                vec![HazardPiece { mins, maxs, planes }]
+            }
+        }
+    }
+
     fn crosses(&self, start: [f32; 3], end: [f32; 3]) -> bool {
         if !start.into_iter().chain(end).all(f32::is_finite) {
             return false;
@@ -1149,5 +1279,76 @@ mod press_tests {
             assert!(!crate::item::hints_item(cursor), "{cursor}");
         }
         assert!(crate::item::hints_item(5));
+    }
+}
+
+#[cfg(test)]
+mod hazard_tests {
+    use super::*;
+
+    #[test]
+    fn hazard_triggers_are_hurt_radiation_and_minefields() {
+        assert!(is_hazard("trigger_hurt", None));
+        assert!(is_hazard("trigger_multiple", Some("radiation")));
+        assert!(is_hazard("trigger_multiple", Some("minefield")));
+        assert!(!is_hazard("trigger_multiple", Some("ctf_zone_allies")));
+        assert!(!is_hazard("trigger_use_touch", None));
+    }
+
+    fn inside(piece: &HazardPiece, p: [f32; 3]) -> bool {
+        piece
+            .planes
+            .iter()
+            .all(|n| n[0] * p[0] + n[1] * p[1] + n[2] * p[2] <= n[3] + 1e-3)
+    }
+
+    #[test]
+    fn a_moved_brush_becomes_a_world_space_piece() {
+        let brush = crate::SimBrush {
+            planes: box_planes([-10.0, -20.0, 0.0], [10.0, 20.0, 30.0])
+                .chain([[
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    0.0,
+                    0.0,
+                ]])
+                .collect(),
+            contents: 0,
+            plane_surface_flags: Vec::new(),
+            glass_encoded: 0,
+        };
+        let brushes = [brush];
+        let volume = Volume::Brushes {
+            origin: [100.0, 0.0, 0.0],
+            ids: &[0],
+            brushes: &brushes,
+        };
+        let pieces = volume.pieces();
+        assert_eq!(pieces.len(), 1);
+        let piece = &pieces[0];
+        assert_eq!(
+            (piece.mins, piece.maxs),
+            ([90.0, -20.0, 0.0], [110.0, 20.0, 30.0])
+        );
+        assert!(inside(piece, [95.0, -5.0, 10.0]));
+        // The slanted side cuts the corner off, moved with the brush.
+        assert!(!inside(piece, [105.0, 15.0, 10.0]));
+        assert!(!inside(piece, [5.0, -5.0, 10.0]));
+    }
+
+    #[test]
+    fn a_cylinder_piece_holds_the_whole_cylinder() {
+        let volume = Volume::Cylinder {
+            origin: [0.0, 0.0, 10.0],
+            radius: 64.0,
+            height: 50.0,
+        };
+        let piece = &volume.pieces()[0];
+        for step in 0..16 {
+            let a = step as f32 * std::f32::consts::TAU / 16.0;
+            assert!(inside(piece, [63.9 * a.cos(), 63.9 * a.sin(), 20.0]), "{a}");
+        }
+        assert!(!inside(piece, [60.0, 60.0, 20.0]));
+        assert!(!inside(piece, [0.0, 0.0, 61.0]));
     }
 }
