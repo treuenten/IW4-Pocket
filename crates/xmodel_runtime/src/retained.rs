@@ -340,9 +340,14 @@ fn locals_from_leaves(
 ) -> Result<Vec<Local>, MaterializeError> {
     let bindings = leaves
         .iter()
-        .map(|leaf| dobj.tracks_for(leaf.clip))
+        .map(|leaf| dobj.tracks_for_shared(leaf.clip))
         .collect::<Vec<_>>();
-    if !leaves.is_empty() && !bindings.iter().flatten().any(Option::is_some) {
+    if !leaves.is_empty()
+        && !bindings
+            .iter()
+            .flat_map(|tracks| tracks.iter())
+            .any(Option::is_some)
+    {
         return Err(MaterializeError::AnimatedClipHasNoMatchingTrack);
     }
     let instances = leaves
@@ -373,9 +378,13 @@ fn apply_additive_layers(
             let bindings = layer
                 .leaves
                 .iter()
-                .map(|leaf| dobj.tracks_for(leaf.clip))
+                .map(|leaf| dobj.tracks_for_shared(leaf.clip))
                 .collect::<Vec<_>>();
-            if !bindings.iter().flatten().any(Option::is_some) {
+            if !bindings
+                .iter()
+                .flat_map(|tracks| tracks.iter())
+                .any(Option::is_some)
+            {
                 return Err(MaterializeError::AnimatedClipHasNoMatchingTrack);
             }
             let instances = layer
@@ -440,4 +449,335 @@ pub fn pose_dobj_with_controller(
     controller(dobj, &requested, &mut locals);
     dobj.apply_duplicates(&mut locals);
     Ok(dobj.compose(&locals, world_from_model))
+}
+
+#[cfg(test)]
+mod clip_track_memo_tests {
+    use super::*;
+    use crate::xanim_clip::{Rotation, Track, Translation};
+    use crate::{
+        AnimClip, XAnimNodeDefinition, XAnimNodeId, XAnimNodeKind, XAnimNodeState,
+        XAnimTreeDefinition,
+    };
+    use glam::Quat;
+    use std::sync::Arc;
+
+    fn model(name: &str, bones: &[&str], steps: &[u8]) -> ModelPoseSrc {
+        let children = bones.len() - 1;
+        ModelPoseSrc {
+            name: name.to_owned(),
+            num_bones: bones.len(),
+            num_root_bones: 1,
+            scale: 1.0,
+            no_scale_part_bits: [0; 6],
+            bone_names: bones.iter().map(|bone| (*bone).to_owned()).collect(),
+            parent_list: steps.to_vec(),
+            quats: (0..children)
+                .map(|i| [0, (i as i16) * 900, 0, 32000])
+                .collect(),
+            trans: (0..children)
+                .map(|i| [i as f32 + 1.5, 0.25 * i as f32, 3.0])
+                .collect(),
+            base_mat: (0..bones.len())
+                .map(|i| (Quat::IDENTITY, Vec3::new(0.0, i as f32, 0.0)))
+                .collect(),
+            root_rest: None,
+        }
+    }
+
+    fn track(name: &str, turn: f32, lift: f32) -> Track {
+        Track {
+            name: name.to_owned(),
+            rotation: Rotation::FullConstant(Quat::from_rotation_z(turn).to_array()),
+            translation: Translation::Constant([0.0, 0.0, lift]),
+        }
+    }
+
+    fn clip(name: &str, tracks: Vec<Track>) -> Arc<AnimClip> {
+        Arc::new(AnimClip {
+            name: name.to_owned(),
+            framerate: 30.0,
+            numframes: 10,
+            looping: true,
+            tracks,
+            notifies: Vec::new(),
+            delta_translation: Translation::Default,
+        })
+    }
+
+    fn leaf(parent: u16, clip: &Arc<AnimClip>) -> XAnimNodeDefinition {
+        XAnimNodeDefinition {
+            parent: Some(XAnimNodeId(parent)),
+            kind: XAnimNodeKind::Leaf {
+                clip: Arc::clone(clip),
+                parts: None,
+            },
+        }
+    }
+
+    fn request(clips: &[Arc<AnimClip>; 3]) -> DObjPoseRequest {
+        let definition = Arc::new(
+            XAnimTreeDefinition::new(vec![
+                XAnimNodeDefinition {
+                    parent: None,
+                    kind: XAnimNodeKind::Blend,
+                },
+                leaf(0, &clips[0]),
+                leaf(0, &clips[1]),
+                XAnimNodeDefinition {
+                    parent: Some(XAnimNodeId(0)),
+                    kind: XAnimNodeKind::Additive,
+                },
+                leaf(3, &clips[2]),
+            ])
+            .expect("tree"),
+        );
+        let mut tree = XAnimTreeRuntime::new(definition);
+        for (node, weight, time) in [(1, 0.65, 0.2), (2, 0.35, 0.7), (3, 0.5, 0.0), (4, 1.0, 0.4)] {
+            tree.set_state(
+                XAnimNodeId(node),
+                XAnimNodeState {
+                    time,
+                    weight,
+                    goal_weight: weight,
+                    ..XAnimNodeState::default()
+                },
+            )
+            .expect("state");
+        }
+        DObjPoseRequest {
+            tree: Some(tree),
+            ..DObjPoseRequest::default()
+        }
+    }
+
+    /// `locals_from_leaves` and `apply_additive_layers` as they were before the
+    /// memo: every leaf binds its tracks with a fresh `tracks_for`.
+    fn locals_hashing_every_call(dobj: &DObj, request: &DObjPoseRequest) -> Vec<Local> {
+        let requested = dobj.all_parts();
+        let (leaves, layers) = request
+            .tree
+            .as_ref()
+            .expect("tree")
+            .active_pose()
+            .expect("pose");
+        let bindings = leaves
+            .iter()
+            .map(|leaf| dobj.tracks_for(leaf.clip))
+            .collect::<Vec<_>>();
+        let instances = leaves
+            .iter()
+            .zip(&bindings)
+            .map(|(leaf, tracks)| AnimInstance {
+                clip: leaf.clip,
+                tracks,
+                time: leaf.time,
+                weight: leaf.weight,
+                parts: leaf.parts,
+            })
+            .collect::<Vec<_>>();
+        let mut locals = dobj.calc_anim(&instances, &requested);
+        for layer in &layers {
+            let bindings = layer
+                .leaves
+                .iter()
+                .map(|leaf| dobj.tracks_for(leaf.clip))
+                .collect::<Vec<_>>();
+            let instances = layer
+                .leaves
+                .iter()
+                .zip(&bindings)
+                .map(|(leaf, tracks)| AnimInstance {
+                    clip: leaf.clip,
+                    tracks,
+                    time: leaf.time,
+                    weight: leaf.weight,
+                    parts: leaf.parts,
+                })
+                .collect::<Vec<_>>();
+            let (add, controlled) = dobj.calc_anim_masked(&instances, &requested);
+            for i in 0..locals.len() {
+                if !controlled[i] {
+                    continue;
+                }
+                let (rot, trans) = apply_additive(
+                    locals[i].rotation,
+                    locals[i].translation,
+                    add[i].rotation,
+                    add[i].translation,
+                    layer.weight,
+                );
+                locals[i].rotation = rot;
+                locals[i].translation = trans;
+            }
+        }
+        locals
+    }
+
+    fn locals_now(dobj: &DObj, request: &DObjPoseRequest) -> Vec<Local> {
+        let requested = dobj.all_parts();
+        let (leaves, layers) = request
+            .tree
+            .as_ref()
+            .expect("tree")
+            .active_pose()
+            .expect("pose");
+        let mut locals = locals_from_leaves(dobj, &leaves, &requested).expect("locals");
+        apply_additive_layers(dobj, &requested, &mut locals, &layers).expect("layers");
+        locals
+    }
+
+    fn bits(world: &[Mat4]) -> Vec<[u32; 16]> {
+        world
+            .iter()
+            .map(|m| m.to_cols_array().map(f32::to_bits))
+            .collect()
+    }
+
+    fn collision(models: &[ModelPoseSrc; 2]) -> [RetainedModelCapability; 2] {
+        models.clone().map(|pose| RetainedModelCapability {
+            key: pose.name.clone(),
+            bone_collision: (0..pose.num_bones)
+                .map(|bone| {
+                    Some(BoneCollision {
+                        midpoint: [bone as f32, 1.0, -2.0],
+                        half_size: [2.0, 3.0, 4.0 + bone as f32],
+                        radius_sq: 30.0,
+                        part_classification: bone as u8,
+                    })
+                })
+                .collect(),
+            pose,
+            contents: None,
+            coll_lod: 0,
+            coll_surfs: Vec::new(),
+            movement_brushes: Vec::new(),
+            bounds: None,
+            radius: None,
+        })
+    }
+
+    #[test]
+    fn remembered_track_bindings_pose_and_hit_exactly_as_fresh_ones() {
+        // The head carries a bone named like one of the body's, so first-name-
+        // wins binding is exercised; one track names no bone at all.
+        let models = [
+            model(
+                "body",
+                &[
+                    "tag_origin",
+                    "j_spine",
+                    "j_neck",
+                    "j_head",
+                    "j_arm",
+                    "j_spine",
+                ],
+                &[1, 1, 1, 3, 4],
+            ),
+            model("head", &["j_head_root", "j_neck", "j_eye"], &[1, 1]),
+        ];
+        let specs = [
+            (&models[0], None),
+            (
+                &models[1],
+                Some(Attach {
+                    parent_model: 0,
+                    tag: "j_head".into(),
+                }),
+            ),
+        ];
+        let clips = [
+            clip(
+                "walk",
+                vec![
+                    track("j_spine", 0.3, 1.0),
+                    track("j_head", -0.2, 0.5),
+                    track("j_missing", 1.0, 9.0),
+                ],
+            ),
+            clip(
+                "aim",
+                vec![track("j_neck", 0.7, 0.0), track("j_eye", 0.1, 0.2)],
+            ),
+            clip(
+                "lean",
+                vec![track("j_arm", 0.4, 2.0), track("j_spine", -0.1, 0.0)],
+            ),
+        ];
+        let request = request(&clips);
+        let world = Mat4::from_translation(Vec3::new(100.0, -50.0, 8.0));
+        let fresh = || DObj::build(&specs).expect("dobj");
+
+        let reference = locals_hashing_every_call(&fresh(), &request);
+        let warm = fresh();
+        for pass in 0..3 {
+            assert_eq!(
+                format!("{:?}", locals_now(&warm, &request)),
+                format!("{reference:?}"),
+                "pass {pass}"
+            );
+        }
+        let cold = bits(&pose_dobj(&fresh(), &request, world).expect("pose"));
+        assert_eq!(
+            bits(&pose_dobj(&warm, &request, world).expect("pose")),
+            cold
+        );
+        assert_eq!(
+            bits(&pose_dobj(&warm.clone(), &request, world).expect("pose")),
+            cold
+        );
+
+        let capabilities = collision(&models);
+        let hit_models = [
+            (&capabilities[0], None),
+            (&capabilities[1], specs[1].1.clone()),
+        ];
+        let hits = |dobj: &DObj| {
+            collision_dobj_with_controller(dobj, &hit_models, &request, world, |_, _, _| {})
+                .expect("collision")
+        };
+        let cold_hits = hits(&fresh());
+        assert!(!cold_hits.is_empty());
+        for _ in 0..2 {
+            let warm_hits = hits(&warm);
+            assert_eq!(format!("{warm_hits:?}"), format!("{cold_hits:?}"));
+        }
+
+        for clip in &clips {
+            assert_eq!(
+                &warm.tracks_for_shared(clip)[..],
+                &warm.tracks_for(clip)[..]
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_clip_or_a_new_bone_list_is_bound_afresh() {
+        let body = model("body", &["tag_origin", "j_a", "j_b", "j_c"], &[1, 1, 1]);
+        let mut dobj = DObj::build(&[(&body, None)]).expect("dobj");
+        for round in 0..200 {
+            // Clips come and go; a freed clip's address could be handed to the
+            // next one, which binds other bones.
+            let names: &[&str] = if round % 2 == 0 {
+                &["j_c", "j_a"]
+            } else {
+                &["j_b", "nope"]
+            };
+            let clip = clip(
+                "c",
+                names.iter().map(|name| track(name, 0.0, 0.0)).collect(),
+            );
+            assert_eq!(
+                &dobj.tracks_for_shared(&clip)[..],
+                &dobj.tracks_for(&clip)[..],
+                "round {round}"
+            );
+        }
+        let kept = clip("kept", vec![track("j_b", 0.0, 0.0), track("j_c", 0.0, 0.0)]);
+        assert_eq!(&dobj.tracks_for_shared(&kept)[..], &[Some(2), Some(3)]);
+        dobj.bones = DObj::build(&[(&model("other", &["tag_origin", "j_c"], &[1]), None)])
+            .expect("dobj")
+            .bones;
+        assert_eq!(&dobj.tracks_for_shared(&kept)[..], &[None, Some(1)]);
+    }
 }

@@ -3,6 +3,8 @@ use anim_iw4::{
     quat_add_weighted, quat16, set_hide_part_bit, surface_hidden, xmodel_no_scale_bit,
 };
 use glam::{Mat4, Quat, Vec3};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::AnimClip;
 
@@ -58,7 +60,39 @@ pub struct DObj {
     pub bones: Vec<Bone>,
     pub models: Vec<ModelSlot>,
     pub duplicates: Vec<(usize, usize)>,
+    clip_tracks: ClipTrackMemo,
 }
+
+/// What `DObj::tracks_for` answered for each clip this skeleton was posed with.
+/// The answer is a pure function of the bone names and the clip's track names,
+/// and every pose of every player asks it again for every active leaf, building
+/// a SipHash map of all bone names each time. Each entry holds a `Weak` to its
+/// clip, so the clip's allocation — and with it the address that keys the
+/// entry — cannot be reused by another clip while the entry exists, and the
+/// clip cannot be changed in place (`Arc::get_mut` refuses while a `Weak` is
+/// out; `Arc::make_mut` moves the value to a new address). A skeleton's bones
+/// are fixed once it is built: a bone list that is not the one the entries were
+/// taken against (another allocation or length) drops them all, and debug
+/// builds check every remembered answer against a fresh one.
+#[derive(Debug, Default)]
+struct ClipTrackMemo {
+    entries: Mutex<ClipTrackEntries>,
+}
+
+#[derive(Debug, Default)]
+struct ClipTrackEntries {
+    bones: (usize, usize),
+    by_clip: HashMap<usize, (Weak<AnimClip>, Arc<[Option<usize>]>)>,
+    prune_at: usize,
+}
+
+impl Clone for ClipTrackMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+const CLIP_TRACK_MEMO_PRUNE_MIN: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DObjBoneOrientation {
@@ -286,6 +320,7 @@ impl DObj {
             bones,
             models: slots,
             duplicates,
+            clip_tracks: ClipTrackMemo::default(),
         })
     }
 
@@ -303,6 +338,37 @@ impl DObj {
             bits.set(i);
         }
         bits
+    }
+
+    /// `tracks_for(clip)`, worked out once per clip for the life of this
+    /// skeleton and handed back shared after that.
+    pub fn tracks_for_shared(&self, clip: &Arc<AnimClip>) -> Arc<[Option<usize>]> {
+        let key = Arc::as_ptr(clip) as usize;
+        let bones = (self.bones.as_ptr() as usize, self.bones.len());
+        let mut entries = self
+            .clip_tracks
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.bones != bones {
+            entries.bones = bones;
+            entries.by_clip.clear();
+        }
+        if let Some((_, tracks)) = entries.by_clip.get(&key) {
+            debug_assert_eq!(&tracks[..], &self.tracks_for(clip)[..]);
+            return Arc::clone(tracks);
+        }
+        if entries.by_clip.len() >= entries.prune_at.max(CLIP_TRACK_MEMO_PRUNE_MIN) {
+            entries
+                .by_clip
+                .retain(|_, (clip, _)| clip.strong_count() > 0);
+            entries.prune_at = entries.by_clip.len().saturating_mul(2);
+        }
+        let tracks: Arc<[Option<usize>]> = self.tracks_for(clip).into();
+        entries
+            .by_clip
+            .insert(key, (Arc::downgrade(clip), Arc::clone(&tracks)));
+        tracks
     }
 
     pub fn tracks_for(&self, clip: &AnimClip) -> Vec<Option<usize>> {
