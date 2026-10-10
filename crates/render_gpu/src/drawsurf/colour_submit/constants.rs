@@ -129,7 +129,7 @@ fn aligned_backing_span(start: usize, end: usize, backing_len: usize) -> Option<
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct PlacedPackKey {
+pub(super) struct PlacedPackKey {
     port: PortId,
     local: usize,
     slots: usize,
@@ -410,6 +410,20 @@ pub(super) struct ArenaPack {
     pack_scratch: Vec<u8>,
     placed_dirty_scratch: Vec<(usize, usize)>,
     full_upload: bool,
+
+    /// With `IW4L_DRAW_REUSE`: every span `base_for` and `append_hit` gave a
+    /// draw in this list, in order, so that the draw can be kept for the next
+    /// frame and its spans kept alive then (see [`ArenaPack::touch`]).
+    log_spans: bool,
+    span_log: Vec<ArenaSpanRef>,
+}
+
+/// One span of the arena, as [`ArenaPack::touch`] finds it again: an
+/// identity span by its constants and slots, a placed one by its key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ArenaSpanRef {
+    Identity((usize, usize)),
+    Placed(PlacedPackKey),
 }
 
 impl ArenaPack {
@@ -506,6 +520,9 @@ impl ArenaPack {
             Arc::as_ptr(constants) as usize,
             Arc::as_ptr(slots).cast::<u32>() as usize,
         );
+        if self.log_spans {
+            self.span_log.push(ArenaSpanRef::Identity(key));
+        }
         if let Some((base, _, _, stamp)) = self.seen.get_mut(&key) {
             *stamp = self.stamp;
             self.share_n = self.share_n.saturating_add(1);
@@ -535,6 +552,55 @@ impl ArenaPack {
         base
     }
 
+    /// Log the span every later draw is given, until turned off.
+    pub(super) fn set_span_log(&mut self, on: bool) {
+        self.log_spans = on;
+        self.span_log.clear();
+    }
+
+    pub(super) fn span_log(&self) -> &[ArenaSpanRef] {
+        &self.span_log
+    }
+
+    /// Keep a span from the last list alive in this one without writing it,
+    /// and give back its base as `base_for` or `append_hit` would. `None` when
+    /// the span is gone.
+    pub(super) fn touch(&mut self, span: ArenaSpanRef) -> Option<u32> {
+        let base = match span {
+            ArenaSpanRef::Identity(key) => {
+                let (base, _, _, stamp) = self.seen.get_mut(&key)?;
+                *stamp = self.stamp;
+                *base
+            }
+            ArenaSpanRef::Placed(key) => {
+                let entry = self.placed_seen.get_mut(&key)?;
+                entry.stamp = self.stamp;
+                mark_placed_base(entry.base)
+            }
+        };
+        self.share_n = self.share_n.saturating_add(1);
+        Some(base)
+    }
+
+    /// The bytes a span holds now, as the GPU will read them after upload.
+    pub(super) fn span_bytes(&self, span: ArenaSpanRef) -> Option<&[u8]> {
+        match span {
+            ArenaSpanRef::Identity(key) => {
+                let (base, constants, slots, _) = self.seen.get(&key)?;
+                let len = std::mem::size_of_val(constants.vertex.as_slice())
+                    + std::mem::size_of_val(constants.pixel.as_slice())
+                    + d3d9_sm3::texture_slot_rows(slots.len()) * 16;
+                let start = *base as usize * 16;
+                self.identity.get(start..start + len)
+            }
+            ArenaSpanRef::Placed(key) => {
+                let entry = self.placed_seen.get(&key)?;
+                let start = entry.base as usize * 16;
+                self.placed.get(start..start + entry.len)
+            }
+        }
+    }
+
     pub(super) fn append_hit(
         &mut self,
         port: &crate::drawsurf::AdmittedExactPort,
@@ -555,6 +621,9 @@ impl ArenaPack {
         let Some(banks) = executable.local_banks else {
             return Err(ConstantPackRefusal::MissingLocalBanks);
         };
+        if self.log_spans {
+            self.span_log.push(ArenaSpanRef::Placed(key));
+        }
         self.placed_dirty_scratch.clear();
         let (base, hit) = intern_placed_span(
             &mut self.placed_seen,
@@ -760,4 +829,48 @@ pub(super) fn upload_packed_arena(
         arena.bind_group = Some(bind_group);
     }
     (share_n, total_len, 0)
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    fn constants(value: u32) -> Arc<PassConstantBuffers> {
+        Arc::new(PassConstantBuffers {
+            vertex: vec![[value; 4]; 2],
+            pixel: vec![[value + 1; 4]],
+        })
+    }
+
+    #[test]
+    fn a_touched_span_outlives_the_list_and_keeps_its_bytes() {
+        let mut pack = ArenaPack::default();
+        let slots: Arc<[u32]> = Arc::from(vec![3u32, 4]);
+        let (a, b) = (constants(1), constants(9));
+        pack.begin_list();
+        pack.set_span_log(true);
+        let base_a = pack.base_for(&a, &slots);
+        let base_b = pack.base_for(&b, &slots);
+        let log = pack.span_log().to_vec();
+        assert_eq!(log.len(), 2);
+        let bytes_a = pack.span_bytes(log[0]).expect("span a").to_vec();
+        let mut expected = Vec::new();
+        append_constant_span(&mut expected, &a, &slots);
+        assert_eq!(bytes_a, expected);
+
+        // Next list: only a is kept. b is freed one list later, a lives on.
+        pack.begin_list();
+        pack.set_span_log(true);
+        assert_eq!(pack.touch(log[0]), Some(base_a));
+        assert!(pack.span_log().is_empty(), "a touch is not a new span");
+        pack.begin_list();
+        assert_eq!(pack.touch(log[0]), Some(base_a));
+        assert_eq!(pack.touch(log[1]), None, "b was not touched and is gone");
+        assert_eq!(pack.span_bytes(log[0]), Some(&bytes_a[..]));
+        // b's freed rows are reused for a span of the same size; a is untouched.
+        let c = constants(5);
+        let base_c = pack.base_for(&c, &slots);
+        assert_eq!(base_c, base_b);
+        assert_eq!(pack.span_bytes(log[0]), Some(&bytes_a[..]));
+    }
 }

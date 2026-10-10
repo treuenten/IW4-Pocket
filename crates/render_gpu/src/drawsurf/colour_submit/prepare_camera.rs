@@ -5,6 +5,7 @@ use bevy::tasks::{ComputeTaskPool, TaskPool};
 use dpvs_iw4::GfxDrawSurf;
 use render_backend::MaterialRunCensus;
 
+use super::reuse::{self, Lookup, RowTrace};
 use super::shadow_prepare::{ShadowLane, open_shadow_table_epoch, prepare_shadow_passes};
 use super::{
     BTreeMap, COLOUR_PREPARE_LANES, Camera3d, CameraPrepareState, CameraWorldPretess,
@@ -364,6 +365,46 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         census.frame.submit_gather_ms = colour_census_ms(gather_started);
     }
     let prepare_started = colour_census_clock(census_on);
+    let reuse_key = if reuse::enabled() {
+        exec_tables(extracted).map(|(catalog, prepared_table)| reuse::ReuseFrameKey {
+            scene_epoch: scratch.prepared_scene_epoch,
+            binding_clears: binding_cache.clears(),
+            material_generation: extracted.world.generation,
+            catalog: std::ptr::from_ref(catalog) as usize,
+            prepared_table: std::ptr::from_ref(prepared_table) as usize,
+            pipeline_generation: pipeline.generation,
+            pipeline_ports: pipeline.ports.len(),
+            registry_world: registry.world(),
+            geometry_generation: geometry.generation,
+            world_generation: geometry.world_generation,
+            smodel_index_count: geometry.smodel_index_count,
+            world_ready: geometry.world_ready(),
+            smodel_ready: geometry.smodel_ready(),
+            world_vertex_refused: extracted
+                .world
+                .static_geometry
+                .world_vertex_refusal
+                .is_some(),
+            smodel_vertex_refused: extracted
+                .world
+                .static_geometry
+                .smodel_vertex_refusal
+                .is_some(),
+            sun_shadow_view_ready,
+            target: target.main_texture_format(),
+            samples,
+        })
+    } else {
+        None
+    };
+    let smc = reuse::SmcLayoutKey {
+        revision: extracted.world.smodel_index_layout_revision,
+        pretess_indices: extracted.world.smodel_pretess_indices.len(),
+        baked: std::sync::Arc::as_ptr(&extracted.world.smc_index_baked) as usize,
+    };
+    scratch
+        .reuse
+        .open(reuse_key, smc, &extracted.frame.exec_frame);
     let exec_frame = &extracted.frame.exec_frame;
     let exec_view = exec_tables(extracted)
         .map(|(catalog, prepared)| MaterialExecView::camera(catalog, prepared, exec_frame));
@@ -400,6 +441,8 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         glass_cull: view_cull_planes(exec_frame.clip_from_world),
         census_on,
         sun_shadow_view_ready,
+        reuse: &scratch.reuse.frame,
+        binding_clears: binding_cache.clears(),
     };
     let rows = pack_plan.row_plan.as_slice();
     let share = rows.len().div_ceil(COLOUR_PREPARE_LANES).max(1);
@@ -416,14 +459,25 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
             let input = &input;
             let rows = lane_rows(rows, share, index);
             scope.spawn(async move {
-                *tally = Some(prepare_camera_rows(input, rows, lane, gpu, index as u8));
+                *tally = Some(prepare_camera_lane(input, rows, lane, gpu, index as u8));
             });
         }
         if let Some((index, ((lane, gpu), tally))) = first {
             let rows = lane_rows(rows, share, index);
-            *tally = Some(prepare_camera_rows(&input, rows, lane, gpu, index as u8));
+            *tally = Some(prepare_camera_lane(&input, rows, lane, gpu, index as u8));
         }
     });
+    if scratch.reuse.frame.on {
+        let mismatches = scratch.reuse.stats.mismatches;
+        for lane in &scratch.lanes {
+            scratch.reuse.stats.absorb(&lane.reuse.tally);
+        }
+        let force = scratch.reuse.stats.mismatches != mismatches;
+        scratch
+            .reuse
+            .stats
+            .maybe_log(scratch.reuse.frame.changed.indices(), force);
+    }
     let textures = textures
         .into_inner()
         .expect("scene texture tables are never poisoned");
@@ -885,6 +939,8 @@ struct CameraRowsInput<'a> {
     glass_cull: Option<[Vec4; 5]>,
     census_on: bool,
     sun_shadow_view_ready: bool,
+    reuse: &'a reuse::ReuseFrame,
+    binding_clears: u64,
 }
 
 fn lane_rows(rows: &[ColourRowPlan], share: usize, index: usize) -> &[ColourRowPlan] {
@@ -1065,12 +1121,291 @@ fn add_run_census(a: MaterialRunCensus, b: MaterialRunCensus) -> MaterialRunCens
     }
 }
 
-fn prepare_camera_rows(
+/// How a lane's rows are prepared: once (keeping rows from the last frame
+/// when `IW4L_DRAW_REUSE` is on), or, for the verifier, twice: first as the
+/// switch would, then every row from scratch into the same arena list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowsPass {
+    Only,
+    VerifyFirst,
+    VerifySecond,
+}
+
+fn prepare_camera_lane(
     input: &CameraRowsInput<'_>,
     rows: &[ColourRowPlan],
     lane: &mut ColourPrepareLane,
     gpu_arena: &mut GpuConstantArena,
     lane_index: u8,
+) -> CameraRowTally {
+    if !input.reuse.verify {
+        if input.reuse.on {
+            lane.reuse.begin(rows.len());
+        }
+        let mut tally = prepare_camera_rows(input, rows, lane, RowsPass::Only);
+        if input.reuse.on {
+            lane.reuse.finish();
+        }
+        upload_lane_arena(input, lane, gpu_arena, lane_index, &mut tally);
+        return tally;
+    }
+    lane.reuse.begin(rows.len());
+    // Both passes start from the executor and the per-run pack cache this
+    // frame found (run serials repeat in the second pass): the second is the
+    // frame as the switch off would prepare it.
+    let executor = lane.executor.clone();
+    let run_pack = lane.run_pack.clone();
+    let _ = prepare_camera_rows(input, rows, lane, RowsPass::VerifyFirst);
+    lane.executor = executor;
+    lane.run_pack = run_pack;
+    let first = std::mem::take(&mut lane.prepared);
+    let first_trace = std::mem::take(&mut lane.trace);
+    let first_spans = std::mem::take(&mut lane.trace_spans);
+    let first_refusals = std::mem::take(&mut lane.refusals);
+    let mut snapshot = std::mem::take(&mut lane.snapshot);
+    let mut snapshot_at = std::mem::take(&mut lane.snapshot_at);
+    snapshot.clear();
+    snapshot_at.clear();
+    for span in &first_spans {
+        let start = snapshot.len();
+        let found = lane.arena_pack.span_bytes(*span).map(|bytes| {
+            snapshot.extend_from_slice(bytes);
+        });
+        snapshot_at.push(found.map(|()| (start, snapshot.len())));
+    }
+    let mut tally = prepare_camera_rows(input, rows, lane, RowsPass::VerifySecond);
+    verify_lane(
+        lane,
+        &first,
+        &first_trace,
+        &first_spans,
+        &first_refusals,
+        &snapshot,
+        &snapshot_at,
+    );
+    lane.trace_spans = first_spans;
+    lane.trace = first_trace;
+    lane.snapshot = snapshot;
+    lane.snapshot_at = snapshot_at;
+    lane.reuse.finish();
+    upload_lane_arena(input, lane, gpu_arena, lane_index, &mut tally);
+    tally
+}
+
+/// Compare the first verifier pass (as the switch prepares) with the second
+/// (every row from scratch), row by row: the same records, and constant spans
+/// holding the same bytes as the GPU would read them after each pass. Rows
+/// that are never kept are compared too (they follow kept rows the material
+/// executor no longer saw), apart from their index range.
+fn verify_lane(
+    lane: &mut ColourPrepareLane,
+    first: &[PreparedExactDraw],
+    first_trace: &[RowTrace],
+    first_spans: &[super::constants::ArenaSpanRef],
+    first_refusals: &[(usize, &'static str)],
+    snapshot: &[u8],
+    snapshot_at: &[Option<(usize, usize)>],
+) {
+    let second = &lane.prepared;
+    let second_trace = &lane.trace;
+    let second_spans = &lane.trace_spans;
+    let arena = &lane.arena_pack;
+    let mut dropped = Vec::new();
+    let mut verified = 0u64;
+    let mut kept_verified = 0u64;
+    let mut last_first_kept = false;
+    let mut mismatches = 0u64;
+    let mut a = first_trace.iter().peekable();
+    let mut b = second_trace.iter().peekable();
+    loop {
+        let (x, y) = match (a.peek(), b.peek()) {
+            (None, None) => break,
+            (Some(x), Some(y)) if x.offset == y.offset => {
+                let pair = (Some(**x), Some(**y));
+                a.next();
+                b.next();
+                pair
+            }
+            (Some(x), Some(y)) if x.offset < y.offset => {
+                let pair = (Some(**x), None);
+                a.next();
+                pair
+            }
+            (Some(_), Some(y)) => {
+                let pair = (None, Some(**y));
+                b.next();
+                pair
+            }
+            (Some(x), None) => {
+                let pair = (Some(**x), None);
+                a.next();
+                pair
+            }
+            (None, Some(y)) => {
+                let pair = (None, Some(**y));
+                b.next();
+                pair
+            }
+        };
+        let eligible = x.is_some_and(|x| x.eligible) || y.is_some_and(|y| y.eligible);
+        let prev_kept = last_first_kept;
+        if let Some(x) = x {
+            last_first_kept = x.kept;
+        }
+        let cause = match (x, y) {
+            (Some(x), Some(y)) => {
+                let one = &first[x.records()];
+                let two = &second[y.records()];
+                let s1 = &first_spans[x.spans()];
+                let s2 = &second_spans[y.spans()];
+                verified += 1;
+                if x.kept {
+                    kept_verified += 1;
+                }
+                if one.len() != two.len() {
+                    Some("pass count")
+                } else if s1.len() != s2.len() || s1.len() != one.len() {
+                    Some("span count")
+                } else {
+                    // A row prepared every frame may take another place in a
+                    // per-frame buffer (skinned static models) the second time.
+                    one.iter()
+                        .zip(two)
+                        .find_map(|(r1, r2)| reuse::record_mismatch(r1, r2, eligible))
+                        .or_else(|| {
+                            let at = x.spans().start;
+                            (0..s1.len()).find_map(|i| {
+                                let before = snapshot_at[at + i].map(|(lo, hi)| &snapshot[lo..hi]);
+                                let after = arena.span_bytes(s2[i]);
+                                match (before, after) {
+                                    (Some(before), Some(after)) if before == after => None,
+                                    (None, _) | (_, None) => Some("span missing"),
+                                    (Some(before), Some(after)) => {
+                                        let row = before
+                                            .iter()
+                                            .zip(after)
+                                            .position(|(a, b)| a != b)
+                                            .map_or(usize::MAX, |byte| byte / 16);
+                                        if mismatches < 4 {
+                                            diag::warn!(
+                                                World,
+                                                "draw reuse verify: constants differ from row {} of {} (pass {} of {}, {} / {} bytes, port {:?})",
+                                                row,
+                                                y.kind,
+                                                i,
+                                                s1.len(),
+                                                before.len(),
+                                                after.len(),
+                                                two[i].port,
+                                            );
+                                        }
+                                        Some("constants")
+                                    }
+                                }
+                            })
+                        })
+                }
+            }
+            _ if eligible => Some("prepared in one pass only"),
+            _ => None,
+        };
+        if let Some(cause) = cause {
+            mismatches += 1;
+            let offset = x.or(y).map_or(0, |t| t.offset);
+            dropped.extend(x.or(y).and_then(|t| t.id));
+            if mismatches <= 4 {
+                let refused = |list: &[(usize, &'static str)]| {
+                    list.iter()
+                        .find(|(at, _)| *at == offset as usize)
+                        .map_or("-", |(_, why)| *why)
+                };
+                diag::warn!(
+                    World,
+                    "draw reuse verify: lane row {} ({}) mismatch: {} (kept={} eligible={} after_kept={} refused first={} second={})",
+                    offset,
+                    x.or(y).map_or("-", |t| t.kind),
+                    cause,
+                    x.is_some_and(|x| x.kept),
+                    eligible,
+                    prev_kept,
+                    refused(first_refusals),
+                    refused(&lane.refusals),
+                );
+            }
+        }
+    }
+    for id in dropped {
+        lane.reuse.drop_next(id);
+    }
+    lane.reuse.tally.verified_rows += verified;
+    lane.reuse.tally.kept_verified += kept_verified;
+    lane.reuse.tally.mismatches += mismatches;
+}
+
+fn upload_lane_arena(
+    input: &CameraRowsInput<'_>,
+    lane: &mut ColourPrepareLane,
+    gpu_arena: &mut GpuConstantArena,
+    lane_index: u8,
+    tally: &mut CameraRowTally,
+) {
+    let mut prepared = std::mem::take(&mut lane.prepared);
+    let mut pending_viewmodel_prepared = std::mem::take(&mut lane.pending_viewmodel_prepared);
+    if !prepared.is_empty() || !pending_viewmodel_prepared.is_empty() {
+        let arena_started = std::time::Instant::now();
+        let split = prepared.len();
+        prepared.append(&mut pending_viewmodel_prepared);
+        (tally.arena_share, tally.arena_vertex_n, tally.arena_pixel_n) = upload_constant_arena(
+            &mut prepared,
+            &mut lane.arena_pack,
+            gpu_arena,
+            input.pipeline,
+            input.registry,
+            input.device,
+            input.queue,
+            "iw4_exact_vs_constant_arena",
+        );
+        pending_viewmodel_prepared.extend(prepared.drain(split..));
+        tally.arena_ms = arena_started.elapsed().as_secs_f32() * 1000.0;
+    }
+    for draw in prepared
+        .iter_mut()
+        .chain(pending_viewmodel_prepared.iter_mut())
+    {
+        draw.arena_lane = lane_index;
+    }
+    lane.prepared = prepared;
+    lane.pending_viewmodel_prepared = pending_viewmodel_prepared;
+}
+
+/// Execute a kept row for the executor's chain only (see the kept path in
+/// [`prepare_camera_rows`]): as the row was executed when it was prepared.
+fn replay_row(
+    executor: &mut MaterialRunExecutor,
+    view: MaterialExecView<'_>,
+    planned: &ColourRowPlan,
+    (colour, light, emissive): (&FrameProduct, &FrameProduct, &FrameProduct),
+) {
+    let Some(live) = colour_draw_at(colour, light, emissive, planned.draw_index as usize) else {
+        return;
+    };
+    let tech = colour_tech_at(colour, light, emissive, planned.draw_index as usize)
+        .unwrap_or(planned.technique);
+    let expanded = PreparedColourRow {
+        item: live,
+        world_surf: planned.world_surface_override,
+    }
+    .expanded_item();
+    let item = expanded.as_ref().unwrap_or(live);
+    let vertex_type = MaterialRunExecutor::vertex_type(view, item, tech);
+    let _ = executor.execute(view, item, tech, vertex_type, true);
+}
+
+fn prepare_camera_rows(
+    input: &CameraRowsInput<'_>,
+    rows: &[ColourRowPlan],
+    lane: &mut ColourPrepareLane,
+    pass: RowsPass,
 ) -> CameraRowTally {
     let CameraRowsInput {
         extracted,
@@ -1083,7 +1418,6 @@ fn prepare_camera_rows(
         pipeline,
         registry,
         device,
-        queue,
         uploaded,
         sampler_table,
         textures,
@@ -1093,7 +1427,15 @@ fn prepare_camera_rows(
         glass_cull,
         census_on,
         sun_shadow_view_ready,
+        reuse: reuse_frame,
+        binding_clears,
+        ..
     } = *input;
+    // Keep rows from the last frame and store this frame's for the next.
+    let reusing = reuse_frame.on && pass != RowsPass::VerifySecond;
+    let lookups = reusing && reuse_frame.valid;
+    let storing = reusing && reuse_frame.store;
+    let tracing = pass != RowsPass::Only;
     let mut ready_draws = 0u32;
     let mut refused_draws = 0u32;
     let mut pipeline_not_ready = 0u32;
@@ -1134,10 +1476,29 @@ fn prepare_camera_rows(
     pending_viewmodel_prepared.clear();
     pending_viewmodel_keys.clear();
     world_exec_ready_keys.clear();
-    lane.arena_pack.begin_list();
+    if pass != RowsPass::VerifySecond {
+        lane.arena_pack.begin_list();
+    }
+    lane.arena_pack.set_span_log(storing || tracing);
+    lane.trace.clear();
+    lane.trace_spans.clear();
+    lane.refusals.clear();
     let mut executor = std::mem::take(&mut lane.executor);
     executor.begin_list();
     let run_pack = std::mem::take(&mut lane.run_pack);
+    let lane_reuse = &mut lane.reuse;
+    let trace = &mut lane.trace;
+    let trace_spans = &mut lane.trace_spans;
+    let refusals = &mut lane.refusals;
+    let textures = if reusing {
+        lane.bind_memo.open(binding_clears);
+        PrepareTextureTables::SceneMemo {
+            shared: textures,
+            memo: &mut lane.bind_memo,
+        }
+    } else {
+        PrepareTextureTables::SceneShared(textures)
+    };
     let mut exact_prepare = ExactPrepare {
         extracted,
         geometry,
@@ -1148,7 +1509,7 @@ fn prepare_camera_rows(
         uploaded,
         spot_shadow_select: None,
         sampler_table,
-        textures: PrepareTextureTables::SceneShared(textures),
+        textures,
         arena: Some(&mut lane.arena_pack),
         run_pack,
         cost: PrepareCost::default(),
@@ -1156,7 +1517,13 @@ fn prepare_camera_rows(
         skinned_shared: Some(skinned),
     };
     exact_prepare.run_pack.begin_pack_intern_frame();
-    for planned in rows {
+    // The executor's run and kept overlay as the rows so far would have left
+    // them, and the kept rows to execute before the next prepared one.
+    let mut chain = executor.chain();
+    let mut replay = std::mem::take(&mut lane.replay);
+    replay.clear();
+    let mut replay_breaks = false;
+    for (offset, planned) in rows.iter().enumerate() {
         let Some(live) = colour_draw_at(colour, light, emissive, planned.draw_index as usize)
         else {
             continue;
@@ -1170,6 +1537,71 @@ fn prepare_camera_rows(
         }
         let tech = colour_tech_at(colour, light, emissive, planned.draw_index as usize)
             .unwrap_or(planned.technique);
+        let row_id = if lookups || storing || tracing {
+            reuse::RowId::of(planned, live, tech)
+        } else {
+            None
+        };
+        let eligible = row_id.is_some();
+        if lookups && let Some(id) = row_id {
+            match lane_reuse.lookup(id, planned, live, tech, reuse_frame) {
+                Lookup::Kept(kept) => {
+                    let arena = exact_prepare
+                        .arena
+                        .as_deref_mut()
+                        .expect("colour lanes pack into an arena");
+                    let alive = kept
+                        .spans
+                        .iter()
+                        .zip(kept.records)
+                        .all(|(span, record)| arena.touch(*span) == record.constant_base);
+                    if alive {
+                        let start = prepared.len();
+                        prepared.extend_from_slice(kept.records);
+                        if tracing {
+                            let at = trace_spans.len();
+                            trace_spans.extend_from_slice(kept.spans);
+                            trace.push(RowTrace::new(
+                                offset,
+                                submit_refusal_family(&live.kind, false),
+                                row_id,
+                                true,
+                                true,
+                                (start, prepared.len()),
+                                (at, trace_spans.len()),
+                            ));
+                        }
+                        if matches!(live.kind, RetainedDrawKind::World { .. }) {
+                            world_exec_ready_keys.push(live.key);
+                        }
+                        ready_draws = ready_draws.saturating_add(1);
+                        prepared_hits = prepared_hits.saturating_add(1);
+                        submitted_keys.push(live.key);
+                        // The material executor carries the run and the kept
+                        // overlay from draw to draw. A kept row that would have
+                        // started a run is remembered, and executed before the
+                        // next row that is prepared, so that row is executed
+                        // after the same chain as with the switch off.
+                        let keys = kept.run_keys;
+                        if chain.0 != Some(keys.share) {
+                            if chain.1 != Some(keys.overlay) {
+                                replay.clear();
+                                replay_breaks = true;
+                            }
+                            replay.push(offset);
+                            chain = (Some(keys.share), Some(keys.overlay));
+                        }
+                        lane_reuse.keep(id);
+                        continue;
+                    }
+                    lane_reuse.tally.miss_span += 1;
+                }
+                Lookup::Changed => lane_reuse.tally.miss_row += 1,
+                Lookup::Reads => lane_reuse.tally.miss_reads += 1,
+                Lookup::Light => lane_reuse.tally.miss_light += 1,
+                Lookup::None => {}
+            }
+        }
         let row = PreparedColourRow {
             item: live,
             world_surf: planned.world_surface_override,
@@ -1208,16 +1640,39 @@ fn prepare_camera_rows(
             last_glass_probe_sampler =
                 Some(u32::from(item.surface_samplers.reflection_probe.is_some()));
         }
-        let executed = exec_view.map_or(
-            Err(MaterialRefusal::StaleMaterialGeneration {
+        let mut run_keys = None;
+        let executed = match exec_view {
+            None => Err(MaterialRefusal::StaleMaterialGeneration {
                 retained: colour.generation_id,
                 current: extracted.world.generation,
             }),
-            |view| {
+            Some(view) => {
+                if !replay.is_empty() {
+                    if replay_breaks {
+                        executor.break_chain();
+                    }
+                    for &at in &replay {
+                        replay_row(&mut executor, view, &rows[at], (colour, light, emissive));
+                    }
+                    replay.clear();
+                    replay_breaks = false;
+                }
                 let vertex_type = MaterialRunExecutor::vertex_type(view, item, tech);
-                executor.execute(view, item, tech, vertex_type, true)
-            },
-        );
+                if storing && row_id.is_some() {
+                    run_keys = Some(MaterialRunExecutor::run_keys(
+                        view.frame,
+                        item,
+                        tech,
+                        vertex_type,
+                    ));
+                }
+                let executed = executor.execute(view, item, tech, vertex_type, true);
+                if lookups {
+                    chain = executor.chain();
+                }
+                executed
+            }
+        };
         let execution = match executed {
             Ok(()) => executor.execution(),
             Err(ref cause) => {
@@ -1251,6 +1706,9 @@ fn prepare_camera_rows(
                 if matches!(item.kind, RetainedDrawKind::Glass { .. }) {
                     last_glassmesh_exec_skip = Some(material_refusal_class(cause));
                 }
+                if tracing {
+                    refusals.push((offset, material_refusal_class(cause)));
+                }
                 continue;
             }
         };
@@ -1283,6 +1741,9 @@ fn prepare_camera_rows(
             }
             submit_refusals.note_submit(&item.kind, viewmodel, &cause);
             last_refusal = Some(cause);
+            if tracing {
+                refusals.push((offset, "sun shadow view"));
+            }
             continue;
         }
         if spot_shadow_view_missing(uploaded, binds_spot_shadow, spot_select) {
@@ -1297,6 +1758,9 @@ fn prepare_camera_rows(
             }
             submit_refusals.note_submit(&item.kind, viewmodel, &cause);
             last_refusal = Some(cause);
+            if tracing {
+                refusals.push((offset, "spot shadow view"));
+            }
             continue;
         }
         let dest = if viewmodel {
@@ -1305,6 +1769,10 @@ fn prepare_camera_rows(
             &mut prepared
         };
         let dest_start = dest.len();
+        let log_start = exact_prepare
+            .arena
+            .as_deref()
+            .map_or(0, |arena| arena.span_log().len());
         match exact_prepare.prepare_ready_hit(
             item,
             execution,
@@ -1373,6 +1841,15 @@ fn prepare_camera_rows(
                                 .unwrap_or("WorldPretessSpanBeyondLimit"),
                             1,
                         );
+                        if tracing {
+                            refusals.push((
+                                offset,
+                                last_refusal
+                                    .as_ref()
+                                    .map(submit_refusal_class)
+                                    .unwrap_or("span"),
+                            ));
+                        }
                         continue;
                     }
                 }
@@ -1381,6 +1858,40 @@ fn prepare_camera_rows(
                 } else {
                     ready_draws = ready_draws.saturating_add(1);
                     submitted_keys.push(item.key);
+                    let spans = exact_prepare
+                        .arena
+                        .as_deref()
+                        .map_or(&[][..], |arena| &arena.span_log()[log_start..]);
+                    if tracing {
+                        let at = trace_spans.len();
+                        trace_spans.extend_from_slice(spans);
+                        trace.push(RowTrace::new(
+                            offset,
+                            submit_refusal_family(&item.kind, viewmodel),
+                            row_id,
+                            eligible && !binds_spot_shadow,
+                            false,
+                            (dest_start, dest.len()),
+                            (at, trace_spans.len()),
+                        ));
+                    }
+                    if storing
+                        && !binds_spot_shadow
+                        && let (Some(id), Some(keys)) = (row_id, run_keys)
+                    {
+                        lane_reuse.store(
+                            id,
+                            keys,
+                            planned,
+                            live,
+                            tech,
+                            &dest[dest_start..],
+                            spans,
+                            execution
+                                .iter_passes()
+                                .flat_map(|pass| pass.code_constants.iter().map(|lane| lane.index)),
+                        );
+                    }
                 }
             }
             Err(cause) => {
@@ -1393,6 +1904,9 @@ fn prepare_camera_rows(
                 submit_refusals.note_submit(&item.kind, viewmodel, &cause);
                 if matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
                     pipeline_not_ready = pipeline_not_ready.saturating_add(1);
+                }
+                if tracing {
+                    refusals.push((offset, submit_refusal_class(&cause)));
                 }
                 if census_on && matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
                     record_pipeline_not_ready(
@@ -1442,32 +1956,7 @@ fn prepare_camera_rows(
     drop(exact_prepare);
     let run_census = executor.census();
     lane.executor = executor;
-
-    let mut arena_ms = 0.0f32;
-    let (mut arena_share, mut arena_vertex_n, mut arena_pixel_n) = (0u32, 0usize, 0usize);
-    if !prepared.is_empty() || !pending_viewmodel_prepared.is_empty() {
-        let arena_started = std::time::Instant::now();
-        let split = prepared.len();
-        prepared.append(&mut pending_viewmodel_prepared);
-        (arena_share, arena_vertex_n, arena_pixel_n) = upload_constant_arena(
-            &mut prepared,
-            &mut lane.arena_pack,
-            gpu_arena,
-            pipeline,
-            registry,
-            device,
-            queue,
-            "iw4_exact_vs_constant_arena",
-        );
-        pending_viewmodel_prepared.extend(prepared.drain(split..));
-        arena_ms = arena_started.elapsed().as_secs_f32() * 1000.0;
-    }
-    for draw in prepared
-        .iter_mut()
-        .chain(pending_viewmodel_prepared.iter_mut())
-    {
-        draw.arena_lane = lane_index;
-    }
+    lane.replay = replay;
     lane.prepared = prepared;
     lane.submitted_keys = submitted_keys;
     lane.pending_viewmodel_prepared = pending_viewmodel_prepared;
@@ -1506,10 +1995,10 @@ fn prepare_camera_rows(
         viewmodel_pipeline_gap,
         cost,
         run_census,
-        arena_ms,
-        arena_share,
-        arena_vertex_n,
-        arena_pixel_n,
+        arena_ms: 0.0,
+        arena_share: 0,
+        arena_vertex_n: 0,
+        arena_pixel_n: 0,
     }
 }
 
@@ -1541,6 +2030,17 @@ struct ColourPrepareLane {
     pending_viewmodel_prepared: Vec<PreparedExactDraw>,
     pending_viewmodel_keys: Vec<u64>,
     world_exec_ready_keys: Vec<u64>,
+
+    /// `IW4L_DRAW_REUSE`: this lane's texture bindings and its rows from the
+    /// last frame; the rest is the verifier's per-pass record of each row.
+    bind_memo: super::LaneBindMemo,
+    reuse: reuse::LaneReuse,
+    trace: Vec<RowTrace>,
+    trace_spans: Vec<super::constants::ArenaSpanRef>,
+    refusals: Vec<(usize, &'static str)>,
+    replay: Vec<usize>,
+    snapshot: Vec<u8>,
+    snapshot_at: Vec<Option<(usize, usize)>>,
 }
 
 #[derive(Resource, Default)]
@@ -1561,6 +2061,8 @@ pub(super) struct ColourSubmitScratch {
     pub(super) prepared_scene_epoch: TableEpoch,
 
     logged_skinned: Option<(usize, usize)>,
+
+    reuse: reuse::ReuseState,
 }
 
 impl ColourSubmitScratch {

@@ -246,6 +246,37 @@ impl RuntimeCodeSources {
             .copied()
             .flatten()
     }
+
+    /// The code constants whose live rows differ from `previous`: written in
+    /// one and not the other, or written with other values. Indices go to
+    /// `out` in ascending order; textures are [`Self::same_textures`].
+    pub fn changed_constants(&self, previous: &Self, out: &mut Vec<u16>) {
+        out.clear();
+        let len = self.constants.len().max(previous.constants.len());
+        for index in 0..len {
+            let now = self
+                .constants
+                .get(index)
+                .and_then(CodeConstantSlot::live_rows);
+            let before = previous
+                .constants
+                .get(index)
+                .and_then(CodeConstantSlot::live_rows);
+            let same = match (now, before) {
+                (None, None) => true,
+                (Some(now), Some(before)) => Arc::ptr_eq(now, before) || now[..] == before[..],
+                _ => false,
+            };
+            if !same {
+                out.push(u16::try_from(index).expect("code constant index fits u16"));
+            }
+        }
+    }
+
+    /// Whether both sources bind the same code textures and images.
+    pub fn same_textures(&self, other: &Self) -> bool {
+        self.textures == other.textures && self.texture_images == other.texture_images
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,7 +284,7 @@ pub enum CodeSourceError {
     TextureIndexOverflow,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompiledConstantOverlay {
     generation: crate::MaterialGenerationId,
     rows: Vec<(u16, [u32; 4])>,
@@ -293,5 +324,53 @@ impl CompiledConstantOverlay {
             sources.set_constant_rows(index, &[row]);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod changed_tests {
+    use super::RuntimeCodeSources;
+
+    #[test]
+    fn changed_constants_names_written_cleared_and_rewritten_indices() {
+        let mut before = RuntimeCodeSources::default();
+        before.set_constant_rows(3, &[[1, 2, 3, 4]]);
+        before.set_constant_rows(7, &[[5, 6, 7, 8]]);
+        before.set_constant_rows(9, &[[0; 4]]);
+        let mut now = RuntimeCodeSources::default();
+        now.set_constant_rows(3, &[[1, 2, 3, 4]]);
+        now.set_constant_rows(7, &[[5, 6, 7, 9]]);
+        now.set_constant_rows(12, &[[1; 4]]);
+        let mut out = vec![99];
+        now.changed_constants(&before, &mut out);
+        assert_eq!(out, vec![7, 9, 12]);
+        now.changed_constants(&now.clone(), &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_overlay_write_that_is_cleared_again_is_no_change() {
+        let mut before = RuntimeCodeSources::default();
+        before.set_constant_rows(2, &[[1; 4]]);
+        let mut now = before.clone();
+        now.begin_overlay();
+        now.set_constant_rows(5, &[[2; 4]]);
+        now.reset_overlay();
+        let mut out = Vec::new();
+        now.changed_constants(&before, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn same_textures_compares_samplers_and_images() {
+        let mut a = RuntimeCodeSources::default();
+        a.set_texture(4, 1).unwrap();
+        let mut b = a.clone();
+        assert!(a.same_textures(&b));
+        b.set_texture(4, 2).unwrap();
+        assert!(!a.same_textures(&b));
+        a.set_texture_with_image(4, 2, crate::RuntimeImageId(7))
+            .unwrap();
+        assert!(!a.same_textures(&b));
     }
 }

@@ -100,8 +100,10 @@ fn execution_smodel_packed(packed: u64) -> u64 {
     packed & !0xffff
 }
 
+/// The material run a draw belongs to: consecutive draws with the same key
+/// share one execution (see [`MaterialRunExecutor::execute`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct ExecutionShareKey {
+pub struct ExecutionShareKey {
     gpu_packed: u64,
 
     material_rank: u32,
@@ -144,8 +146,11 @@ enum ExecutionShareExtra {
     MarkMesh,
 }
 
+/// The part of a draw's code-constant overlay that is not its own object's:
+/// a run that starts with the same key as the last run keeps that overlay and
+/// writes only the object constants over it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct OverlayKeepKey {
+pub struct OverlayKeepKey {
     scene_light: u8,
     extra: OverlayKeepExtra,
 }
@@ -166,6 +171,13 @@ enum OverlayKeepExtra {
 enum OverlayMode {
     Full,
     ObjOnly,
+}
+
+/// See [`MaterialRunExecutor::run_keys`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DrawRunKeys {
+    pub share: ExecutionShareKey,
+    pub overlay: OverlayKeepKey,
 }
 
 pub fn draw_material_key(draw: &RetainedDrawItem) -> MaterialDrawKey {
@@ -630,6 +642,7 @@ impl<'a> PlaceLanes<'a> {
     }
 }
 
+#[derive(Clone)]
 struct RunState {
     share: ExecutionShareKey,
     execution: MaterialExecution,
@@ -657,7 +670,7 @@ pub struct MaterialRunCensus {
     pub overlay_need_known: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MaterialRunExecutor {
     scratch: RuntimeCodeSources,
     place_scratch: RuntimeCodeSources,
@@ -677,7 +690,7 @@ pub struct MaterialRunExecutor {
 /// The need is a property of the shell — the code constants its passes bind —
 /// so it is stored where the shell is and answers before the overlay for every
 /// draw after the first of its kind.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ShellEntry {
     shell: Arc<StableMaterialShell>,
     need: OverlayCodeNeed,
@@ -715,6 +728,33 @@ impl MaterialRunExecutor {
 
     pub fn run_serial(&self) -> u64 {
         self.run_serial
+    }
+
+    /// The keys that decide how `draw` is executed after the draw before it,
+    /// without executing it.
+    pub fn run_keys(
+        frame: &MaterialExecFrame,
+        draw: &RetainedDrawItem,
+        tech_type: TechType,
+        vertex_type: u8,
+    ) -> DrawRunKeys {
+        DrawRunKeys {
+            share: execution_share_key(frame, draw, tech_type, vertex_type),
+            overlay: overlay_keep_key(frame, draw),
+        }
+    }
+
+    /// The run the next draw would continue and the overlay the next run
+    /// would keep: everything that carries over from one draw to the next.
+    pub fn chain(&self) -> (Option<ExecutionShareKey>, Option<OverlayKeepKey>) {
+        (self.run.as_ref().map(|run| run.share), self.last_overlay)
+    }
+
+    /// Forget the run and the kept overlay: the next draw starts a run with
+    /// its full overlay, as it would after a draw with other keys.
+    pub fn break_chain(&mut self) {
+        self.run = None;
+        self.last_overlay = None;
     }
 
     pub fn census(&self) -> MaterialRunCensus {

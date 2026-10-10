@@ -134,6 +134,10 @@ impl ExactPipelineRegistry {
         true
     }
 
+    pub(super) fn world(&self) -> frame::WorldGeneration {
+        self.world
+    }
+
     pub(super) fn bind_group_layout(
         &self,
         device: &RenderDevice,
