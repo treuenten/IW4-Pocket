@@ -56,7 +56,10 @@ reached, no goal, or a goal the graph cannot reach) counts as stuck and steps
 off the same way, and the periodic aggregate counts it. With no clear step in
 any direction (midway up a flight of stairs between two baked steps, where no
 node is within a step's height to route from either) the bot walks straight
-at the nearest node and lets the movement code take the stairs.
+at the nearest node and lets the movement code take the stairs. A route that
+could not start (no baked node near enough to walk to) is not asked for again
+from the same spot for a second: another goal from there fails the same way,
+and each attempt spends shared quota on probes the other bots are waiting for.
 
 Some map volumes kill: MW2's scripts suicide any player touching a
 `trigger_hurt`, poison and then kill players in the `radiation` fields and blow

@@ -72,6 +72,11 @@ const ENGAGEMENT_LAPSE_TICKS: u32 = 200;
 /// A repositioning bot looks for a firing position at least this far from
 /// where its attack failed.
 const REPOSITION_IN: f32 = 96.0;
+/// After a route could not start from where the bot stands, no new route is
+/// asked for from the same spot for this long: another goal from the same
+/// spot fails the same way, and each attempt spends the shared quota on
+/// probes every other bot is waiting for.
+const NO_START_RETRY_TICKS: u32 = 20;
 /// A threat that moves this far gets a new set of fall-back points.
 const RETREAT_REPLAN_IN: f32 = 160.0;
 
@@ -124,6 +129,11 @@ pub struct HostController {
     ignored: Vec<(ClientId, u32)>,
     /// Where a bot standing in a hazard volume is walking out to.
     hazard_exit: Option<[f32; 3]>,
+    /// Where and when a route last could not start: no baked node near
+    /// enough to walk to from there.
+    no_start: Option<([f32; 3], u32)>,
+    /// The tick of the think under way.
+    now: u32,
 }
 
 impl HostController {
@@ -166,6 +176,8 @@ impl HostController {
             reposition_from: None,
             ignored: Vec::new(),
             hazard_exit: None,
+            no_start: None,
+            now: 0,
         }
     }
 
@@ -277,6 +289,7 @@ impl HostController {
             self.reposition_from = None;
             self.ignored.clear();
             self.hazard_exit = None;
+            self.no_start = None;
             self.decision = Decision::default();
             self.task = Task::default();
         }
@@ -408,6 +421,7 @@ impl HostController {
         astar_budget: &mut u32,
     ) {
         let started = std::time::Instant::now();
+        self.now = obs.tick;
         let events = self.memory.ingest(obs);
         self.prefer_weapon = None;
         self.ignored.retain(|(_, until)| obs.tick < *until);
@@ -1715,6 +1729,12 @@ impl HostController {
                 .route_goal
                 .is_none_or(|g| dist2(g, to) > WAYPOINT_IN * WAYPOINT_IN);
         if need {
+            if self.no_start.is_some_and(|(at, since)| {
+                dist_xy(at, from) < 16.0 && self.now.saturating_sub(since) < NO_START_RETRY_TICKS
+            }) {
+                self.committed.clear();
+                return (MoveMode::Hold, PathOutcome::Unreachable, Some(to));
+            }
             let objective = self.decision.objective.filter(|o| o.origin == to);
             match nav::find_route_resumable(
                 world,
@@ -1735,11 +1755,15 @@ impl HostController {
                 Err(PathError::BudgetExhausted { .. }) => {
                     return (MoveMode::Hold, PathOutcome::BudgetExhausted, Some(to));
                 }
+                Err(PathError::NoStartSupport) => {
+                    self.no_start = Some((from, self.now));
+                    self.committed.clear();
+                    return (MoveMode::Hold, PathOutcome::Unreachable, Some(to));
+                }
                 Err(
                     PathError::GraphChanged
                     | PathError::Unreachable
                     | PathError::EmptyGraph
-                    | PathError::NoStartSupport
                     | PathError::NoGoalSupport,
                 ) => {
                     self.committed.clear();
@@ -2667,6 +2691,77 @@ mod weapon_fight_tests {
         assert_eq!(bot.escape.map(|(goal, _)| goal), Some([0.0, 22.0, 24.0]));
         // No graph, nothing to walk at.
         assert_eq!(bot.escape_step(&alone, &mut Walled, None), None);
+    }
+
+    /// Walls everywhere, counting the hull traces asked of it.
+    struct CountingWalls(u32);
+
+    impl WorldQuery for CountingWalls {
+        fn sight_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn shot_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+            Ok(SightSample::Clear)
+        }
+
+        fn hull_trace(&mut self, start: [f32; 3], _: [f32; 3]) -> QueryResult<HullTrace> {
+            self.0 += 1;
+            Ok(HullTrace {
+                fraction: 0.0,
+                normal: [1.0, 0.0, 0.0],
+                endpos: start,
+                startsolid: false,
+            })
+        }
+    }
+
+    #[test]
+    fn a_route_that_cannot_start_is_not_asked_for_again_at_once() {
+        // A corridor 200 units off with walls in between: no start attaches.
+        let count = 20;
+        let edge = |to: usize| nav::NavEdge {
+            to: to as u16,
+            cost: 48.0,
+            kind: nav::TraversalKind::Walk,
+        };
+        let graph = NavGraph {
+            nodes: (0..count).map(|i| [i as f32 * 48.0, 200.0, 0.0]).collect(),
+            component: vec![0; count],
+            adj: (0..count)
+                .map(|i| {
+                    [i.checked_sub(1), (i + 1 < count).then_some(i + 1)]
+                        .into_iter()
+                        .flatten()
+                        .map(edge)
+                        .collect()
+                })
+                .collect(),
+            ..NavGraph::default()
+        };
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 12, 24);
+        let scene = |tick| {
+            let mut obs = facing_enemy(tick, usp, vec![usp], 300.0);
+            obs.seen.clear();
+            obs
+        };
+        let mut world = CountingWalls(0);
+        bot.drive_nav(&scene(1), &mut world, Some(&graph), &mut 4096, 50);
+        assert_eq!(bot.intent().path, PathOutcome::Unreachable);
+        let first = world.0;
+        assert!(first > 0);
+        // The next thinks within a second ask nothing of the world.
+        for tick in 2..=12 {
+            bot.drive_nav(&scene(tick), &mut world, Some(&graph), &mut 4096, 50);
+        }
+        assert_eq!(world.0, first);
+        assert_eq!(bot.intent().path, PathOutcome::Unreachable);
+        // A second later it tries again.
+        for tick in 13..=24 {
+            bot.drive_nav(&scene(tick), &mut world, Some(&graph), &mut 4096, 50);
+        }
+        assert!(world.0 > first);
     }
 
     #[test]
