@@ -57,6 +57,21 @@ const SIDEARM_RANGE_IN: f32 = 600.0;
 const SIDEARM_THINKS: u32 = 30;
 /// Fall-back points one retreat considers, each checked once for cover.
 const RETREAT_CANDIDATES: usize = 4;
+/// Attacking one enemy this long without its health falling moves the bot to
+/// another firing position: MW2 engagements are decided in a second or two,
+/// so four seconds of hits that do nothing (a riot shield, cover the trace
+/// cannot tell from a body, a player who takes no damage) is a failed angle.
+const FUTILE_REPOSITION_TICKS: u32 = 80;
+/// This long and the bot gives up on that enemy and goes back to its
+/// objective or its hunt.
+const FUTILE_GIVE_UP_TICKS: u32 = 180;
+/// How long an enemy given up on is left alone.
+const FUTILE_IGNORE_TICKS: u32 = 240;
+/// An engagement not added to for this long starts again from nothing.
+const ENGAGEMENT_LAPSE_TICKS: u32 = 200;
+/// A repositioning bot looks for a firing position at least this far from
+/// where its attack failed.
+const REPOSITION_IN: f32 = 96.0;
 /// A threat that moves this far gets a new set of fall-back points.
 const RETREAT_REPLAN_IN: f32 = 160.0;
 
@@ -100,6 +115,13 @@ pub struct HostController {
     shield_far: u32,
     /// Where a recovering bot falls back to while it reloads or switches.
     retreat: Option<Retreat>,
+    /// Whether attacking the current enemy is hurting it.
+    engagement: Option<Engagement>,
+    /// Where an attack that hurt nobody was made from, while the bot moves
+    /// to another firing position.
+    reposition_from: Option<[f32; 3]>,
+    /// Enemies given up on, each with the tick it may be fought again.
+    ignored: Vec<(ClientId, u32)>,
 }
 
 impl HostController {
@@ -138,6 +160,9 @@ impl HostController {
             prefer_weapon: None,
             shield_far: 0,
             retreat: None,
+            engagement: None,
+            reposition_from: None,
+            ignored: Vec::new(),
         }
     }
 
@@ -245,6 +270,9 @@ impl HostController {
             self.prefer_weapon = None;
             self.shield_far = 0;
             self.retreat = None;
+            self.engagement = None;
+            self.reposition_from = None;
+            self.ignored.clear();
             self.decision = Decision::default();
             self.task = Task::default();
         }
@@ -378,6 +406,7 @@ impl HostController {
         let started = std::time::Instant::now();
         let events = self.memory.ingest(obs);
         self.prefer_weapon = None;
+        self.ignored.retain(|(_, until)| obs.tick < *until);
         let touching_use = obs
             .objectives
             .iter()
@@ -636,11 +665,14 @@ impl HostController {
     }
 
     fn pick_task(&mut self, obs: &BotObservation, objective: Option<ModeObjective>) -> Task {
-        let seen = self.memory.currently_seen().next().is_some();
-        let fresh = self
+        let seen = self
             .memory
-            .last_seen()
-            .any(|c| obs.tick.saturating_sub(c.seen_tick) <= LAST_SEEN_FRESH_TICKS);
+            .currently_seen()
+            .any(|c| !self.ignores(c.id, obs.tick));
+        let fresh = self.memory.last_seen().any(|c| {
+            !self.ignores(c.id, obs.tick)
+                && obs.tick.saturating_sub(c.seen_tick) <= LAST_SEEN_FRESH_TICKS
+        });
         let mut scores = [
             10.0,
             if fresh { 55.0 } else { -1.0 },
@@ -881,6 +913,14 @@ impl HostController {
         let knife = attack && crate::motor::in_melee_reach(obs.self_state.origin, target.origin);
         let fire =
             self.authorize_fire(attack && (knife || can_shoot(obs, target)), target) && !knife;
+        match self.assess(obs, target, fire || knife) {
+            Futility::GiveUp => return self.give_up(obs, world, nav, astar_budget, target),
+            Futility::Reposition => {
+                self.reposition_from = Some(obs.self_state.origin);
+                self.fight_scan = None;
+            }
+            Futility::Fight => {}
+        }
         let hold = self.hold_range(obs);
         let (move_mode, path, move_goal) = self.fight_position(
             obs,
@@ -897,33 +937,7 @@ impl HostController {
             PathOutcome::Unreachable | PathOutcome::Blocked | PathOutcome::IncompleteGraph
         ) && !shot_allowed(shot, target.id)
         {
-            if let Some(obj) = choose_objective(
-                obs,
-                world,
-                nav,
-                astar_budget,
-                &mut self.committed,
-                &mut self.route_goal,
-                &mut self.route_work,
-            ) {
-                self.task = Task {
-                    kind: TaskKind::TouchObj,
-                    reason: SwitchReason::PathFailed,
-                };
-                self.decision.objective = Some(obj);
-                return self.seek(
-                    obs,
-                    world,
-                    nav,
-                    astar_budget,
-                    SeekKind::Objective(Some(obj)),
-                );
-            }
-            self.task = Task {
-                kind: TaskKind::Hunt,
-                reason: SwitchReason::PathFailed,
-            };
-            return self.hunt(obs, world, nav, astar_budget);
+            return self.give_way(obs, world, nav, astar_budget, SwitchReason::PathFailed);
         }
         BotIntent {
             look_at: Some(aim_at),
@@ -935,6 +949,91 @@ impl HostController {
             path,
             ..BotIntent::default()
         }
+    }
+
+    /// Folds this think of the fight into the engagement with `target`: a
+    /// fall in its health is damage dealt; attacking without one adds up.
+    fn assess(&mut self, obs: &BotObservation, target: Contact, attacking: bool) -> Futility {
+        let current = self.engagement.is_some_and(|e| {
+            e.target == target.id && obs.tick.saturating_sub(e.tick) <= ENGAGEMENT_LAPSE_TICKS
+        });
+        if !current {
+            self.engagement = Some(Engagement::new(target.id, target.health, obs.tick));
+            self.reposition_from = None;
+        }
+        let engagement = self.engagement.as_mut().expect("engagement set above");
+        let verdict = engagement.observe(target.health, attacking, obs.tick);
+        if engagement.attack_ticks == 0 {
+            self.reposition_from = None;
+        }
+        verdict
+    }
+
+    /// Leaves an enemy the bot has not hurt in all that time of attacking it,
+    /// for its objective or a hunt elsewhere, and leaves it alone for a while.
+    /// A player in a fight he cannot win does not stand in it.
+    fn give_up(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
+        astar_budget: &mut u32,
+        target: Contact,
+    ) -> BotIntent {
+        self.ignored
+            .push((target.id, obs.tick.saturating_add(FUTILE_IGNORE_TICKS)));
+        self.engagement = None;
+        self.reposition_from = None;
+        self.last_target = None;
+        self.fire_target = None;
+        self.fight_scan = None;
+        self.roam = None;
+        self.give_way(obs, world, nav, astar_budget, SwitchReason::GaveUp)
+    }
+
+    /// A fight that cannot go on gives way to the objective, or to a hunt.
+    fn give_way(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        nav: Option<&NavGraph>,
+        astar_budget: &mut u32,
+        reason: SwitchReason,
+    ) -> BotIntent {
+        if let Some(obj) = choose_objective(
+            obs,
+            world,
+            nav,
+            astar_budget,
+            &mut self.committed,
+            &mut self.route_goal,
+            &mut self.route_work,
+        ) {
+            self.task = Task {
+                kind: TaskKind::TouchObj,
+                reason,
+            };
+            self.decision.objective = Some(obj);
+            return self.seek(
+                obs,
+                world,
+                nav,
+                astar_budget,
+                SeekKind::Objective(Some(obj)),
+            );
+        }
+        self.task = Task {
+            kind: TaskKind::Hunt,
+            reason,
+        };
+        self.hunt(obs, world, nav, astar_budget)
+    }
+
+    /// An enemy given up on that is still to be left alone.
+    fn ignores(&self, id: ClientId, tick: u32) -> bool {
+        self.ignored
+            .iter()
+            .any(|(who, until)| *who == id && tick < *until)
     }
 
     /// The fight of a bot whose weapon is its melee: walk up to the enemy and
@@ -960,6 +1059,9 @@ impl HostController {
                 && range <= MELEE_ARM_IN,
             target,
         );
+        if self.assess(obs, target, melee) == Futility::GiveUp {
+            return self.give_up(obs, world, nav, astar_budget, target);
+        }
         let (move_mode, path, move_goal) =
             self.melee_approach(obs, world, nav, astar_budget, target.origin, range);
         let failed = matches!(
@@ -1033,6 +1135,7 @@ impl HostController {
         let hold = self.hold_range(obs);
         self.memory
             .currently_seen()
+            .filter(|c| !self.ignores(c.id, obs.tick))
             .max_by(|a, b| {
                 fight_score(obs, a, hold, self.last_target).total_cmp(&fight_score(
                     obs,
@@ -1075,6 +1178,9 @@ impl HostController {
                 ),
             target,
         );
+        if self.assess(obs, target, fire) == Futility::GiveUp {
+            return self.give_up(obs, world, nav, astar_budget, target);
+        }
         let (move_mode, path, move_goal) =
             self.route(obs.self_state.origin, away, world, nav, astar_budget);
         BotIntent {
@@ -1111,8 +1217,12 @@ impl HostController {
         if shot.is_err() {
             return (MoveMode::Hold, PathOutcome::BudgetExhausted, Some(here));
         }
-        // Already in range with a line of fire: this is the position.
-        if in_hold && shot_allowed(shot, target_id) {
+        // Already in range with a line of fire: this is the position, unless
+        // attacking from here has hurt nobody and the bot is moving off.
+        let leaving = self
+            .reposition_from
+            .is_some_and(|from| dist_xy(from, here) <= REPOSITION_IN);
+        if in_hold && shot_allowed(shot, target_id) && !leaving {
             return (MoveMode::Hold, PathOutcome::Clear, Some(here));
         }
         let hold = self.hold_range(obs);
@@ -1212,6 +1322,10 @@ impl HostController {
         }
         self.fight_scan = Some(scan);
         let Some(pos) = chosen else {
+            if !denied {
+                // Nowhere else to shoot from: stay and keep at it.
+                self.reposition_from = None;
+            }
             let path = if denied {
                 PathOutcome::BudgetExhausted
             } else {
@@ -1240,8 +1354,17 @@ impl HostController {
         hold: f32,
     ) -> Vec<[f32; 3]> {
         let here = obs.self_state.origin;
+        // A new angle after an attack that hurt nobody, not the same spot.
+        let fresh = |pos: &[f32; 3]| {
+            self.reposition_from
+                .is_none_or(|from| dist_xy(from, *pos) > REPOSITION_IN)
+        };
         if let Some(graph) = nav.filter(|graph| !graph.is_empty()) {
-            let supports = nav::firing_supports(graph, here, target, hold, FIGHT_CANDIDATES);
+            let supports: Vec<[f32; 3]> =
+                nav::firing_supports(graph, here, target, hold, FIGHT_CANDIDATES)
+                    .into_iter()
+                    .filter(fresh)
+                    .collect();
             if !supports.is_empty() {
                 return supports;
             }
@@ -1255,6 +1378,7 @@ impl HostController {
                     here[2],
                 ]
             })
+            .filter(fresh)
             .collect()
     }
 
@@ -1268,7 +1392,12 @@ impl HostController {
     ) -> BotIntent {
         let (goal, use_button, look) = match kind {
             SeekKind::LastSeen => {
-                let Some(last) = self.memory.last_seen().next().copied() else {
+                let Some(last) = self
+                    .memory
+                    .last_seen()
+                    .find(|c| !self.ignores(c.id, obs.tick))
+                    .copied()
+                else {
                     return BotIntent::default();
                 };
                 (last.origin, false, last.origin)
@@ -1639,6 +1768,66 @@ struct Retreat {
     threat: [f32; 3],
     candidates: Vec<[f32; 3]>,
     chosen: Option<[f32; 3]>,
+}
+
+/// Whether attacking one enemy is hurting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Engagement {
+    target: ClientId,
+    /// The enemy's health at the last think: a fall from it is damage dealt.
+    health: i32,
+    tick: u32,
+    /// Ticks spent attacking since the enemy last lost health.
+    attack_ticks: u32,
+    /// The bot has already been sent to another position for this attack.
+    repositioned: bool,
+}
+
+/// What an engagement's progress asks of the fight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Futility {
+    Fight,
+    /// Find another firing position.
+    Reposition,
+    /// Leave this enemy alone.
+    GiveUp,
+}
+
+impl Engagement {
+    fn new(target: ClientId, health: i32, tick: u32) -> Self {
+        Self {
+            target,
+            health,
+            tick,
+            attack_ticks: 0,
+            repositioned: false,
+        }
+    }
+
+    /// One think of the fight. Only attacking counts, and only in think-sized
+    /// steps, so walking to a position or a pause to reload adds nothing.
+    fn observe(&mut self, health: i32, attacking: bool, tick: u32) -> Futility {
+        let dt = tick.saturating_sub(self.tick).min(2 * THINK_PERIOD_TICKS);
+        self.tick = tick;
+        let hurt = health < self.health;
+        self.health = health;
+        if hurt {
+            self.attack_ticks = 0;
+            self.repositioned = false;
+            return Futility::Fight;
+        }
+        if attacking {
+            self.attack_ticks = self.attack_ticks.saturating_add(dt);
+        }
+        if self.attack_ticks >= FUTILE_GIVE_UP_TICKS {
+            Futility::GiveUp
+        } else if self.attack_ticks >= FUTILE_REPOSITION_TICKS && !self.repositioned {
+            self.repositioned = true;
+            Futility::Reposition
+        } else {
+            Futility::Fight
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2114,6 +2303,7 @@ mod weapon_fight_tests {
                 source: KnowledgeSource::CurrentlySeen,
                 seen_tick: tick,
                 confidence: 1.0,
+                health: 100,
             }],
             unsensed: Vec::new(),
             events: Vec::new(),
@@ -2310,6 +2500,91 @@ mod weapon_fight_tests {
         for task in [TaskKind::Fight, TaskKind::Recover, TaskKind::TouchObj] {
             assert!(!idle_search(task, MoveMode::Hold, PathOutcome::Clear));
         }
+    }
+
+    #[test]
+    fn an_attack_that_hurts_nobody_repositions_then_gives_up() {
+        let mut e = Engagement::new(ClientId(0), 100, 0);
+        let mut verdicts = Vec::new();
+        for tick in (2..=200).step_by(2) {
+            verdicts.push((tick, e.observe(100, true, tick)));
+        }
+        let first = |v: Futility| verdicts.iter().find(|(_, f)| *f == v).map(|(t, _)| *t);
+        assert_eq!(first(Futility::Reposition), Some(FUTILE_REPOSITION_TICKS));
+        assert_eq!(first(Futility::GiveUp), Some(FUTILE_GIVE_UP_TICKS));
+        // Repositioning is asked for once per attack.
+        assert_eq!(
+            verdicts
+                .iter()
+                .filter(|(_, f)| *f == Futility::Reposition)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn damage_dealt_and_time_not_attacking_do_not_count() {
+        let mut e = Engagement::new(ClientId(0), 100, 0);
+        for tick in (2..=78).step_by(2) {
+            e.observe(100, true, tick);
+        }
+        // A hit lands: the count starts again, and so may a reposition.
+        assert_eq!(e.observe(80, true, 80), Futility::Fight);
+        assert_eq!(e.attack_ticks, 0);
+        // Walking to a position or reloading adds nothing.
+        for tick in (82..=400).step_by(2) {
+            assert_eq!(e.observe(80, false, tick), Futility::Fight);
+        }
+        // Health coming back is no damage, and a long gap counts as one think.
+        assert_eq!(e.observe(100, true, 402), Futility::Fight);
+        assert_eq!(e.observe(100, true, 1_000), Futility::Fight);
+        assert_eq!(e.attack_ticks, 2 + 2 * THINK_PERIOD_TICKS);
+    }
+
+    #[test]
+    fn a_bot_shooting_an_enemy_it_cannot_hurt_moves_off_then_leaves_it() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 500, 0);
+        // In hold range with a clear shot: the bot stands and fires.
+        let early = run(&mut bot, 60, |tick| {
+            facing_enemy(tick, usp, vec![usp], 80.0)
+        });
+        assert_eq!(bot.task().kind, TaskKind::Fight);
+        assert_eq!(bot.intent().move_mode, MoveMode::Hold);
+        assert!(early.iter().any(|cmd| cmd.buttons & buttons::ATTACK != 0));
+        // Four seconds of it with the enemy untouched: another position.
+        run(&mut bot, 50, |tick| {
+            facing_enemy(60 + tick, usp, vec![usp], 80.0)
+        });
+        assert_eq!(bot.task().kind, TaskKind::Fight);
+        let intent = bot.intent();
+        assert_eq!(intent.move_mode, MoveMode::Walk, "{intent:?}");
+        let goal = intent.move_goal.expect("a new position");
+        assert!(dist_xy(goal, [0.0; 3]) > REPOSITION_IN, "{goal:?}");
+        // Nine seconds and it gives the enemy up and stops shooting at it.
+        let late = run(&mut bot, 110, |tick| {
+            facing_enemy(110 + tick, usp, vec![usp], 80.0)
+        });
+        assert_eq!(bot.task().kind, TaskKind::Hunt);
+        assert!(bot.ignores(ClientId(0), 220));
+        assert!(
+            late[late.len() - 20..]
+                .iter()
+                .all(|cmd| cmd.buttons & buttons::ATTACK == 0)
+        );
+    }
+
+    #[test]
+    fn a_bot_whose_hits_land_keeps_fighting() {
+        let mut bot = HostController::new(0x5eed_0042);
+        let usp = gun(USP, 500, 0);
+        run(&mut bot, 260, |tick| {
+            let mut obs = facing_enemy(tick, usp, vec![usp], 80.0);
+            obs.seen[0].health = 100 - (tick / 40) as i32;
+            obs
+        });
+        assert_eq!(bot.task().kind, TaskKind::Fight);
+        assert!(bot.ignored.is_empty());
     }
 
     #[test]

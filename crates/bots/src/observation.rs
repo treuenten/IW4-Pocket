@@ -33,6 +33,10 @@ pub struct Contact {
     pub source: KnowledgeSource,
     pub seen_tick: u32,
     pub confidence: f32,
+    /// The enemy's health when last seen. A player shooting someone sees
+    /// whether the hits land (hit markers, the enemy flinching); this is that
+    /// knowledge, and nothing more is read from it.
+    pub health: i32,
 }
 
 /// What perception established about one client this tick. `NotSeen` is an

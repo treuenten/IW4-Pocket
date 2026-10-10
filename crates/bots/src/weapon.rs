@@ -422,6 +422,7 @@ mod tests {
             source: KnowledgeSource::CurrentlySeen,
             seen_tick: obs.tick,
             confidence: 1.0,
+            health: 100,
         });
         obs
     }

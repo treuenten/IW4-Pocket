@@ -87,7 +87,14 @@ than asking the route for the same unreachable point on every think.
 
 A shot whose trace would land on the target's riot shield is not a shot: the
 bot tries the head and the feet, then another firing position, as players
-flank a shield.
+flank a shield. A fight is judged by the damage it does. The enemy's health
+when seen stands for what a player reads from hit markers, and four seconds
+of attacking (firing or swinging, not walking or reloading) without it
+falling sends the bot to a firing position at least 96 units from where it
+stood. Nine seconds and the bot gives that enemy up for twelve, and goes back
+to its objective or its hunt. Against a player who takes no damage (god mode,
+a shield it cannot get round) bots attack, move, leave and come back, instead
+of standing in front of him for the rest of the match.
 
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a

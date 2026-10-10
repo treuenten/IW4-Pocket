@@ -19,6 +19,8 @@ pub enum SwitchReason {
     ClipEmpty,
     ProgressLost,
     Died,
+    /// A fight that hurt the enemy no more for all the attacking was left.
+    GaveUp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

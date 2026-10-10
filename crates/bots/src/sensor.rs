@@ -127,6 +127,7 @@ pub fn observe_focused(
                     source: KnowledgeSource::CurrentlySeen,
                     seen_tick: snapshot.tick.0,
                     confidence: 1.0,
+                    health: other.health,
                 }),
                 Visibility::NotSeen => {}
                 Visibility::Unknown => unsensed.push(*id),
