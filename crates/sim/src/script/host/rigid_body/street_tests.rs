@@ -19,6 +19,10 @@ struct Street {
 }
 
 fn aabb_brush(lo: Vec3, hi: Vec3) -> SimBrush {
+    contents_brush(lo, hi, crate::bullet_collision::CONTENTS_SOLID)
+}
+
+fn contents_brush(lo: Vec3, hi: Vec3, contents: u32) -> SimBrush {
     SimBrush {
         planes: vec![
             [1.0, 0.0, 0.0, hi.x],
@@ -28,7 +32,7 @@ fn aabb_brush(lo: Vec3, hi: Vec3) -> SimBrush {
             [0.0, 0.0, 1.0, hi.z],
             [0.0, 0.0, -1.0, -lo.z],
         ],
-        contents: crate::bullet_collision::CONTENTS_SOLID,
+        contents,
         plane_surface_flags: vec![0; 6],
         glass_encoded: 0,
     }
@@ -226,17 +230,18 @@ impl Street {
         ))
     }
 
-    /// The terrain triangles alone.
-    fn terrain(&self, start: Vec3, end: Vec3, half: Vec3) -> Sweep {
+    /// The solid world alone: the clip brushes left out (here every brush
+    /// is solid, as the car's clip stands in for a solid block).
+    fn solid(&self, start: Vec3, end: Vec3, half: Vec3) -> Sweep {
         Sweep::from_trace(&crate::world::clip_trace(
-            &[],
+            &self.brushes,
             &self.bsp,
             &self.mesh,
             start.to_array(),
             end.to_array(),
             (-half).to_array(),
             half.to_array(),
-            crate::bullet_collision::MASK_PHYS_WORLD,
+            crate::bullet_collision::CONTENTS_SOLID,
             &|_| true,
         ))
     }
@@ -446,7 +451,7 @@ fn simulate(street: &Street, mut body: RigidBody, efs: f32, blasts: &[Blast]) ->
             continue;
         }
         let before = body;
-        body.step(0.05, &mut sweep, &mut |s, e, h| street.terrain(s, e, h));
+        body.step(0.05, &mut sweep, &mut |s, e, h| street.solid(s, e, h));
         awake_ticks += 1;
         let half = body.world_half();
         let low = body.center.z - half.z;
@@ -799,7 +804,7 @@ fn a_box_dropped_on_the_road_and_the_sidewalk_lands_on_top() {
             Vec3::ZERO,
         );
         for _ in 0..200 {
-            body.step(0.05, &mut sweep, &mut |s, e, h| street.terrain(s, e, h));
+            body.step(0.05, &mut sweep, &mut |s, e, h| street.solid(s, e, h));
             if body.ready_to_sleep() {
                 break;
             }
@@ -811,4 +816,215 @@ fn a_box_dropped_on_the_road_and_the_sidewalk_lands_on_top() {
             "lands on the floor at {floor}: {low}"
         );
     }
+}
+
+/// A parked car's clip as mappers make it: a clip brush (it stops players,
+/// items and vehicles; it is not solid world), here Favela's.
+const CAR_CLIP: u32 = 0x0803_1640;
+
+/// A narrow alley: the road (terrain) on the car's side of a solid wall
+/// along y = `wall_y`, `thickness` thick and 400 high, 8000 long, and behind the wall
+/// nothing down to a floor 1024 below, as behind Favela's alley wall. The
+/// car, facing +x at the origin, has a clip brush around it, or none.
+struct Alley {
+    brushes: Vec<SimBrush>,
+    bsp: SimClipBsp,
+    mesh: SimClipMesh,
+    wall_y: f32,
+}
+
+impl Alley {
+    fn new(wall_y: f32, thickness: f32, car_clip: Option<(Vec3, Vec3)>) -> Self {
+        let mut verts = Vec::new();
+        let mut tris = Vec::new();
+        let near = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        quad(
+            &mut verts,
+            &mut tris,
+            [
+                near(-4000.0, -4000.0),
+                near(4000.0, -4000.0),
+                near(4000.0, wall_y),
+                near(-4000.0, wall_y),
+            ],
+            Vec3::Z,
+        );
+        let mut tables = clipmap_iw4::ClipMeshTables::default();
+        tables.verts = verts;
+        tables.tri_indices = tris;
+        let mut brushes = vec![
+            aabb_brush(
+                Vec3::new(-4000.0, wall_y, -1040.0),
+                Vec3::new(4000.0, wall_y + thickness, 400.0),
+            ),
+            aabb_brush(
+                Vec3::new(-6000.0, -6000.0, -1040.0),
+                Vec3::new(6000.0, 6000.0, -1024.0),
+            ),
+        ];
+        if let Some((lo, hi)) = car_clip {
+            brushes.push(contents_brush(lo, hi, CAR_CLIP));
+        }
+        Self {
+            brushes,
+            bsp: SimClipBsp::default(),
+            mesh: SimClipMesh {
+                tables: std::sync::Arc::new(tables),
+                ..SimClipMesh::default()
+            },
+            wall_y,
+        }
+    }
+
+    fn trace(&self, start: Vec3, end: Vec3, half: Vec3, mask: u32) -> Sweep {
+        Sweep::from_trace(&crate::world::clip_trace(
+            &self.brushes,
+            &self.bsp,
+            &self.mesh,
+            start.to_array(),
+            end.to_array(),
+            (-half).to_array(),
+            half.to_array(),
+            mask,
+            &|_| true,
+        ))
+    }
+
+    /// Runs `body` until it sleeps, 200 ticks at most; whether it slept.
+    fn run(&self, body: &mut RigidBody, blast: Option<Vec3>) -> bool {
+        let mut sweep = |s: Vec3, e: Vec3, h: Vec3| {
+            self.trace(s, e, h, crate::bullet_collision::MASK_PHYS_WORLD)
+        };
+        for tick in 1..=200 {
+            if tick == 2 {
+                if let Some(center) = blast {
+                    if let Some(impulse) = super::super::mechanics::explosion_impulse(
+                        body.center,
+                        center,
+                        247.5,
+                        0.0,
+                        2.5,
+                        0.18,
+                    ) {
+                        let toward = -(body.center - center)
+                            .try_normalize()
+                            .unwrap_or(Vec3::NEG_Z);
+                        body.push(impulse, toward * body.half.min_element(), 0.25);
+                    }
+                }
+            }
+            body.step(0.05, &mut sweep, &mut |s, e, h| {
+                self.trace(s, e, h, crate::bullet_collision::CONTENTS_SOLID)
+            });
+            if body.ready_to_sleep() {
+                body.settle(&mut sweep);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The body is on the car's side of the wall, on or above the road.
+    fn on_its_side(&self, body: &RigidBody) -> bool {
+        body.center.y < self.wall_y && body.center.z - body.world_half().z > -1.0
+    }
+}
+
+/// A car parked hard against an alley wall, its clip running into the
+/// wall: the doors, mirror and hood on that side spawn inside both, and are
+/// thrown out at the wall. Each gets out on the open side, never through
+/// the wall, and comes to rest there.
+#[test]
+fn a_door_spawned_overlapping_a_wall_next_to_the_car_escapes_to_the_open_side() {
+    let mut rng = Lcg(0xa11e7);
+    let mut failures = Vec::new();
+    let mut runs = 0;
+    // The doors' centres are 29 out from the car's middle and the mirror's
+    // 39, so each wall starts in front of the mirror's centre or around it,
+    // but always ends past it.
+    for &(wall_y, thickness) in &[
+        (32.0, 10.0),
+        (34.0, 16.0),
+        (36.0, 8.0),
+        (40.0, 4.0),
+        (44.0, 16.0),
+    ] {
+        // The clip runs 4 past the car's sides, so into the wall.
+        let alley = Alley::new(
+            wall_y,
+            thickness,
+            Some((Vec3::new(-80.0, -38.0, -8.0), Vec3::new(80.0, 38.0, 52.0))),
+        );
+        let tag_body = Vec3::new(0.0, 0.0, 40.0);
+        for part in [PARTS[0], PARTS[2], PARTS[3]] {
+            for _ in 0..8 {
+                let draw = rng.range(4000.0, 5000.0);
+                let force = (part.mount - tag_body).normalize() * draw * part.force_scale;
+                let mut body = launch(part.mount, Quat::IDENTITY, part, part.mount, force);
+                let started = body.center;
+                let slept = alley.run(&mut body, Some(tag_body + Vec3::new(0.0, 0.0, 80.0)));
+                runs += 1;
+                if !slept || body.lost || !alley.on_its_side(&body) {
+                    failures.push(format!(
+                        "{} wall at y {wall_y} ({thickness} thick) draw {draw:.0}: from {started} to {} slept={slept} lost={}",
+                        part.name, body.center, body.lost
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {runs}:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// A door against a wall, touching it or a few units into it with its
+/// centre still in front of it, thrown at the wall from every angle and as
+/// hard as anything is thrown: it never ends up behind the wall.
+#[test]
+fn a_door_touching_a_wall_never_crosses_it() {
+    let mut rng = Lcg(0x70c4);
+    let mut failures = Vec::new();
+    let mut runs = 0;
+    for &thickness in &[2.0, 4.0, 8.0] {
+        let alley = Alley::new(100.0, thickness, None);
+        for case in 0..60 {
+            let part = PARTS[case % 5];
+            let yaw = Quat::from_rotation_z(rng.range(0.0, 360.0f32).to_radians());
+            let tilt = Quat::from_rotation_x(rng.range(-0.6, 0.6));
+            let rotation = yaw * tilt;
+            // Place it with its sweep box from just short of the wall to a
+            // few units into it, its centre in front of the wall.
+            let probe = launch(Vec3::ZERO, rotation, part, Vec3::ZERO, Vec3::ZERO);
+            let reach = probe.sweep_half(rotation).y;
+            let into = rng.range(-0.5, (reach - 1.5).min(6.0));
+            let center = Vec3::new(
+                rng.range(-200.0, 200.0),
+                100.0 - reach + into,
+                rng.range(30.0, 120.0),
+            );
+            let origin = center - rotation * part.mid;
+            let toward = Vec3::new(rng.range(-0.7, 0.7), 1.0, rng.range(-0.5, 0.8)).normalize();
+            let force = toward * rng.range(200.0, 800.0) * part.phys.mass;
+            let mut body = launch(origin, rotation, part, origin, force);
+            assert!(body.center.y < 100.0);
+            let slept = alley.run(&mut body, None);
+            runs += 1;
+            if !alley.on_its_side(&body) || !slept {
+                failures.push(format!(
+                    "case {case} {} wall {thickness} thick, {into:.1} into it: from {center} to {} slept={slept} lost={}",
+                    part.name, body.center, body.lost
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {runs}:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

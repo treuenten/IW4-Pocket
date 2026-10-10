@@ -1,5 +1,5 @@
 use super::entities::Link;
-use super::rigid_body::{RigidBody, Sweep};
+use super::rigid_body::{MapLimits, RigidBody, Sweep};
 use crate::script::runtime::raise;
 use crate::script::{BTreeMap, Resource, Runtime, Value};
 use bevy_ecs::prelude::World;
@@ -22,6 +22,8 @@ pub(crate) struct Mechanics {
     fallback_logged: std::collections::BTreeSet<String>,
     /// Models whose first launch the log has reported.
     launch_logged: std::collections::BTreeSet<String>,
+    /// Where launched parts may be, found from the map on the first launch.
+    limits: Option<MapLimits>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +93,17 @@ const EXPLOSION_MIN_FORCE: f32 = 40.0;
 const EXPLOSION_SPIN_SHARE: f32 = 0.25;
 /// A server body crushes only when it really came down this far in a tick.
 const CRUSH_MIN_DROP: f32 = 1.0;
+/// Inferred: how far under the lowest tdm spawn ground can still be valid.
+/// MW2's airdrop script also judges where a crate came down against the
+/// lowest tdm spawn (level.lowSpawn); 512 leaves room for any ditch a part
+/// can fall into, but none for the floor under a map.
+const LOWEST_GROUND_BELOW_SPAWN: f32 = 512.0;
+/// The map's bounds are its solid brushes and terrain, grown by this.
+const MAP_BOUNDS_MARGIN: f32 = 512.0;
+/// The world's walls, floors, glass and terrain, without the clip brushes
+/// that only block movement, such as a parked car's clip.
+const SOLID_WORLD: u32 = crate::bullet_collision::CONTENTS_SOLID | CONTENTS_GLASS;
+const CONTENTS_GLASS: u32 = 0x0000_0010;
 
 impl Mechanics {
     pub(crate) fn start(&mut self, object: u64, motion: Motion) {
@@ -112,7 +125,7 @@ impl Mechanics {
     pub(crate) fn launch(&mut self, object: u64, spec: LaunchSpec) {
         self.motions.remove(&object);
         self.slides.remove(&object);
-        let body = RigidBody::launch(
+        let mut body = RigidBody::launch(
             Vec3::from_array(spec.origin),
             math_iw4::angles_to_axis(spec.angles),
             Vec3::from_array(spec.mid),
@@ -125,6 +138,9 @@ impl Mechanics {
             Vec3::from_array(spec.point),
             Vec3::from_array(spec.force),
         );
+        if let Some(limits) = self.limits {
+            body.keep_within(limits);
+        }
         self.bodies.insert(
             object,
             Body {
@@ -159,6 +175,21 @@ impl Mechanics {
                 active: true,
             },
         );
+    }
+
+    /// The map's limits for launched parts, worked out once.
+    fn ensure_limits(world: &mut World) {
+        if world.resource::<Mechanics>().limits.is_none() {
+            let limits = map_limits(world);
+            diag::info!(
+                Sim,
+                "physics bodies: lowest valid ground z {:.0}, bounds {:.0}..{:.0}",
+                limits.lowest_ground,
+                limits.lo,
+                limits.hi
+            );
+            world.resource_mut::<Mechanics>().limits = Some(limits);
+        }
     }
 
     /// Whether `model` is new to the no-preset report.
@@ -379,6 +410,88 @@ fn angle_rates(body: &RigidBody) -> [f32; 3] {
     })
 }
 
+/// Where launched parts may be on this map. The lowest valid ground lies
+/// [`LOWEST_GROUND_BELOW_SPAWN`] under the lowest tdm spawn (any spawn point
+/// if there is none); the bounds are those of the solid brushes and the
+/// terrain, grown by [`MAP_BOUNDS_MARGIN`].
+fn map_limits(world: &mut World) -> MapLimits {
+    let lowest_spawn = {
+        let mut runtime = world.resource_mut::<Runtime>();
+        let spawns: Vec<(u64, bool)> = runtime
+            .entities
+            .iter()
+            .filter_map(|(id, e)| {
+                let class: &str = &e.classname;
+                let tdm = class == "mp_tdm_spawn";
+                (tdm || (class.starts_with("mp_") && class.contains("_spawn")))
+                    .then_some((*id, tdm))
+            })
+            .collect();
+        let (mut tdm, mut any) = (f32::INFINITY, f32::INFINITY);
+        for (id, is_tdm) in spawns {
+            if let Value::Vector(origin) = runtime.object_field(id, "origin") {
+                if origin[2].is_finite() {
+                    any = any.min(origin[2]);
+                    if is_tdm {
+                        tdm = tdm.min(origin[2]);
+                    }
+                }
+            }
+        }
+        if tdm.is_finite() { tdm } else { any }
+    };
+    let frame = crate::frame::FrameWorld::from_world(world);
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for vert in &frame.clip_mesh().tables.verts {
+        let v = Vec3::from_array(*vert);
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    for brush in frame.clip_brushes() {
+        if brush.contents & crate::bullet_collision::MASK_PHYS_WORLD == 0 {
+            continue;
+        }
+        let mut bmin = Vec3::splat(f32::NEG_INFINITY);
+        let mut bmax = Vec3::splat(f32::INFINITY);
+        for plane in &brush.planes {
+            for axis in 0..3 {
+                let along = plane[axis];
+                let across = (0..3).filter(|&k| k != axis).all(|k| plane[k].abs() < 1e-4);
+                if across && along > 0.9999 {
+                    bmax[axis] = bmax[axis].min(plane[3]);
+                } else if across && along < -0.9999 {
+                    bmin[axis] = bmin[axis].max(-plane[3]);
+                }
+            }
+        }
+        if bmin.is_finite() && bmax.is_finite() && bmin.cmple(bmax).all() {
+            lo = lo.min(bmin);
+            hi = hi.max(bmax);
+        }
+    }
+    let (lo, hi) = if lo.is_finite() && hi.is_finite() {
+        (
+            lo - Vec3::splat(MAP_BOUNDS_MARGIN),
+            hi + Vec3::splat(MAP_BOUNDS_MARGIN),
+        )
+    } else {
+        (Vec3::splat(-1.0e6), Vec3::splat(1.0e6))
+    };
+    let lowest_ground = if lowest_spawn.is_finite() {
+        lowest_spawn - LOWEST_GROUND_BELOW_SPAWN
+    } else {
+        lo.z
+    };
+    MapLimits {
+        lowest_ground,
+        lo,
+        hi,
+    }
+}
+
 /// Inferred stand-in for a model without a usable physics preset: the common
 /// car door preset (mass 25, bounce 0.1, friction 0.25, explosion scale 0.18).
 const FALLBACK_PHYS: xmodel_runtime::ModelPhys = xmodel_runtime::ModelPhys {
@@ -406,6 +519,7 @@ pub(crate) fn physics_launch(
     if point.iter().chain(&force).any(|v| !v.is_finite()) {
         return Err("physics launch requires a finite point and force".into());
     }
+    Mechanics::ensure_limits(world);
     let (model, origin, angles) = {
         let mut runtime = world.resource_mut::<Runtime>();
         let model = match runtime.object_field(object, "model") {
@@ -675,20 +789,16 @@ fn advance_rigid(
                 crate::bullet_collision::MASK_PHYS_WORLD,
             ))
         };
-        let mut terrain = |start: Vec3, end: Vec3, half: Vec3| {
-            Sweep::from_trace(&crate::world::clip_trace(
-                &[],
-                frame.clip_bsp(),
-                frame.clip_mesh(),
+        let mut solid = |start: Vec3, end: Vec3, half: Vec3| {
+            Sweep::from_trace(&frame.trace_static_world(
                 start.to_array(),
                 end.to_array(),
                 (-half).to_array(),
                 half.to_array(),
-                crate::bullet_collision::MASK_PHYS_WORLD,
-                &|_| true,
+                SOLID_WORLD,
             ))
         };
-        let report = rigid.step(TICK_S, &mut sweep, &mut terrain);
+        let report = rigid.step(TICK_S, &mut sweep, &mut solid);
         let asleep = rigid.ready_to_sleep() || body.ticks >= SETTLE_TICKS;
         if asleep {
             rigid.settle(&mut sweep);

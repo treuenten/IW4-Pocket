@@ -40,12 +40,25 @@ const MAX_SPEED: f32 = 800.0;
 /// Fastest a part falls: a care package dropped from the helicopter is
 /// well under it; a part that has left the world is not.
 const MAX_FALL_SPEED: f32 = 3000.0;
-/// Longest a part spawned inside the world (its own car's clip) takes to fly
-/// out of it; after that it is moved to the nearest clear place.
-const ESCAPE_MAX_S: f32 = 0.5;
-/// A body this far below where it was launched has left the world: it goes
-/// back to the last place it was clear of it and stops.
+/// How far a part spawned inside the world (a door inside its own car's
+/// clip) is moved to get clear of it, nearest first. Below 2 units it is
+/// only lifted, as a part overlapping the ground it stands on.
+const ESCAPE_STEPS: [f32; 13] = [
+    0.25, 1.0, 2.0, 4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0, 96.0, 128.0,
+];
+/// Half size of the core of a body, the small box at its centre that says
+/// which side of a wall the body is on.
+const CORE_HALF: f32 = 1.0;
+/// A part whose centre starts inside a wall gets out of it only sideways,
+/// up, or back against the push that launched it (within 75 degrees of
+/// square to it, or further back).
+const BURIED_ESCAPE_COS: f32 = 0.26;
+/// With no map limits: a body this far below where it was launched has
+/// left the world.
 const FALL_LIMIT: f32 = 4096.0;
+/// A body is always allowed this far below where it was launched, even
+/// where that is under the map's lowest ground.
+const BELOW_LAUNCH: f32 = 256.0;
 /// A resting part this close to lying on a face is laid flat on it.
 const FACE_SNAP_COS: f32 = 0.965_925_8; // cos(15 degrees)
 /// Corners within this distance of the deepest one share the contact.
@@ -101,6 +114,15 @@ impl Sweep {
     }
 }
 
+/// Where a launched part may be: a part outside this has left the map.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MapLimits {
+    /// Under the lowest ground anything can rest on.
+    pub lowest_ground: f32,
+    pub lo: Vec3,
+    pub hi: Vec3,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RigidBody {
     /// World position of the box centre, which is the centre of mass.
@@ -120,11 +142,20 @@ pub(crate) struct RigidBody {
     pub calm_s: f32,
     /// It has been clear of the world since it was launched.
     pub free: bool,
-    /// How long it has spent flying out of the world it was spawned in.
-    pub escape_s: f32,
     /// The last centre and orientation it was found clear of the world in.
     pub last_free: (Vec3, Quat),
-    pub launch_z: f32,
+    /// The last pose it touched the world in, inside the map's limits, or
+    /// where it got clear of the world it was spawned in: where it goes back
+    /// to if it ever leaves the map.
+    pub last_valid: (Vec3, Quat),
+    /// It has touched the world since it was launched.
+    pub touched_any: bool,
+    /// It has been put back once after leaving the map.
+    pub put_back: bool,
+    /// Its centre may not go below this height, nor out of `bounds` other
+    /// than upward.
+    pub floor_z: f32,
+    pub bounds: Option<(Vec3, Vec3)>,
     /// How long since it was launched or last pushed.
     pub awake_s: f32,
     /// It fell out of the world, or could not get out of the one it was
@@ -168,9 +199,12 @@ impl RigidBody {
             on_ground: false,
             calm_s: 0.0,
             free: false,
-            escape_s: 0.0,
             last_free: (origin + rotation * mid, rotation),
-            launch_z: origin.z,
+            last_valid: (origin + rotation * mid, rotation),
+            touched_any: false,
+            put_back: false,
+            floor_z: origin.z - FALL_LIMIT,
+            bounds: None,
             awake_s: 0.0,
             lost: false,
         };
@@ -184,6 +218,14 @@ impl RigidBody {
         body.apply_impulse(impulse, lever);
         body.clamp_spin();
         body
+    }
+
+    /// Keeps the body inside the map: never below its lowest valid ground
+    /// (though always allowed a little below where it was launched), never
+    /// outside its bounds.
+    pub(crate) fn keep_within(&mut self, limits: MapLimits) {
+        self.floor_z = limits.lowest_ground.min(self.center.z - BELOW_LAUNCH);
+        self.bounds = Some((limits.lo, limits.hi));
     }
 
     pub(crate) fn origin(&self) -> Vec3 {
@@ -216,20 +258,21 @@ impl RigidBody {
     }
 
     /// Advances `dt` seconds in whole substeps. `sweep` meets the whole
-    /// static world; `terrain` only its terrain triangles, which a body
-    /// still inside a brush must not pass under.
+    /// static world; `solid` only its solid part, the walls, floors, glass
+    /// and terrain, without the clip brushes that only block movement (a
+    /// parked car's clip), for a body getting out of where it was spawned.
     pub(crate) fn step(
         &mut self,
         dt: f32,
         sweep: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
-        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        solid: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
     ) -> StepReport {
         let mut report = StepReport::default();
         let steps = (dt / SUBSTEP_S).round().max(1.0) as u32;
         let sub = dt / steps as f32;
         for _ in 0..steps {
             let before = *self;
-            self.substep(sub, sweep, terrain, &mut report);
+            self.substep(sub, sweep, solid, &mut report);
             if !self.is_finite() {
                 // Never hand a broken pose to the world or the network.
                 *self = before;
@@ -257,7 +300,7 @@ impl RigidBody {
         &mut self,
         dt: f32,
         sweep: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
-        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        solid: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
         report: &mut StepReport,
     ) {
         let count = std::cell::Cell::new(0u32);
@@ -265,11 +308,11 @@ impl RigidBody {
             count.set(count.get() + 1);
             sweep(start, end, half)
         };
-        let mut terrain = |start, end, half| {
+        let mut solid = |start, end, half| {
             count.set(count.get() + 1);
-            terrain(start, end, half)
+            solid(start, end, half)
         };
-        self.advance(dt, &mut trace, &mut terrain);
+        self.advance(dt, &mut trace, &mut solid);
         report.sweeps += count.get();
     }
 
@@ -277,20 +320,21 @@ impl RigidBody {
         &mut self,
         dt: f32,
         trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
-        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        solid: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
     ) {
         self.velocity.z -= GRAVITY * dt;
         self.clamp_speed(MAX_FALL_SPEED);
         self.awake_s += dt;
-        if self.lost || self.center.z < self.launch_z - FALL_LIMIT {
-            self.lost = true;
+        if self.lost {
             self.stop_at_last_free(dt);
             return;
         }
         let old_rotation = self.rotation;
         let old_half = self.sweep_half(old_rotation);
-        if !self.free && !self.get_free(trace, old_half) {
-            self.inside_world(trace, terrain, dt);
+        if !self.free && !self.get_free(trace, solid, old_half) {
+            // Nowhere near is clear: leave it where it was launched.
+            self.lost = true;
+            self.stop_at_last_free(dt);
             return;
         }
         let mut rotation = turned(old_rotation, self.spin, dt);
@@ -394,8 +438,14 @@ impl RigidBody {
             self.center = before;
             touched = true;
         }
+        if self.left_the_map() {
+            self.go_back(dt);
+            return;
+        }
         self.last_free = (self.center, self.rotation);
         if touched {
+            self.last_valid = (self.center, self.rotation);
+            self.touched_any = true;
             self.keep_to_what_was_achieved(delta, self.center - before, dt);
         }
         let slow = self.velocity.length() < SETTLE_SPEED && self.spin.length() < SETTLE_SPIN;
@@ -430,67 +480,111 @@ impl RigidBody {
         }
     }
 
-    /// Whether a body spawned inside the world is clear of it now, or can
-    /// be lifted clear (a part overlapping the ground it lies on).
-    fn get_free(&mut self, trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep, half: Vec3) -> bool {
+    /// Whether a body spawned inside the world is clear of it now, or has a
+    /// way out of it (see [`RigidBody::escape`]); it is moved there.
+    fn get_free(
+        &mut self,
+        trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        solid: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        half: Vec3,
+    ) -> bool {
         let at = if fits(trace, self.center, half) {
             Some(self.center)
-        } else if self.escape_s == 0.0 {
-            unstick(trace, self.center, half)
         } else {
-            None
+            self.escape(trace, solid, half)
         };
         if let Some(at) = at {
             self.center = at;
             self.free = true;
             self.last_free = (at, self.rotation);
+            self.last_valid = (at, self.rotation);
         }
         self.free
     }
 
-    /// Still inside the world it was spawned in: a door inside its own car's
-    /// clip. It flies out through it without turning, but never downward and
-    /// never into terrain, which the brush around it hides from the world
-    /// sweep. If that takes too long it is moved to the nearest clear place.
-    fn inside_world(
-        &mut self,
+    /// The way out for a body spawned inside the world, such as a door
+    /// inside its own car's clip: the nearest place it fits, out to 128
+    /// units, trying the way it was launched first, then straight up, then
+    /// around it and up. It only ever leaves toward open space on its own
+    /// side of things. Its centre may pass through clip brushes, such as
+    /// the car's own clip, but never into a wall, floor, window or terrain
+    /// it is not already inside, so a wall the part merely touched is never
+    /// crossed; and its box may not go into the top or side of one either.
+    /// From there it collides normally.
+    fn escape(
+        &self,
         trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
-        terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
-        dt: f32,
-    ) {
-        self.on_ground = false;
-        let half = self.sweep_half(self.rotation);
-        if self.escape_s < ESCAPE_MAX_S {
-            self.calm_s = 0.0;
-            self.escape_s += dt;
-            self.velocity.z = self.velocity.z.max(0.0);
-            let hit = terrain(self.center, self.center + self.velocity * dt, half);
-            if !hit.start_solid {
-                if hit.fraction < 1.0 {
-                    let normal = hit.normal.try_normalize().unwrap_or(Vec3::Z);
-                    self.center = hit.end + separation(normal);
-                    self.collide(normal);
-                } else {
-                    self.center = hit.end;
+        solid: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
+        half: Vec3,
+    ) -> Option<Vec3> {
+        let at = self.center;
+        let launch = self.velocity.with_z(self.velocity.z.max(0.0));
+        let forward = (self.rotation * Vec3::X)
+            .with_z(0.0)
+            .try_normalize()
+            .unwrap_or(Vec3::X);
+        let side = Vec3::Z.cross(forward);
+        let level = launch.with_z(0.0).normalize_or_zero();
+        let mut ways = [Vec3::ZERO; 11];
+        ways[0] = launch.try_normalize().unwrap_or(Vec3::ZERO);
+        ways[1] = Vec3::Z;
+        if level != Vec3::ZERO {
+            ways[2] = (level + Vec3::Z).normalize();
+        }
+        for (k, around) in [forward, side, -forward, -side].into_iter().enumerate() {
+            ways[3 + k] = around;
+            ways[7 + k] = (around + Vec3::Z).normalize();
+        }
+        // A centre that starts inside a wall itself (a mirror sticking into
+        // the wall its car is parked against) could leave it by either
+        // face; its own side is the one its car is on, back against the
+        // push that threw it out of the car.
+        let core = Vec3::splat(CORE_HALF);
+        let buried = solid(at, at, core).start_solid;
+        for reach in ESCAPE_STEPS {
+            for way in ways {
+                if way == Vec3::ZERO
+                    || (reach < 2.0 && way != Vec3::Z)
+                    || (buried && way.dot(level) > BURIED_ESCAPE_COS)
+                {
+                    continue;
                 }
-                return;
-            }
-            // It overlaps terrain as well, which it cannot fly through:
-            // waiting will not get it out.
-        }
-        let toward = self.velocity.truncate().extend(0.0);
-        match nearest_clear(trace, terrain, self.center, half, toward) {
-            Some(at) => {
-                self.center = at;
-                self.free = true;
-                self.last_free = (at, self.rotation);
-            }
-            None => {
-                // Nowhere near is clear: leave it where it was launched.
-                self.lost = true;
-                self.stop_at_last_free(dt);
+                let to = at + way * reach;
+                if fits(trace, to, half)
+                    && solid(at, to, core).fraction >= 1.0
+                    && !crosses_down(solid(at, to, half))
+                {
+                    return Some(to);
+                }
             }
         }
+        None
+    }
+
+    /// Whether the body's centre is below the map's lowest valid ground or
+    /// outside its bounds. Above them is not out: what goes up comes down
+    /// (a care package is let go high above the map).
+    fn left_the_map(&self) -> bool {
+        let c = self.center;
+        c.z < self.floor_z
+            || self.bounds.is_some_and(|(lo, hi)| {
+                c.x < lo.x || c.y < lo.y || c.z < lo.z || c.x > hi.x || c.y > hi.y
+            })
+    }
+
+    /// A body that left the map goes back to the last place it touched the
+    /// world inside it, at rest. If it leaves again, or never touched
+    /// anything to go back to, it stays there for good.
+    fn go_back(&mut self, dt: f32) {
+        (self.center, self.rotation) = self.last_valid;
+        self.last_free = self.last_valid;
+        self.velocity = Vec3::ZERO;
+        self.spin = Vec3::ZERO;
+        if self.put_back || !self.touched_any {
+            self.lost = true;
+        }
+        self.put_back = true;
+        self.calm_s += dt;
     }
 
     /// Back to the last place the body was clear of the world, at rest.
@@ -695,9 +789,9 @@ fn separation(normal: Vec3) -> Vec3 {
     }
 }
 
-/// Whether a terrain sweep went into a triangle's top or side. Meeting the
-/// underside of one (going up out of a hollow or under an overhang) cannot
-/// leave a body below the ground.
+/// Whether a sweep went into the top or the side of something. Meeting the
+/// underside of one (going up out of a hollow, or past a ledge it stood
+/// under) cannot leave a body below or behind it.
 fn crosses_down(hit: Sweep) -> bool {
     hit.fraction < 1.0 && hit.normal.z >= 0.0
 }
@@ -720,38 +814,6 @@ fn unstick(
             return Some(lifted);
         }
         dz *= 2.0;
-    }
-    None
-}
-
-/// The nearest place a box stuck inside the world fits, trying the way it
-/// was going first, then sideways and up (never down), out to 128 units,
-/// and only where getting there does not go into terrain from above: a
-/// place under the terrain fits just as well as one on top of it.
-fn nearest_clear(
-    trace: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
-    terrain: &mut impl FnMut(Vec3, Vec3, Vec3) -> Sweep,
-    at: Vec3,
-    half: Vec3,
-    toward: Vec3,
-) -> Option<Vec3> {
-    let ways = [
-        toward.try_normalize().unwrap_or(Vec3::ZERO),
-        Vec3::X,
-        Vec3::NEG_X,
-        Vec3::Y,
-        Vec3::NEG_Y,
-        Vec3::Z,
-    ];
-    let mut reach = 8.0;
-    while reach <= 128.0 {
-        for way in ways.iter().filter(|w| **w != Vec3::ZERO) {
-            let candidate = at + *way * reach;
-            if fits(trace, candidate, half) && !crosses_down(terrain(at, candidate, half)) {
-                return Some(candidate);
-            }
-        }
-        reach *= 2.0;
     }
     None
 }
@@ -1190,6 +1252,84 @@ mod tests {
         assert!(ticks < 200, "it goes to sleep instead of falling for good");
         assert!(body.lost);
         assert!(body.center.z > at.z - FALL_LIMIT - 100.0);
+    }
+
+    /// A ledge: the floor at z = 0 where x < 100, and past its edge the
+    /// next floor 1024 below.
+    fn ledge(start: Vec3, end: Vec3, half: Vec3) -> Sweep {
+        let drop = if end.x < 100.0 { 0.0 } else { -1024.0 };
+        let lift = Vec3::Z * drop;
+        let mut hit = floor(start - lift, end - lift, half);
+        hit.end += lift;
+        hit
+    }
+
+    #[test]
+    fn a_part_that_falls_below_the_lowest_ground_goes_back_to_where_it_last_touched() {
+        let at = Vec3::new(0.0, 0.0, 5.2);
+        let mut body = RigidBody::launch(
+            at,
+            yaw_axis(0.0),
+            Vec3::ZERO,
+            Vec3::new(10.0, 10.0, 5.0),
+            DOOR,
+            at,
+            Vec3::new(300.0 * DOOR.mass, 0.0, 0.0),
+        );
+        body.keep_within(MapLimits {
+            lowest_ground: -400.0,
+            lo: Vec3::splat(-5000.0),
+            hi: Vec3::splat(5000.0),
+        });
+        let mut lowest = f32::INFINITY;
+        let mut ticks = 0;
+        while !body.ready_to_sleep() && ticks < 200 {
+            body.step(0.05, &mut |s, e, h| ledge(s, e, h), &mut |s, e, h| {
+                ledge(s, e, h)
+            });
+            lowest = lowest.min(body.center.z);
+            ticks += 1;
+        }
+        assert!(ticks < 200, "it comes to rest");
+        assert!(body.put_back, "it went over the edge and was put back");
+        assert!(
+            lowest >= -400.0 - 40.0,
+            "caught as it left the map: {lowest}"
+        );
+        assert!(
+            body.center.x < 100.0 && (body.center.z - body.half.z).abs() < 1.0,
+            "back on the ledge, where it last touched the world: {}",
+            body.center
+        );
+    }
+
+    #[test]
+    fn a_part_that_leaves_the_bounds_without_touching_anything_stops_where_it_started() {
+        let at = Vec3::new(0.0, 0.0, 100.0);
+        let mut body = RigidBody::launch(
+            at,
+            yaw_axis(0.0),
+            Vec3::ZERO,
+            Vec3::splat(8.0),
+            DOOR,
+            at,
+            Vec3::new(800.0 * DOOR.mass, 0.0, 0.0),
+        );
+        body.keep_within(MapLimits {
+            lowest_ground: -5000.0,
+            lo: Vec3::splat(-500.0),
+            hi: Vec3::splat(500.0),
+        });
+        let mut void = |_s: Vec3, e: Vec3, _h: Vec3| open(e, false);
+        let mut ticks = 0;
+        while !body.ready_to_sleep() && ticks < 200 {
+            body.step(0.05, &mut void, &mut |_s, e, _h| open(e, false));
+            assert!(body.center.x <= 500.0 + 800.0 * SUBSTEP_S);
+            ticks += 1;
+        }
+        assert!(ticks < 40, "it stops as soon as it is out: {ticks}");
+        assert!(body.lost);
+        assert_eq!(body.center, at);
     }
 
     #[test]
