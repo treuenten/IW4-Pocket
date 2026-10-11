@@ -272,8 +272,9 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
             Value::Vector(hit.point),
             Value::string(hit.means),
             Value::String(model),
-            Value::String(tag.as_str().into()),
+            // The bone that was hit is the partName; tagName names an attached model.
             Value::string(""),
+            Value::String(tag.as_str().into()),
             Value::Int(hit.flags),
             Value::String(weapon.into()),
         ],
