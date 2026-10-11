@@ -47,4 +47,29 @@ mod tests {
         assert!(switched_on(Some("1")));
         assert!(switched_on(Some(" 1 ")));
     }
+
+    #[test]
+    fn every_killstreak_has_one_give_row() {
+        let menu = include_str!("../menus/cheats.json");
+        for streak in [
+            "uav",
+            "airdrop",
+            "counter_uav",
+            "airdrop_sentry_minigun",
+            "predator_missile",
+            "precision_airstrike",
+            "harrier_airstrike",
+            "helicopter",
+            "airdrop_mega",
+            "helicopter_flares",
+            "stealth_airstrike",
+            "helicopter_minigun",
+            "ac130",
+            "emp",
+            "nuke",
+        ] {
+            let row = format!("give killstreak/{streak}\\\"");
+            assert_eq!(menu.matches(&row).count(), 1, "{streak}");
+        }
+    }
 }

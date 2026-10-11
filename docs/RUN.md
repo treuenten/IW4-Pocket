@@ -36,9 +36,9 @@ turns them off for `map`, `serve` and `menu`; a lobby host toggles them in the
 game setup.
 
 **Cheat menu (testing).** `IW4L_CHEAT_MENU=1` adds a CHEATS row to the in-match
-pause menu: God Mode and Unlimited Ammo toggles (their labels show the state), Add 5
-Bots, Start Match Now and Give rows for UAV, Care Package, Predator Missile, Precision
-Airstrike, Harrier Strike, AC-130 and Chopper Gunner. Each row runs the console verb of
+pause menu: God Mode and Unlimited Ammo toggles (their labels show the state; unlimited
+ammo also keeps grenades and tacticals), Add 5 Bots, Start Match Now and a Give row for
+every killstreak, from UAV to Tactical Nuke. Each row runs the console verb of
 the same name (`god`, `player_sustainAmmo`, `bot add 5`, `force_match_start`,
 `give killstreak/<name>`), so pad (d-pad and A), touch and mouse all work as in any
 menu. Off by default. On the phone put the line in `iw4l-env.txt`; on the desktop it
@@ -105,7 +105,7 @@ it is on by default on desktop and off on iOS; `IW4L_CLIP_RING=0|1` overrides (o
 phone, in `iw4l-env.txt`), and with it off `clip` says so and saves nothing.
 
 * `god` toggles invincibility for a live player; repeat it to turn protection off. It blocks damage while cheats are enabled; `kill` still forces death. It is refused while dead or in the killcam, so scripts write `wait alive; god`.
-* `player_sustainAmmo [0|1]` is MW2's dvar as a verb: while on, firing does not spend the magazine (a bare call toggles). Turning it on also fills the magazine and reserve of every weapon held. The flag lives in the replicated client dvars, so prediction agrees with the host.
+* `player_sustainAmmo [0|1]` is MW2's dvar as a verb: while on, firing does not spend the magazine and throwing does not spend grenades or tacticals (a bare call toggles). Turning it on also fills the magazine and reserve of every weapon held. The flag lives in the replicated client dvars, so prediction agrees with the host.
 * ADS is `hold +speed_throw`, not `+speed`;
 * Hold Shift (`+breath_sprint`) or bind `+holdbreath` to steady eligible sights
   at full ADS. Breath lasts 4.5 seconds; releasing or exhausting it requires recovery.
