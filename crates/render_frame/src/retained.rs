@@ -3,7 +3,7 @@ use glam::Mat4;
 use crate::SmodelPretessRange;
 use crate::geometry::SurfaceSamplerInputs;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BspCameraLane {
     LitOpaque,
     LitTrans,

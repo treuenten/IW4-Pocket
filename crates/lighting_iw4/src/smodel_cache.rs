@@ -100,7 +100,7 @@ pub const SMODEL_BUCKET_SKINNED: i32 = 1;
 pub const SMODEL_BUCKET_CACHED: i32 = 2;
 pub const SMODEL_BUCKET_PRETESS: i32 = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SmodelSurfPath {
     Rigid,
     Skinned,

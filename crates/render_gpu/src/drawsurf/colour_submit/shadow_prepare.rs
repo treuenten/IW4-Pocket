@@ -242,14 +242,14 @@ fn emit_local_smodel_shadow_flush(
 }
 
 #[derive(Clone)]
-struct ShadowmapSunFlushGpu {
-    draws: Vec<PreparedExactDraw>,
-    world_from_local: Mat4,
-    pass_code: Vec<PackedCodeConstants>,
+pub(super) struct ShadowmapSunFlushGpu {
+    pub(super) draws: Vec<PreparedExactDraw>,
+    pub(super) world_from_local: Mat4,
+    pub(super) pass_code: Vec<PackedCodeConstants>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ShadowStaticOwner {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum ShadowStaticOwner {
     World {
         key: u64,
         surf: u16,
@@ -276,7 +276,7 @@ enum ShadowStaticOwner {
     },
 }
 
-fn world_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwner> {
+pub(super) fn world_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwner> {
     let RetainedDrawKind::World {
         surf,
         run,
@@ -302,7 +302,7 @@ fn world_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwne
     })
 }
 
-fn smodel_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwner> {
+pub(super) fn smodel_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwner> {
     let RetainedDrawKind::Smodel {
         surface,
         material,
@@ -368,6 +368,8 @@ pub(super) struct ResidentShadowStaticDraws {
     smodel_entries: [Vec<render_frame::GfxSmodelRigidEntry>; 2],
 
     commands: [ResidentSunCommands; 2],
+
+    memo: super::shadow_reuse::ShadowFlushMemo,
 }
 
 impl ResidentShadowStaticDraws {
@@ -1423,6 +1425,115 @@ struct SmodelShadowSpan {
     entry_count: u32,
 }
 
+/// What [`prepare_static_shadow_flush`] did for a resident slot.
+enum StaticFlushOutcome {
+    Prepared(Result<ShadowmapSunFlushGpu, String>),
+    Reused(ShadowmapSunFlushGpu),
+    RefusedBefore(String),
+}
+
+/// A resident world or static model flush: prepared, or with
+/// `IW4L_SHADOW_REUSE` taken from the memo (see `shadow_reuse`).
+fn prepare_static_shadow_flush(
+    prepare: &mut ExactPrepare<'_>,
+    memo: Option<&mut super::shadow_reuse::ShadowFlushMemo>,
+    executor: &mut MaterialRunExecutor,
+    view: Option<MaterialExecView<'_>>,
+    flush: SunFlush,
+    owners: &[u32],
+    draw_offset: usize,
+    product: &FrameProduct,
+    target: ExactPrepareTarget,
+) -> StaticFlushOutcome {
+    use super::shadow_reuse::{Remembered, ShadowFlushId, flush_mismatch, verify};
+    let Some(memo) = memo else {
+        return StaticFlushOutcome::Prepared(prepare.prepare_shadow_flush_draws(
+            executor,
+            view,
+            flush,
+            owners,
+            draw_offset,
+            product,
+            target,
+        ));
+    };
+    let id = sun_flush_owner(
+        &product.ordered_draws,
+        &product.draw_tech,
+        owners,
+        draw_offset,
+        flush.kind,
+    )
+    .ok()
+    .and_then(|(item, tech)| ShadowFlushId::of(item, tech));
+    let Some(id) = id else {
+        return StaticFlushOutcome::Prepared(prepare.prepare_shadow_flush_draws(
+            executor,
+            view,
+            flush,
+            owners,
+            draw_offset,
+            product,
+            target,
+        ));
+    };
+    match memo.lookup(&id, flush.draw_start, flush.draw_count, flush.ring_epoch) {
+        Remembered::Prepared(kept) => {
+            memo.tally.hits += 1;
+            if !verify() {
+                return StaticFlushOutcome::Reused(kept);
+            }
+            let fresh = prepare.prepare_shadow_flush_draws(
+                executor,
+                view,
+                flush,
+                owners,
+                draw_offset,
+                product,
+                target,
+            );
+            memo.tally.verified += 1;
+            let cause = match &fresh {
+                Ok(fresh) => flush_mismatch(&kept, fresh),
+                Err(_) => Some("refused when prepared again"),
+            };
+            if let Some(cause) = cause {
+                memo.tally.mismatches += 1;
+                if memo.tally.mismatches <= 8 {
+                    diag::warn!(
+                        World,
+                        "shadow reuse verify: {} flush mismatch: {cause}",
+                        flush.kind.family()
+                    );
+                }
+                memo.store(id, &fresh);
+            }
+            StaticFlushOutcome::Prepared(fresh)
+        }
+        Remembered::Refused(cause) => {
+            memo.tally.refusal_hits += 1;
+            StaticFlushOutcome::RefusedBefore(cause)
+        }
+        Remembered::None => {
+            let fresh = prepare.prepare_shadow_flush_draws(
+                executor,
+                view,
+                flush,
+                owners,
+                draw_offset,
+                product,
+                target,
+            );
+            match &fresh {
+                Ok(_) => memo.tally.prepared += 1,
+                Err(_) => memo.tally.refused += 1,
+            }
+            memo.store(id, &fresh);
+            StaticFlushOutcome::Prepared(fresh)
+        }
+    }
+}
+
 fn prepare_shadowmap_sun(
     products: &ExtractedRenderFrameProducts,
     extracted: ExtractedColourRefs<'_>,
@@ -1447,7 +1558,7 @@ fn prepare_shadowmap_sun(
     }
     let (color_view, resized) = ensure_shadowmap_sun_target(shadowmap, device);
     if resized {
-        binding_cache.textures.clear();
+        binding_cache.clear_textures();
     }
     let Some(color_view) = color_view else {
         return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunTargetMissing"));
@@ -1459,6 +1570,12 @@ fn prepare_shadowmap_sun(
         return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunPartitionMissing"));
     }
     let generation = extracted.world.generation.get();
+    let reuse = super::shadow_reuse::enabled();
+    if reuse {
+        static_draws
+            .memo
+            .open_frame(generation, binding_cache.clears());
+    }
 
     let ShadowExecScratch {
         executor: shadow_exec_executor,
@@ -1709,8 +1826,9 @@ fn prepare_shadowmap_sun(
                 .world_draw_indices
                 .get(owner_start..owner_end)
                 .unwrap_or(&[]);
-            retry_n = retry_n.saturating_add(1);
-            match prepare.prepare_shadow_flush_draws(
+            let outcome = prepare_static_shadow_flush(
+                &mut prepare,
+                reuse.then_some(&mut static_draws.memo),
                 shadow_exec_executor,
                 shadow_exec_view,
                 SunFlush {
@@ -1729,9 +1847,19 @@ fn prepare_shadowmap_sun(
                     forward_z: true,
                     use_world_pretess: false,
                 },
-            ) {
-                Ok(gpu) => static_draws.world[pi][slot_i] = Some(gpu),
-                Err(cause) => {
+            );
+            match outcome {
+                StaticFlushOutcome::Prepared(Ok(gpu)) | StaticFlushOutcome::Reused(gpu) => {
+                    retry_n = retry_n.saturating_add(1);
+                    static_draws.world[pi][slot_i] = Some(gpu);
+                }
+                StaticFlushOutcome::Prepared(Err(cause)) => {
+                    retry_n = retry_n.saturating_add(1);
+                    miss = miss.saturating_add(1);
+                    *miss_rows.entry(cause).or_default() += 1;
+                }
+                StaticFlushOutcome::RefusedBefore(cause) => {
+                    smodel_reusable_all = false;
                     miss = miss.saturating_add(1);
                     *miss_rows.entry(cause).or_default() += 1;
                 }
@@ -1750,8 +1878,9 @@ fn prepare_shadowmap_sun(
                 .smodel_draw_indices
                 .get(owner_start..owner_end)
                 .unwrap_or(&[]);
-            retry_n = retry_n.saturating_add(1);
-            match prepare.prepare_shadow_flush_draws(
+            let outcome = prepare_static_shadow_flush(
+                &mut prepare,
+                reuse.then_some(&mut static_draws.memo),
                 shadow_exec_executor,
                 shadow_exec_view,
                 SunFlush {
@@ -1770,13 +1899,27 @@ fn prepare_shadowmap_sun(
                     forward_z: true,
                     use_world_pretess: false,
                 },
-            ) {
-                Ok(gpu) => static_draws.smodel[pi][slot_i] = Some(gpu),
-                Err(cause) => {
+            );
+            match outcome {
+                StaticFlushOutcome::Prepared(Ok(gpu)) | StaticFlushOutcome::Reused(gpu) => {
+                    retry_n = retry_n.saturating_add(1);
+                    static_draws.smodel[pi][slot_i] = Some(gpu);
+                }
+                StaticFlushOutcome::Prepared(Err(cause)) => {
+                    retry_n = retry_n.saturating_add(1);
+                    miss = miss.saturating_add(1);
+                    *miss_rows.entry(cause).or_default() += 1;
+                }
+                StaticFlushOutcome::RefusedBefore(cause) => {
+                    smodel_reusable_all = false;
                     miss = miss.saturating_add(1);
                     *miss_rows.entry(cause).or_default() += 1;
                 }
             }
+        }
+        if reuse {
+            static_draws.memo.tally.xmodel_flushes += xmodel_spans.len() as u64;
+            static_draws.memo.tally.skinned_flushes += work.smodel_skinned_flushes.len() as u64;
         }
         let mut xmodel_gpu = Vec::with_capacity(xmodel_spans.len());
         for (draw_start, draw_count, ring_epoch, entry_start, entry_count) in xmodel_spans {
@@ -1834,6 +1977,7 @@ fn prepare_shadowmap_sun(
             world: resident_world,
             smodel: resident_smodel,
             commands,
+            memo,
             ..
         } = &mut *static_draws;
         let plan = &mut commands[pi];
@@ -1846,6 +1990,9 @@ fn prepare_shadowmap_sun(
             || smodel_identity_changed
         {
             plan.rebuild(generation, &resident_world[pi], &resident_smodel[pi]);
+            if reuse {
+                memo.tally.rebuilds += 1;
+            }
         }
         if plan.refused > 0 {
             miss = miss.saturating_add(plan.refused);
@@ -1926,6 +2073,9 @@ fn prepare_shadowmap_sun(
         });
     }
     drop(prepare);
+    if reuse {
+        static_draws.memo.close_frame();
+    }
     PreparedSunWork {
         early: None,
         color_view: Some(color_view),

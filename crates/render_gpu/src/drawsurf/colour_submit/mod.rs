@@ -117,6 +117,7 @@ pub(super) use diagnostics::ExactColourSubmitCensus;
 use encode::RecordCensus;
 mod residency;
 mod reuse;
+mod shadow_reuse;
 mod smodel_skinned;
 
 pub use pipeline::cached_lighting_port_variant;

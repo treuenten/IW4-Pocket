@@ -4,7 +4,7 @@ pub const SMODEL_RIGID_ENTRY_STRIDE: usize = 0x10;
 
 pub const XMODEL_RIGID_ENTRY_STRIDE: usize = 0x10;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SmodelPretessRange {
     pub start: u32,
     pub count: u32,

@@ -232,6 +232,10 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         // Keep each colour draw's prepared records and constants from the last
         // frame while nothing it is made from changed (off by default).
         "IW4L_DRAW_REUSE" => matches!(value, "0" | "1"),
+        // Find sun shadow flushes prepared before by what they draw, so a
+        // caster entering the shadow view does not prepare the rest again
+        // (off by default).
+        "IW4L_SHADOW_REUSE" => matches!(value, "0" | "1"),
         // Health fields in the logs: memory, thermal state, Low Power Mode,
         // main-thread CPU, graphics-chip time, sim tick timing and memory
         // warnings (see crate::health). On by default; 0 turns all of it off.
@@ -394,6 +398,10 @@ mod tests {
         assert!(valid_file_setting("IW4L_DRAW_REUSE", "0"));
         assert!(valid_file_setting("IW4L_DRAW_REUSE", "1"));
         for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_DRAW_REUSE", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_SHADOW_REUSE", "0"));
+        assert!(valid_file_setting("IW4L_SHADOW_REUSE", "1"));
+        for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_SHADOW_REUSE", v), "{v:?}"); }
+        assert!(!valid_file_setting("IW4L_SHADOW_REUSE_VERIFY", "1"));
         // The verifier doubles the work: a Mac test switch, not a phone setting.
         assert!(!valid_file_setting("IW4L_DRAW_REUSE_VERIFY", "1"));
         for name in ["IW4L_THREAD_QOS", "IW4L_TICK_ON_MAIN"] {

@@ -21,6 +21,9 @@ pub(super) struct ExactShadowBindingCache {
     pub(super) generation: MaterialGenerationId,
     views_revision: u64,
     pub(super) textures: HashMap<BoundTextureKey, Arc<[u32]>>,
+    /// How many times `textures` has been cleared (`IW4L_SHADOW_REUSE`
+    /// drops its memo when this moves).
+    clears: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,6 +61,15 @@ impl ExactShadowBindingCache {
         }
         self.generation = generation;
         self.views_revision = views_revision;
+        self.clear_textures();
+    }
+
+    pub(super) fn clear_textures(&mut self) {
         self.textures.clear();
+        self.clears = self.clears.wrapping_add(1);
+    }
+
+    pub(super) fn clears(&self) -> u64 {
+        self.clears
     }
 }
