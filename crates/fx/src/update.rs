@@ -7,7 +7,7 @@ use fx_iw4::{
 };
 use std::collections::HashMap;
 
-use crate::elem::{FX_ELEM_HANDLE_NONE, elem_slot_for_handle};
+use crate::elem::{FX_ELEM_HANDLE_NONE, FxElemSlot, elem_slot_for_handle};
 use crate::gaps::{ChildSpawn, FxGapCause};
 use crate::spark::{
     FxSparkFillVisual, spark_elem_axis, spark_elem_world_origin, update_spark_history,
@@ -584,6 +584,52 @@ fn update_partial_for_class(
     }
 }
 
+/// The detail line for an element that moved, then stood still for a second in
+/// the first 90% of its life; `None` otherwise. Elements that never move are left alone.
+fn note_still(
+    elem: &mut FxElemSlot,
+    delta: [f32; 3],
+    msec_now: i32,
+    world: [f32; 3],
+) -> Option<String> {
+    let moved = delta.iter().any(|d| d.abs() > 0.01);
+    match elem.still_since_msec {
+        i32::MIN => None,
+        _ if moved => {
+            elem.still_since_msec = -1;
+            None
+        }
+        0 => None,
+        -1 => {
+            elem.still_since_msec = msec_now.max(1);
+            None
+        }
+        since => {
+            let age = i64::from(msec_now.saturating_sub(elem.msec_begin));
+            if msec_now.saturating_sub(since) < 1000
+                || age * 10 > i64::from(elem.life_span_msec) * 9
+            {
+                return None;
+            }
+            elem.still_since_msec = i32::MIN;
+            Some(format!(
+                "at=({:.0},{:.0},{:.0}) age={}ms life={}ms flags=0x{:08x} collision={} at_rest={} base_vel=({:.0},{:.0},{:.0})",
+                world[0],
+                world[1],
+                world[2],
+                age,
+                elem.life_span_msec,
+                elem.flags,
+                fx_iw4::elem_uses_collision(elem.flags),
+                elem.at_rest_fraction,
+                elem.base_vel[0],
+                elem.base_vel[1],
+                elem.base_vel[2],
+            ))
+        }
+    }
+}
+
 fn update_element(
     host: &mut FxSystemHost,
     effect_slot: usize,
@@ -682,12 +728,28 @@ fn update_element(
                 origin[1] + result.origin_delta[1],
                 origin[2] + result.origin_delta[2],
             ];
+            let mut still = None;
             if let Some(elem) = host.elems.get_mut(slot) {
                 elem.origin = origin_end;
                 elem.base_vel = result.base_vel;
                 if let Some(frac) = result.at_rest_fraction {
                     elem.at_rest_fraction = frac;
                 }
+                let world =
+                    fx_iw4::orientation_pos_to_world(orient.origin, orient.axis, origin_end);
+                still = note_still(elem, result.origin_delta, msec_now, world);
+            }
+            if let Some(detail) = still {
+                let name = host
+                    .effect_at(effect_slot)
+                    .map_or("", |e| e.def_name.as_str());
+                crate::frozen_log::note(
+                    "still",
+                    name,
+                    catalog_index,
+                    def_index,
+                    format_args!("{detail}"),
+                );
             }
             let emit_residual = host.elems.get(slot).map(|e| e.emit_residual).unwrap_or(0);
             if let Some(sched) = on_emit(FxEmitQuery {
@@ -782,6 +844,17 @@ fn update_element(
         }
         None => {
             host.gaps.raise(FxGapCause::ElemDefNotFound { def_index });
+            crate::frozen_log::note(
+                "no-motion",
+                host.effect_at(effect_slot)
+                    .map_or("", |e| e.def_name.as_str()),
+                catalog_index,
+                def_index,
+                format_args!(
+                    "at=({:.0},{:.0},{:.0}) flags=0x{:08x}",
+                    origin[0], origin[1], origin[2], flags
+                ),
+            );
         }
     }
 

@@ -40,6 +40,9 @@ pub struct FxElemSlot {
     pub sort_order: u8,
 
     pub spark_cloud_handle: u16,
+    /// For the frozen-element log: 0 before the element first moves, -1 while it
+    /// moves, the msec it stopped after moving, `i32::MIN` once reported.
+    pub still_since_msec: i32,
 }
 
 impl Default for FxElemSlot {
@@ -67,6 +70,7 @@ impl Default for FxElemSlot {
             class_index: 0,
             sort_order: 0,
             spark_cloud_handle: FX_SPARK_CLOUD_HANDLE_NONE,
+            still_since_msec: 0,
         }
     }
 }

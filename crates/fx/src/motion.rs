@@ -130,6 +130,16 @@ pub fn evaluate_elem_collide_motion(
             );
             let hit = trace(start, end, coll_mins, coll_maxs, mask);
             if hit.startsolid || hit.allsolid {
+                crate::frozen_log::note(
+                    "start-in-solid",
+                    q.def_name,
+                    q.catalog_index,
+                    q.def_index,
+                    format_args!(
+                        "at=({:.0},{:.0},{:.0}) flags=0x{:08x} allsolid={}",
+                        start[0], start[1], start[2], flags, hit.allsolid
+                    ),
+                );
                 base_vel = [0.0; 3];
                 break;
             }
@@ -197,10 +207,41 @@ pub fn evaluate_elem_collide_motion(
                     frac as u8
                 };
                 at_rest_fraction = Some(u);
+                crate::frozen_log::note(
+                    "at-rest",
+                    q.def_name,
+                    q.catalog_index,
+                    q.def_index,
+                    format_args!(
+                        "at=({:.0},{:.0},{:.0}) normal_z={:.2} flags=0x{:08x}",
+                        hit_world[0], hit_world[1], hit_world[2], hit.normal[2], flags
+                    ),
+                );
                 base_vel = [0.0; 3];
                 break;
             }
 
+            if hit_at_start {
+                crate::frozen_log::note(
+                    "touch-at-start",
+                    q.def_name,
+                    q.catalog_index,
+                    q.def_index,
+                    format_args!(
+                        "at=({:.0},{:.0},{:.0}) normal=({:.2},{:.2},{:.2}) pre_vel=({:.0},{:.0},{:.0}) flags=0x{:08x}",
+                        hit_world[0],
+                        hit_world[1],
+                        hit_world[2],
+                        hit.normal[0],
+                        hit.normal[1],
+                        hit.normal[2],
+                        pre_vel[0],
+                        pre_vel[1],
+                        pre_vel[2],
+                        flags
+                    ),
+                );
+            }
             let dvel = collision_reflect_base_vel_delta(pre_vel, hit.normal, reflection);
             base_vel = [
                 base_vel[0] + dvel[0],

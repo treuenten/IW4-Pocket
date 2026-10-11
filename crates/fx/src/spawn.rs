@@ -492,6 +492,7 @@ fn spawn_elem(
         class_index: class as u8,
         sort_order: elem_def.sort_order,
         spark_cloud_handle: FX_SPARK_CLOUD_HANDLE_NONE,
+        still_since_msec: 0,
     };
     if prev_head != FX_ELEM_HANDLE_NONE {
         if let Some(prev_slot) = elem_slot_for_handle(prev_head) {

@@ -1,6 +1,7 @@
 mod def;
 mod draw;
 mod elem;
+mod frozen_log;
 mod gaps;
 mod glass;
 mod lifetime;
