@@ -41,6 +41,10 @@ pub struct PlayerCorpseSlot {
     /// slot is occupied; clients key the body's animation on it, so a body
     /// keeps one death animation for its whole life.
     pub spawn_time_ms: i32,
+
+    /// The shield on the victim's back at death. A body draws this one, never
+    /// the victim's current shield, which changes when the victim respawns.
+    pub shield: Option<crate::ShieldAttachment>,
 }
 
 impl Default for PlayerCorpseSlot {
@@ -63,6 +67,7 @@ impl Default for PlayerCorpseSlot {
             falling: false,
             ground_entity_num: ENTITYNUM_NONE,
             spawn_time_ms: 0,
+            shield: None,
         }
     }
 }
@@ -163,6 +168,11 @@ pub(crate) fn occupy_player_clone(
     ps: &PlayerState,
     time_ms: i32,
 ) -> u8 {
+    // A shield in hand is the one dropped as an item; only a stowed one stays on the body.
+    let shield = world
+        .client_meta(victim)
+        .and_then(|meta| meta.shield)
+        .filter(|shield| shield.on_back);
     let pool = world.corpses_mut();
     let entnum = pool.alloc_clone_entity();
     let slot = pool.get_free(ps.origin);
@@ -185,6 +195,7 @@ pub(crate) fn occupy_player_clone(
             tr_base: ps.origin,
             falling: true,
             spawn_time_ms: time_ms,
+            shield,
             ..PlayerCorpseSlot::default()
         },
     );

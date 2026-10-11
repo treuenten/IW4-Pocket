@@ -50,6 +50,27 @@ pub struct RemotePlayer {
     pub shield: Option<sim::ShieldAttachment>,
 }
 
+/// A body draws the shield it died with; a live player draws the one it holds now.
+fn drawn_shield(
+    snapshot: &sim::Snapshot,
+    number: u16,
+    client: sim::ClientId,
+) -> Option<sim::ShieldAttachment> {
+    let body = snapshot
+        .meta
+        .corpses
+        .slots
+        .iter()
+        .find(|slot| slot.occupied && slot.entnum == i32::from(number));
+    match body {
+        Some(body) => body.shield,
+        None => snapshot
+            .meta
+            .for_client(client)
+            .and_then(|meta| meta.shield),
+    }
+}
+
 #[derive(Component, Default)]
 pub struct RemoteFxBolts {
     pub flash: Option<fx::FxBoltTarget>,
@@ -284,7 +305,9 @@ fn occupy_remote_scene_ents(
         if !soldier.owns_bodies(&bodies.0) {
             continue;
         }
-        let shield = meta.and_then(|meta| meta.shield);
+        let shield = presented
+            .snapshot()
+            .and_then(|snap| drawn_shield(snap, identity.number(), client));
         let held = remote_pose_sample(runtime).weapon;
         let (kit_models, radius, hide_part_bits) = match live_kits.filter(|_| shield.is_none()) {
             Some((kits, _world)) => {
@@ -456,7 +479,9 @@ fn sync_remote_bodies(
         let marker = RemotePlayer {
             ffa_team,
             client_state_team,
-            shield: meta.and_then(|meta| meta.shield),
+            shield: presented
+                .snapshot()
+                .and_then(|snap| drawn_shield(snap, identity.number(), client)),
         };
         if remote.is_some() {
             commands.entity(entity).insert((pose, marker));

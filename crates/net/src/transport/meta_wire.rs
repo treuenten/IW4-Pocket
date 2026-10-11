@@ -2182,6 +2182,8 @@ fn encode_corpse_pool(out: &mut WireWriter, pool: &PlayerCorpsePool) {
         out.put_u8(u8::from(slot.falling));
         out.put_i32(slot.ground_entity_num);
         out.put_i32(slot.spawn_time_ms);
+        out.put_u32(slot.shield.map_or(0, |shield| shield.weapon));
+        out.put_u8(u8::from(slot.shield.is_some_and(|shield| shield.on_back)));
     }
 }
 
@@ -2216,12 +2218,25 @@ fn decode_corpse_pool(input: &mut WireReader<'_>) -> Result<PlayerCorpsePool, Wi
                     falling: input.get_u8()? != 0,
                     ground_entity_num: input.get_i32()?,
                     spawn_time_ms: input.get_i32()?,
+                    shield: decode_corpse_shield(input)?,
                 };
             }
             _ => return Err(WireError::Malformed("bad corpse slot tag")),
         }
     }
     Ok(pool)
+}
+
+fn decode_corpse_shield(
+    input: &mut WireReader<'_>,
+) -> Result<Option<sim::ShieldAttachment>, WireError> {
+    let weapon = input.get_u32()?;
+    let on_back = match input.get_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(WireError::Malformed("bad corpse shield tag")),
+    };
+    Ok((weapon != 0).then_some(sim::ShieldAttachment { weapon, on_back }))
 }
 
 fn encode_entity_states(out: &mut WireWriter, rows: &[entity_iw4::EntityState]) {
@@ -3145,7 +3160,7 @@ mod corpse_pool_wire_tests {
     use super::*;
 
     #[test]
-    fn a_corpse_pool_round_trips_with_each_body_spawn_time() {
+    fn a_corpse_pool_round_trips_with_each_body_spawn_time_and_shield() {
         let mut pool = PlayerCorpsePool {
             spawn_ring: 3,
             ..PlayerCorpsePool::default()
@@ -3171,6 +3186,17 @@ mod corpse_pool_wire_tests {
             falling: true,
             ground_entity_num: 2047,
             spawn_time_ms: 22_350,
+            shield: Some(sim::ShieldAttachment {
+                weapon: 41,
+                on_back: true,
+            }),
+        };
+        pool.slots[2] = PlayerCorpseSlot {
+            occupied: true,
+            entnum: 1002,
+            victim: ClientId(5),
+            spawn_time_ms: 23_000,
+            ..PlayerCorpseSlot::default()
         };
         let mut out = WireWriter::new();
         encode_corpse_pool(&mut out, &pool);
@@ -3180,5 +3206,6 @@ mod corpse_pool_wire_tests {
         assert!(input.is_empty());
         assert_eq!(decoded, pool);
         assert_eq!(decoded.slots[1].spawn_time_ms, 22_350);
+        assert_eq!(decoded.slots[2].shield, None);
     }
 }
