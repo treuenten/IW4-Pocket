@@ -18,8 +18,15 @@
 //! too, so a flush that cannot be prepared is not prepared again, and the list
 //! is not rebuilt for it, every frame.
 //!
+//! Entity model flushes are prepared every frame. With the switch on, one
+//! whose item is unchanged bit for bit (pose included) is taken from the memo
+//! too, so models that stand still, such as clutter at rest, cost a lookup.
+//!
 //! The memo is dropped when the material generation changes or the shadow
-//! texture bindings are cleared. Entries not used for a while are evicted.
+//! texture bindings are cleared. A static entry stays while the map does (the
+//! resident list holds its flush while the camera stands still, so it is not
+//! looked up then); entity entries not used for a second go, since a moving
+//! model leaves a new one every frame.
 //!
 //! The verifier (`IW4L_SHADOW_REUSE_VERIFY=1`, a Mac switch) prepares every
 //! hit again, compares the records and draws the fresh one.
@@ -35,8 +42,10 @@ use super::shadow_prepare::{
 pub(super) const SHADOW_REUSE_ENV: &str = "IW4L_SHADOW_REUSE";
 pub(super) const SHADOW_REUSE_VERIFY_ENV: &str = "IW4L_SHADOW_REUSE_VERIFY";
 
-/// Frames an unused entry is kept.
-const KEEP_FRAMES: u64 = 600;
+/// Frames an unused entity entry is kept.
+const ENTITY_KEEP_FRAMES: u64 = 60;
+/// Static entries kept before the least recently used are dropped.
+const STATIC_CAP: usize = 32_768;
 /// Frames a remembered refusal is kept before the flush is tried again.
 const REFUSAL_FRAMES: u64 = 120;
 /// Frames a kept flush is used before it is prepared again, so the code
@@ -53,22 +62,76 @@ pub(super) fn verify() -> bool {
     *ON.get_or_init(|| enabled() && perf::switch(SHADOW_REUSE_VERIFY_ENV))
 }
 
-/// What a flush is prepared from: its owner record and technique.
+/// The draw a flush is prepared from: for a world surface or a static model
+/// the record the resident list compares, for an entity model every field of
+/// its item, pose included.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FlushOwner {
+    Static(ShadowStaticOwner),
+    Entity {
+        key: u64,
+        surface: u32,
+        material: u32,
+        object_id: u16,
+        world_from_local: [u32; 16],
+        lighting_handle: u32,
+        packed_lighting: Option<[u8; 4]>,
+        is_scope: bool,
+        scene_entnum: Option<u32>,
+        samplers: render_frame::SurfaceSamplerInputs,
+    },
+}
+
+/// What a flush is prepared from: its owner, material and technique.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ShadowFlushId {
-    owner: ShadowStaticOwner,
+    owner: FlushOwner,
+    material_id: Option<render_material::MaterialAssetId>,
+    material_rank: u32,
     tech: TechType,
 }
 
 impl ShadowFlushId {
-    /// `None` for an owner the memo does not keep (entity models).
+    /// `None` for a draw the memo does not keep.
     pub(super) fn of(item: &RetainedDrawItem, tech: TechType) -> Option<Self> {
         let owner = match item.kind {
-            RetainedDrawKind::World { .. } => world_shadow_static_owner(item)?,
-            RetainedDrawKind::Smodel { .. } => smodel_shadow_static_owner(item)?,
+            RetainedDrawKind::World { .. } => FlushOwner::Static(world_shadow_static_owner(item)?),
+            RetainedDrawKind::Smodel { .. } => {
+                FlushOwner::Static(smodel_shadow_static_owner(item)?)
+            }
+            RetainedDrawKind::XModel {
+                surface,
+                material,
+                object_id,
+                world_from_local,
+                lighting_handle,
+                packed_lighting,
+                is_scope,
+                scene_entnum,
+            } => FlushOwner::Entity {
+                key: item.key,
+                surface,
+                material,
+                object_id,
+                world_from_local: world_from_local.to_cols_array().map(f32::to_bits),
+                lighting_handle,
+                packed_lighting,
+                is_scope,
+                scene_entnum,
+                samplers: item.surface_samplers,
+            },
             _ => return None,
         };
-        Some(Self { owner, tech })
+        Some(Self {
+            owner,
+            material_id: item.material_id,
+            material_rank: item.material_rank,
+            tech,
+        })
+    }
+
+    fn is_entity(&self) -> bool {
+        matches!(self.owner, FlushOwner::Entity { .. })
     }
 }
 
@@ -111,6 +174,9 @@ pub(super) struct ShadowReuseTally {
     pub(super) skinned_flushes: u64,
     pub(super) verified: u64,
     pub(super) mismatches: u64,
+    /// Hits whose code constants other than the patched sites differ from a
+    /// fresh prepare: values the resident list freezes too.
+    pub(super) frozen_differ: u64,
 }
 
 #[derive(Default)]
@@ -132,10 +198,17 @@ impl ShadowFlushMemo {
             self.epoch = Some((generation, binding_clears));
             self.entries.clear();
         }
-        if self.frame.is_multiple_of(KEEP_FRAMES) {
-            let frame = self.frame;
-            self.entries
-                .retain(|_, entry| frame.saturating_sub(entry.used) < KEEP_FRAMES);
+        let frame = self.frame;
+        if frame.is_multiple_of(ENTITY_KEEP_FRAMES) {
+            self.entries.retain(|id, entry| {
+                !id.is_entity() || frame.saturating_sub(entry.used) < ENTITY_KEEP_FRAMES
+            });
+        }
+        if self.entries.len() > STATIC_CAP {
+            let mut used: Vec<u64> = self.entries.values().map(|entry| entry.used).collect();
+            used.sort_unstable();
+            let cut = used[used.len() - STATIC_CAP / 2];
+            self.entries.retain(|_, entry| entry.used >= cut);
         }
     }
 
@@ -200,7 +273,7 @@ impl ShadowFlushMemo {
         let t = self.tally;
         diag::info!(
             World,
-            "shadow reuse: frames={} hits={} prepared={} refusal_hits={} refused={} rebuilds={} xmodel_flushes={} skinned_flushes={} entries={} verified={} mismatches={}",
+            "shadow reuse: frames={} hits={} prepared={} refusal_hits={} refused={} rebuilds={} xmodel_flushes={} skinned_flushes={} entries={} verified={} mismatches={} frozen_differ={}",
             self.frame,
             t.hits,
             t.prepared,
@@ -212,6 +285,7 @@ impl ShadowFlushMemo {
             self.entries.len(),
             t.verified,
             t.mismatches,
+            t.frozen_differ,
         );
     }
 }
@@ -294,6 +368,65 @@ pub(super) fn flush_mismatch(
         }
     }
     None
+}
+
+/// Rows the resident list writes every frame (`sun_code_sites`).
+fn patched_index(index: u16) -> Option<usize> {
+    match index {
+        crate::drawsurf::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0
+        | render_backend::overlay::CODE_TRANSPOSE_PROJECTION
+        | render_backend::overlay::CODE_TRANSPOSE_VIEW_PROJECTION => Some(4),
+        crate::drawsurf::CODE_SHADOWMAP_POLYGON_OFFSET => Some(1),
+        _ => None,
+    }
+}
+
+/// How two prepared flushes' constant values compare, the patched rows
+/// aside: `Err` names a difference in rows no code constant writes (a real
+/// mismatch); `Ok(true)` is a difference in other code constants only, which
+/// the resident list freezes at a prepare as well.
+pub(super) fn constants_compare(
+    kept: &ShadowmapSunFlushGpu,
+    fresh: &ShadowmapSunFlushGpu,
+) -> Result<bool, &'static str> {
+    use render_material::RuntimeShaderStage;
+    let mut frozen_differ = false;
+    for ((a, b), code) in kept.draws.iter().zip(&fresh.draws).zip(&fresh.pass_code) {
+        let (Some(ca), Some(cb)) = (a.constants.as_ref(), b.constants.as_ref()) else {
+            continue;
+        };
+        for (stage, rows_a, rows_b) in [
+            (RuntimeShaderStage::Vertex, &ca.vertex, &cb.vertex),
+            (RuntimeShaderStage::Pixel, &ca.pixel, &cb.pixel),
+        ] {
+            if rows_a.len() != rows_b.len() {
+                return Err("constants size");
+            }
+            // 0: material row, 1: code constant row, 2: patched row.
+            let mut kind = vec![0u8; rows_a.len()];
+            for lane in code.lanes.iter().filter(|lane| lane.stage == stage) {
+                let first = usize::from(lane.destination);
+                let (n, mark) = match patched_index(lane.index) {
+                    Some(n) => (n, 2),
+                    None => (usize::from(lane.row_count), 1),
+                };
+                for row in first..first.saturating_add(n).min(kind.len()) {
+                    kind[row] = kind[row].max(mark);
+                }
+            }
+            for ((ra, rb), kind) in rows_a.iter().zip(rows_b.iter()).zip(&kind) {
+                if ra == rb {
+                    continue;
+                }
+                match kind {
+                    0 => return Err("material constants"),
+                    1 => frozen_differ = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(frozen_differ)
 }
 
 #[cfg(test)]
@@ -415,21 +548,49 @@ mod tests {
         assert_eq!(found(&mut memo, &id), "none");
     }
 
-    #[test]
-    fn an_entry_left_unused_is_evicted() {
-        let mut memo = ShadowFlushMemo::default();
-        let kept = ShadowFlushId::of(&smodel(1, 7), TechType(2)).unwrap();
-        let left = ShadowFlushId::of(&smodel(2, 7), TechType(2)).unwrap();
-        memo.open_frame(1, 0);
-        memo.store(kept.clone(), &Ok(flush()));
-        memo.store(left.clone(), &Ok(flush()));
-        for _ in 0..KEEP_FRAMES * 2 {
-            memo.open_frame(1, 0);
-            if found(&mut memo, &kept) == "none" {
-                memo.store(kept.clone(), &Ok(flush()));
-            }
+    fn entity(world_x: f32) -> RetainedDrawItem {
+        RetainedDrawItem {
+            material_id: None,
+            key: 0x77,
+            material_rank: 2,
+            kind: RetainedDrawKind::XModel {
+                surface: 1,
+                material: 2,
+                object_id: 3,
+                world_from_local: Mat4::from_translation(bevy::math::Vec3::new(world_x, 0.0, 0.0)),
+                lighting_handle: 0,
+                packed_lighting: None,
+                is_scope: false,
+                scene_entnum: Some(40),
+            },
+            surface_samplers: Default::default(),
+            camera_region: None,
         }
-        assert_eq!(found(&mut memo, &kept), "prepared");
-        assert_eq!(found(&mut memo, &left), "none");
+    }
+
+    #[test]
+    fn an_entity_flush_is_found_again_only_where_it_stood() {
+        let mut memo = ShadowFlushMemo::default();
+        memo.open_frame(1, 0);
+        let still = ShadowFlushId::of(&entity(5.0), TechType(2)).expect("entity model");
+        memo.store(still.clone(), &Ok(flush()));
+        assert_eq!(found(&mut memo, &still), "prepared");
+        let moved = ShadowFlushId::of(&entity(5.5), TechType(2)).unwrap();
+        assert_eq!(found(&mut memo, &moved), "none");
+    }
+
+    #[test]
+    fn unused_entity_entries_go_and_static_ones_stay() {
+        let mut memo = ShadowFlushMemo::default();
+        let stat = ShadowFlushId::of(&smodel(1, 7), TechType(2)).unwrap();
+        let ent = ShadowFlushId::of(&entity(1.0), TechType(2)).unwrap();
+        memo.open_frame(1, 0);
+        memo.store(stat.clone(), &Ok(flush()));
+        memo.store(ent.clone(), &Ok(flush()));
+        for _ in 0..ENTITY_KEEP_FRAMES * 3 {
+            memo.open_frame(1, 0);
+        }
+        assert_eq!(found(&mut memo, &ent), "none");
+        assert_eq!(found(&mut memo, &stat), "prepared");
     }
 }

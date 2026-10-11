@@ -1432,7 +1432,7 @@ enum StaticFlushOutcome {
     RefusedBefore(String),
 }
 
-/// A resident world or static model flush: prepared, or with
+/// A world, static model or entity model flush: prepared, or with
 /// `IW4L_SHADOW_REUSE` taken from the memo (see `shadow_reuse`).
 fn prepare_static_shadow_flush(
     prepare: &mut ExactPrepare<'_>,
@@ -1445,7 +1445,9 @@ fn prepare_static_shadow_flush(
     product: &FrameProduct,
     target: ExactPrepareTarget,
 ) -> StaticFlushOutcome {
-    use super::shadow_reuse::{Remembered, ShadowFlushId, flush_mismatch, verify};
+    use super::shadow_reuse::{
+        Remembered, ShadowFlushId, constants_compare, flush_mismatch, verify,
+    };
     let Some(memo) = memo else {
         return StaticFlushOutcome::Prepared(prepare.prepare_shadow_flush_draws(
             executor,
@@ -1494,7 +1496,15 @@ fn prepare_static_shadow_flush(
             );
             memo.tally.verified += 1;
             let cause = match &fresh {
-                Ok(fresh) => flush_mismatch(&kept, fresh),
+                Ok(fresh) => {
+                    flush_mismatch(&kept, fresh).or_else(|| match constants_compare(&kept, fresh) {
+                        Ok(frozen) => {
+                            memo.tally.frozen_differ += u64::from(frozen);
+                            None
+                        }
+                        Err(cause) => Some(cause),
+                    })
+                }
                 Err(_) => Some("refused when prepared again"),
             };
             if let Some(cause) = cause {
@@ -1926,7 +1936,9 @@ fn prepare_shadowmap_sun(
             let start = entry_start as usize;
             let end = start.saturating_add(entry_count as usize);
             let owners = packed.xmodel_draw_indices.get(start..end).unwrap_or(&[]);
-            match prepare.prepare_shadow_flush_draws(
+            let outcome = prepare_static_shadow_flush(
+                &mut prepare,
+                reuse.then_some(&mut static_draws.memo),
                 shadow_exec_executor,
                 shadow_exec_view,
                 SunFlush {
@@ -1945,9 +1957,13 @@ fn prepare_shadowmap_sun(
                     forward_z: true,
                     use_world_pretess: false,
                 },
-            ) {
-                Ok(gpu) => xmodel_gpu.push(gpu),
-                Err(cause) => {
+            );
+            match outcome {
+                StaticFlushOutcome::Prepared(Ok(gpu)) | StaticFlushOutcome::Reused(gpu) => {
+                    xmodel_gpu.push(gpu);
+                }
+                StaticFlushOutcome::Prepared(Err(cause))
+                | StaticFlushOutcome::RefusedBefore(cause) => {
                     miss = miss.saturating_add(1);
                     *miss_rows.entry(cause).or_default() += 1;
                 }
