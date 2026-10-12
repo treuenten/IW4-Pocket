@@ -7,6 +7,13 @@
 //! during a match (class select and in game) and is paused elsewhere, so the
 //! menus stay at 60 Hz and do not draw twice as often for nothing.
 //!
+//! The first minute of a match stays at 60 Hz. Phone logs showed 85-200 ms
+//! graphics stalls in the first 15-55 s after spawning, only at 120 Hz and only
+//! until iOS settled the graphics chip's clock; a whole match at 60 Hz had none
+//! but ran at about 40 fps instead of 52-55. So the request starts once the
+//! player has been in the match for `IW4L_PROMOTION_DELAY` seconds (default 60,
+//! 0 asks at once).
+//!
 //! `IW4L_PROMOTION=0` in `iw4l-env.txt` leaves the display alone. Every other
 //! platform registers nothing.
 use bevy::prelude::*;
@@ -26,6 +33,8 @@ mod ios {
     use objc2::{ClassType, Encode, Encoding, class, define_class, msg_send, sel};
 
     const PROMOTION_ENV: &str = "IW4L_PROMOTION";
+    const DELAY_ENV: &str = "IW4L_PROMOTION_DELAY";
+    const DEFAULT_DELAY_SECS: f64 = 60.0;
 
     /// QuartzCore's `CAFrameRateRange` (iOS 15).
     #[repr(C)]
@@ -65,6 +74,10 @@ mod ios {
     /// The display link, touched on the main thread only.
     struct RateLink(Retained<AnyObject>);
 
+    /// Seconds in a match before the display is asked for 120 Hz.
+    #[derive(Resource)]
+    struct FastAfter(f64);
+
     pub(super) fn register(app: &mut App) {
         if std::env::var(PROMOTION_ENV).is_ok_and(|value| value.trim() == "0") {
             diag::info!(
@@ -80,11 +93,16 @@ mod ios {
             );
             return;
         };
+        let delay = std::env::var(DELAY_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .map_or(DEFAULT_DELAY_SECS, f64::from);
         app.insert_non_send(RateLink(link))
+            .insert_resource(FastAfter(delay))
             .add_systems(Last, follow_screen);
         diag::info!(
             Launch,
-            "promotion: 120 Hz display link ready (matches only)"
+            "promotion: 120 Hz display link ready (matches only, after {delay:.0} s in game)"
         );
     }
 
@@ -117,31 +135,62 @@ mod ios {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        OutOfMatch,
+        MatchStart,
+        Fast,
+    }
+
     fn follow_screen(
         link: NonSend<RateLink>,
+        fast_after: Res<FastAfter>,
+        time: Res<Time<Real>>,
         screen: Option<Res<frame::AppScreen>>,
-        mut live: Local<Option<bool>>,
+        mut in_game_since: Local<Option<f64>>,
+        mut live: Local<Option<Phase>>,
     ) {
+        let screen = screen.as_deref();
         let in_match = matches!(
-            screen.as_deref(),
+            screen,
             Some(frame::AppScreen::ClassSelect | frame::AppScreen::InGame)
         );
-        if *live == Some(in_match) {
+        let now = time.elapsed_secs_f64();
+        if !in_match {
+            *in_game_since = None;
+        } else if in_game_since.is_none() && screen == Some(&frame::AppScreen::InGame) {
+            *in_game_since = Some(now);
+        }
+        let phase = if !in_match {
+            Phase::OutOfMatch
+        } else if in_game_since.is_some_and(|since| now - since >= fast_after.0) {
+            Phase::Fast
+        } else {
+            Phase::MatchStart
+        };
+        if *live == Some(phase) {
             return;
         }
-        *live = Some(in_match);
+        let first = live.replace(phase).is_none();
         // SAFETY: NonSend keeps this on the main thread; `paused` is a BOOL property.
         unsafe {
-            let _: () = msg_send![&*link.0, setPaused: !in_match];
+            let _: () = msg_send![&*link.0, setPaused: phase != Phase::Fast];
         }
-        diag::info!(
-            Launch,
-            "promotion: {}",
-            if in_match {
-                "match, asking the display for 120 Hz"
-            } else {
-                "out of match, display back to 60 Hz"
+        match phase {
+            Phase::Fast => diag::info!(
+                Launch,
+                "promotion: {:.0} s into the match, asking the display for 120 Hz",
+                fast_after.0
+            ),
+            Phase::MatchStart => diag::info!(
+                Launch,
+                "promotion: match start, display at 60 Hz for the first {:.0} s",
+                fast_after.0
+            ),
+            Phase::OutOfMatch if !first => {
+                diag::info!(Launch, "promotion: out of match, display back to 60 Hz")
             }
-        );
+            Phase::OutOfMatch => {}
+        }
     }
 }

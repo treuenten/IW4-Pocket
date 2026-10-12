@@ -214,6 +214,8 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_DT_SNAP" | "IW4L_FRAME_STATS" => matches!(value, "0" | "1"),
         // 0 keeps the display at 60 Hz instead of asking for 120 Hz in matches.
         "IW4L_PROMOTION" => matches!(value, "0" | "1"),
+        // Seconds in a match at 60 Hz before asking for 120 Hz (default 60).
+        "IW4L_PROMOTION_DELAY" => value.parse::<u32>().is_ok_and(|secs| secs <= 600),
         // Render on its own thread, one frame behind the main loop (off by default).
         "IW4L_PIPELINED_RENDERING" => matches!(value, "0" | "1"),
         // Testing cheat menu in the pause menu: God Mode, Unlimited Ammo, killstreaks,
