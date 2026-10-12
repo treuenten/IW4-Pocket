@@ -1008,7 +1008,14 @@ fn register_placement(registry: &mut NativeRegistry) {
             None if tag.eq_ignore_ascii_case("tag_origin") => {
                 Ok(Value::Vector(vector_field(world, id, "angles")))
             }
-            None => Err(format!("tag '{tag}' does not exist on entity")),
+            None => {
+                let mut runtime = runtime(world);
+                let model = runtime.object_field(id, "model");
+                let presence = runtime.entities[&id].presence.is_some();
+                Err(format!(
+                    "tag '{tag}' does not exist on entity (model {model:?}, placed {presence})"
+                ))
+            }
         }
     });
     registry.register(Method, "getvelocity", |world, receiver, _| {

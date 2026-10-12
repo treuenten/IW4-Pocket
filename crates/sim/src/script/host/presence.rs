@@ -292,25 +292,58 @@ fn present(world: &mut World, now: i32) {
     }
 }
 
-fn tag_lookup(world: &mut World, object: u64, tag: &str) -> Option<Option<[f32; 3]>> {
+/// Reads a tag from the skeleton of the model placed for `object`. An entity
+/// presented without one (a vehicle such as the AC-130's plane, which is not a
+/// script mover) is posed from its model at its origin and angles instead, so
+/// its tags still resolve.
+fn with_tag_dobj<T>(
+    world: &mut World,
+    object: u64,
+    read: impl FnOnce(&crate::AuthorityDObjState) -> Option<T>,
+) -> Option<T> {
     let presence = world
         .resource::<Runtime>()
         .entities
         .get(&object)?
         .presence?;
     let frame = settled(world);
-    let dobj = frame
+    if let Some(dobj) = frame
         .entity_collision_capabilities()
         .iter()
         .find(|row| row.owner.script_model() == Some(presence))?
         .dobj
-        .as_ref()?;
-    Some(dobj.tag_world_pose(tag).map(|(at, _)| {
-        dobj.world_from_model
-            .inverse()
-            .transform_point3(glam::Vec3::from(at))
-            .to_array()
-    }))
+        .as_ref()
+    {
+        return read(dobj);
+    }
+    let (model, origin, angles) = {
+        let mut runtime = world.resource_mut::<Runtime>();
+        (
+            model_field(&mut runtime, object)?,
+            vector(&mut runtime, object, "origin"),
+            vector(&mut runtime, object, "angles"),
+        )
+    };
+    let capability = FrameWorld::from_world(world)
+        .model_capability(&model)
+        .flatten()?;
+    read(&crate::AuthorityDObjState::at_pose(
+        &model,
+        Some(capability),
+        origin,
+        angles,
+    ))
+}
+
+fn tag_lookup(world: &mut World, object: u64, tag: &str) -> Option<Option<[f32; 3]>> {
+    with_tag_dobj(world, object, |dobj| {
+        Some(dobj.tag_world_pose(tag).map(|(at, _)| {
+            dobj.world_from_model
+                .inverse()
+                .transform_point3(glam::Vec3::from(at))
+                .to_array()
+        }))
+    })
 }
 
 pub(crate) fn tag_world(
@@ -318,19 +351,7 @@ pub(crate) fn tag_world(
     object: u64,
     tag: &str,
 ) -> Option<([f32; 3], [[f32; 3]; 3])> {
-    let presence = world
-        .resource::<Runtime>()
-        .entities
-        .get(&object)?
-        .presence?;
-    let frame = settled(world);
-    let matrix = frame
-        .entity_collision_capabilities()
-        .iter()
-        .find(|row| row.owner.script_model() == Some(presence))?
-        .dobj
-        .as_ref()?
-        .tag_world_matrix(tag)?;
+    let matrix = with_tag_dobj(world, object, |dobj| dobj.tag_world_matrix(tag))?;
     let axis = |v: glam::Vec4| v.truncate().normalize_or_zero().to_array();
     Some((
         matrix.w_axis.truncate().to_array(),
