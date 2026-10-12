@@ -1,5 +1,6 @@
 //! `IW4L_DRAW_REUSE`: keep the colour lanes' prepared draws from one frame to
-//! the next while nothing they were made from has changed (off by default).
+//! the next while nothing they were made from has changed (on by default;
+//! `IW4L_DRAW_REUSE=0` turns it off).
 //!
 //! Every frame the camera colour prepare turns each row of the draw list into
 //! one record per material pass (pipeline, texture slots, index range, state)
@@ -67,10 +68,10 @@ use super::{ColourRowPlan, PreparedExactDraw};
 pub(super) const DRAW_REUSE_ENV: &str = "IW4L_DRAW_REUSE";
 pub(super) const DRAW_REUSE_VERIFY_ENV: &str = "IW4L_DRAW_REUSE_VERIFY";
 
-/// Read once.
+/// Read once. On unless the switch is set to off.
 pub(super) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| perf::switch(DRAW_REUSE_ENV))
+    *ON.get_or_init(|| std::env::var_os(DRAW_REUSE_ENV).is_none() || perf::switch(DRAW_REUSE_ENV))
 }
 
 /// Read once. Always on in a debug build.
@@ -370,7 +371,7 @@ impl ReuseState {
         if self.stats.frames == 0 {
             diag::info!(
                 World,
-                "draw reuse: on ({DRAW_REUSE_ENV}=1), verify={}",
+                "draw reuse: on (default; {DRAW_REUSE_ENV}=0 turns it off), verify={}",
                 self.frame.verify
             );
         }
