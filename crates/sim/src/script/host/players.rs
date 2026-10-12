@@ -4,6 +4,9 @@ use crate::script::{Arc, BTreeMap, Fault, Location, Runtime, Value, VecDeque};
 use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 
+/// The health scripts see for a player in god mode (see `entity_field`).
+const GOD_MODE_HEALTH: i32 = 1 << 30;
+
 const CONNECT: &str = "maps/mp/gametypes/_callbacksetup::codecallback_playerconnect";
 const DISCONNECT: &str = "maps/mp/gametypes/_callbacksetup::codecallback_playerdisconnect";
 const DAMAGE: &str = "maps/mp/gametypes/_callbacksetup::codecallback_playerdamage";
@@ -1359,6 +1362,13 @@ pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<V
     Some(match name {
         "origin" => Value::Vector(ps.map_or([0.0; 3], |ps| ps.origin)),
         "angles" => Value::Vector(ps.map_or([0.0; 3], |ps| ps.viewangles)),
+        // A god-mode player reads as unhurtable. Some scripts deal splash damage by
+        // calling the damage callback themselves (the Stealth Bomber and Predator
+        // strikes), and its "using a remote" path fakes a death and respawn when the
+        // hit is lethal, without the engine's damage step where god mode is checked.
+        "health" if ps.is_some() && crate::script_player::god_mode(&frame, id) => {
+            Value::Int(ps.map_or(0, |ps| ps.health).max(GOD_MODE_HEALTH))
+        }
         "health" => Value::Int(ps.map_or(0, |ps| ps.health)),
         "maxhealth" => Value::Int(
             meta.map(|m| m.max_health)
