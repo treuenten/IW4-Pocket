@@ -90,11 +90,13 @@ pub struct LoadoutSpec {
 
 pub const PERSONAL_CLASS_SLOTS: usize = 5;
 
-pub const CLASS_CATALOG_DEATHSTREAKS: [&str; 4] = [
+pub const CLASS_CATALOG_DEATHSTREAKS: [&str; 5] = [
     "specialty_copycat",
     "specialty_combathigh",
     "specialty_grenadepulldeath",
     "specialty_finalstand",
+    // Dead Man's Hand. Last, so the indices of the four before it are unchanged.
+    "specialty_c4death",
 ];
 
 pub use weapon_iw4::IW4_CAMOS;
