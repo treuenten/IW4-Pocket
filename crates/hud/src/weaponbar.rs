@@ -106,7 +106,17 @@ impl WeaponbarExprHost<'_> {
 
 impl ExprHost for WeaponbarExprHost<'_> {
     fn binding_label(&self, command: &str) -> Option<&str> {
-        self.input?.binding_keys.get(command).map(String::as_str)
+        let keys = &self.input?.binding_keys;
+        // MW2 treats +activate and +usereload as one button, and a layout binds
+        // only one of them (the controller layouts bind +usereload), so a menu
+        // text naming the other still gets that button.
+        keys.get(command)
+            .or_else(|| match command {
+                "+activate" => keys.get("+usereload"),
+                "+usereload" => keys.get("+activate"),
+                _ => None,
+            })
+            .map(String::as_str)
     }
 
     fn ui_active(&self) -> Result<i32, ExprError> {
