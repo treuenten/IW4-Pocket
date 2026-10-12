@@ -46,8 +46,13 @@ mod ios {
             }
             return;
         }
-        app.insert_resource(PendingRenderScale(scale))
-            .add_systems(Update, apply.run_if(resource_exists::<PendingRenderScale>));
+        app.insert_resource(PendingRenderScale(scale)).add_systems(
+            Update,
+            (
+                apply.run_if(resource_exists::<PendingRenderScale>),
+                report_size,
+            ),
+        );
     }
 
     fn apply(
@@ -64,9 +69,9 @@ mod ios {
             let native = winit
                 .current_monitor()
                 .map_or_else(|| winit.scale_factor(), |monitor| monitor.scale_factor());
-            let before = winit.inner_size();
+            let before = winit.outer_size();
             winit.set_scale_factor(native * pending.0);
-            Some((native, before, winit.inner_size()))
+            Some((native, before, winit.outer_size()))
         });
         // The winit window comes a frame or two after the entity.
         let Some((native, before, after)) = applied else {
@@ -75,13 +80,39 @@ mod ios {
         commands.remove_resource::<PendingRenderScale>();
         diag::info!(
             Launch,
-            "render scale: {:.2} (content scale {native:.2} -> {:.2}), drawable {}x{} -> {}x{}",
+            "render scale: {:.2} (content scale {native:.2} -> {:.2}), window {}x{} -> {}x{}",
             pending.0,
             native * pending.0,
             before.width,
             before.height,
             after.width,
             after.height
+        );
+    }
+
+    /// Logs the size the game draws at whenever it changes. A layout pass that
+    /// reports the screen's own scale puts the window back at full size, so this
+    /// line, not the one above, says what the graphics chip is drawing.
+    fn report_size(
+        primary: Query<&Window, With<PrimaryWindow>>,
+        mut last: Local<Option<(u32, u32)>>,
+    ) {
+        let Ok(window) = primary.single() else {
+            return;
+        };
+        let size = (window.physical_width(), window.physical_height());
+        if *last == Some(size) {
+            return;
+        }
+        *last = Some(size);
+        diag::info!(
+            Launch,
+            "render scale: drawing at {}x{} ({}x{} points, scale {:.2})",
+            size.0,
+            size.1,
+            window.width(),
+            window.height(),
+            window.scale_factor()
         );
     }
 }
