@@ -549,6 +549,28 @@ pub const HUD_CHROME_MENUS: &[&str] = &[
     "perks_info_hd",
 ];
 
+/// HUD overlays drawn as one centred 16:9 frame (-427 -240 854 480: the Chopper
+/// Gunner's `viper_overlay_mp` and the night-vision goggles) cover screens wider
+/// than 16:9, as the main menu's background art does, instead of stopping short
+/// of both sides and leaving bright strips on a 2.17:1 phone. Nothing changes at
+/// 16:9 or narrower.
+fn cover_wide_hud_overlays(catalog: &mut MenuCatalog) {
+    for name in HUD_CHROME_MENUS {
+        let Some(menu) = catalog.menus.get_mut(*name) else {
+            continue;
+        };
+        for item in &mut menu.items {
+            let rect = &item.rect;
+            if !item.background.is_empty()
+                && (rect.x, rect.y, rect.w, rect.h) == (-427.0, -240.0, 854.0, 480.0)
+                && (rect.horz_align, rect.vert_align) == (2, 2)
+            {
+                item.cover = true;
+            }
+        }
+    }
+}
+
 pub fn ui_games_root(games: &GamesRoot) -> Result<GamesRoot, String> {
     let anchor = find_zone_file(games, "iw4:common_mp")?;
     game_root_for_zone(&anchor.path).map(GamesRoot)
@@ -1022,6 +1044,7 @@ impl MenuSink {
 
     fn finish_and_take(mut self, games: Option<&Path>) -> MenuCatalog {
         self.finish_ui_images(games);
+        cover_wide_hud_overlays(&mut self.catalog);
         self.catalog
     }
 
