@@ -39,7 +39,8 @@ pub(crate) fn apply_window_settings(
         },
         |mode| mode.0,
     );
-    let display = (settings.resolution, settings.fullscreen, present_mode);
+    let resolution = frame::DisplayResolution::env_override().unwrap_or(settings.resolution);
+    let display = (resolution, settings.fullscreen, present_mode);
     if applied.as_ref() == Some(&display) {
         return;
     }
@@ -48,7 +49,7 @@ pub(crate) fn apply_window_settings(
     };
     window
         .resolution
-        .set_physical_resolution(settings.resolution.width, settings.resolution.height);
+        .set_physical_resolution(resolution.width, resolution.height);
     window.mode = if settings.fullscreen {
         bevy::window::WindowMode::BorderlessFullscreen(MonitorSelection::Current)
     } else {

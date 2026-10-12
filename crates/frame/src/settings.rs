@@ -15,6 +15,19 @@ impl DisplayResolution {
     pub const fn new(width: u32, height: u32) -> Self {
         Self { width, height }
     }
+
+    /// `IW4L_WINDOW_SIZE=<width>x<height>`: a desktop window size that wins over
+    /// the saved Options setting. Lets a Mac run draw as many pixels as the phone
+    /// (2868x1320) to measure what resolution costs the graphics chip.
+    pub fn env_override() -> Option<Self> {
+        static SIZE: std::sync::OnceLock<Option<DisplayResolution>> = std::sync::OnceLock::new();
+        *SIZE.get_or_init(|| {
+            let value = std::env::var("IW4L_WINDOW_SIZE").ok()?;
+            let (w, h) = value.split_once('x')?;
+            let size = Self::new(w.trim().parse().ok()?, h.trim().parse().ok()?);
+            ((320..=7680).contains(&size.width) && (240..=4320).contains(&size.height)).then_some(size)
+        })
+    }
 }
 
 impl core::fmt::Display for DisplayResolution {
