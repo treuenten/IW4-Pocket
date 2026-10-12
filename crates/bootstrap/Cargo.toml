@@ -53,6 +53,9 @@ libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSObject"] }
 objc2-game-controller = "0.3"
+# `WindowExtIOS::set_scale_factor` for IW4L_RENDER_SCALE (render_scale.rs); the
+# vendored winit through [patch.crates-io], features as bevy_winit sets them.
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 
 # The frame pacing hook (`metal::pacing`, iOS) and the graphics-chip busy time
 # (`metal::gpu_time`) in vendor/wgpu-hal, through [patch.crates-io]; bevy does

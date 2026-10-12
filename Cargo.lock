@@ -2053,6 +2053,7 @@ dependencies = [
  "tracing-log",
  "ui",
  "wgpu-hal",
+ "winit",
 ]
 
 [[package]]

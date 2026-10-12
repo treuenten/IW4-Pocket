@@ -56,6 +56,7 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
     crate::health::register(app);
     // iOS: ask a 120 Hz display for its full refresh during matches.
     crate::promotion::register(app);
+    crate::render_scale::register(app);
     // iOS: no auto-lock while a map loads or a match runs.
     crate::idle_timer::register(app);
     // Render setup can finish after Startup, so watch for the resource.

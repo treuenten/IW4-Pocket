@@ -10,6 +10,7 @@ mod launch;
 mod log_forward;
 mod plugins;
 mod promotion;
+mod render_scale;
 mod render_error;
 #[cfg(target_vendor = "apple")]
 mod thread_qos;
