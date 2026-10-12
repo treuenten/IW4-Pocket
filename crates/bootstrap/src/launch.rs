@@ -702,8 +702,9 @@ const fn role_name(role: Role) -> &'static str {
 
 /// The desktop window's size in pixels: 1280x720, or `IW4L_WINDOW_SIZE`.
 fn launch_window_size() -> (u32, u32) {
-    frame::DisplayResolution::env_override()
-        .map_or((ACCEPTANCE_WIDTH, ACCEPTANCE_HEIGHT), |size| (size.width, size.height))
+    frame::DisplayResolution::env_override().map_or((ACCEPTANCE_WIDTH, ACCEPTANCE_HEIGHT), |size| {
+        (size.width, size.height)
+    })
 }
 
 fn launch_present_mode(acceptance: bool) -> PresentMode {

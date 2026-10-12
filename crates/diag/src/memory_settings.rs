@@ -218,7 +218,9 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_PROMOTION_DELAY" => value.parse::<u32>().is_ok_and(|secs| secs <= 600),
         // Draw at this fraction of the screen's resolution on each side (iOS;
         // full size unless set).
-        "IW4L_RENDER_SCALE" => value.parse::<f32>().is_ok_and(|scale| (0.5..=1.0).contains(&scale)),
+        "IW4L_RENDER_SCALE" => value
+            .parse::<f32>()
+            .is_ok_and(|scale| (0.5..=1.0).contains(&scale)),
         // Render on its own thread, one frame behind the main loop (off by default).
         "IW4L_PIPELINED_RENDERING" => matches!(value, "0" | "1"),
         // Testing cheat menu in the pause menu: God Mode, Unlimited Ammo, killstreaks,

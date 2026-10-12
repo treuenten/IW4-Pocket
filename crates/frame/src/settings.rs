@@ -25,7 +25,8 @@ impl DisplayResolution {
             let value = std::env::var("IW4L_WINDOW_SIZE").ok()?;
             let (w, h) = value.split_once('x')?;
             let size = Self::new(w.trim().parse().ok()?, h.trim().parse().ok()?);
-            ((320..=7680).contains(&size.width) && (240..=4320).contains(&size.height)).then_some(size)
+            ((320..=7680).contains(&size.width) && (240..=4320).contains(&size.height))
+                .then_some(size)
         })
     }
 }
