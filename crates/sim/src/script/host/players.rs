@@ -1567,6 +1567,15 @@ pub(crate) fn link_parent_pose(
     (origin, math_iw4::angles_to_axis(angles))
 }
 
+/// `IW4L_GUNNER_STEADY=0` lets the Chopper Gunner's camera pitch and roll with
+/// the helicopter again.
+fn gunner_view_steady() -> bool {
+    static STEADY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STEADY.get_or_init(|| {
+        std::env::var("IW4L_GUNNER_STEADY").map_or(true, |value| value.trim() != "0")
+    })
+}
+
 pub(crate) fn link_player(world: &mut World, client: u32, link: PlayerLink) {
     let id = ClientId(client);
     let mut frame = FrameWorld::from_world(world);
@@ -1663,6 +1672,9 @@ pub(crate) fn apply_player_links(world: &mut World) {
             unlink_player(world, client);
             continue;
         }
+        let steady = link.view == LinkView::WeaponDelta
+            && gunner_view_steady()
+            && super::vehicles::is_gunner_of(world, link.parent, client);
         let (base, axis) = link_parent_pose(world, link.parent, link.tag.as_deref());
         let (child_axis, origin) = math_iw4::matrix_multiply43(
             math_iw4::angles_to_axis(link.angles),
@@ -1670,7 +1682,19 @@ pub(crate) fn apply_player_links(world: &mut World) {
             axis,
             base,
         );
-        let parent = math_iw4::axis_to_angles(axis);
+        let mut parent = math_iw4::axis_to_angles(axis);
+        // The Chopper Gunner's camera turns with the helicopter but leaves out its
+        // pitch and roll, which swing by up to 30 degrees as it speeds up and brakes.
+        let (view_axis, view_axis_before) = if steady {
+            parent = [0.0, parent[1], 0.0];
+            let before = math_iw4::axis_to_angles(link.parent_axis)[1];
+            (
+                math_iw4::angles_to_axis(parent),
+                math_iw4::angles_to_axis([0.0, before, 0.0]),
+            )
+        } else {
+            (axis, link.parent_axis)
+        };
         let entity_num = world
             .resource::<Runtime>()
             .entities
@@ -1686,7 +1710,7 @@ pub(crate) fn apply_player_links(world: &mut World) {
         let mut link_axis = link.link_axis;
         if matches!(link.view, LinkView::Delta | LinkView::WeaponDelta) {
             let turn = scale_rotation(
-                math_iw4::matrix_multiply(transpose(link.parent_axis), axis),
+                math_iw4::matrix_multiply(transpose(view_axis_before), view_axis),
                 link.view_fraction,
             );
             let turned = math_iw4::axis_to_angles(math_iw4::matrix_multiply(
@@ -1696,7 +1720,7 @@ pub(crate) fn apply_player_links(world: &mut World) {
             view[0] = turned[0];
             view[1] = turned[1];
             link_axis = if link.use_tag_angles {
-                axis
+                view_axis
             } else {
                 math_iw4::matrix_multiply(link.link_axis, turn)
             };

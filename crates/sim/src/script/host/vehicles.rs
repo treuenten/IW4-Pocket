@@ -150,6 +150,15 @@ fn heli<'a>(world: &'a mut World, receiver: &Value) -> Result<&'a mut Heli, Stri
         .ok_or_else(|| "receiver is not a vehicle".into())
 }
 
+/// Whether `client` is the gunner of the helicopter `parent` (the Chopper Gunner).
+pub(crate) fn is_gunner_of(world: &World, parent: u64, client: u32) -> bool {
+    world
+        .resource::<Runtime>()
+        .vehicles
+        .get(&parent)
+        .is_some_and(|heli| heli.gunner == Some(client))
+}
+
 pub(crate) fn is_heli(world: &World, receiver: &Value) -> bool {
     matches!(receiver, Value::Object(id) if world.resource::<Runtime>().vehicles.contains_key(id))
 }
