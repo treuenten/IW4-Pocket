@@ -18,14 +18,14 @@ scenario`, `chaos`, `bench` ([`BENCH.md`](BENCH.md)), `bench-live`, `lifecycle-*
 
 Linux startup creates `iw4`, `iw5`, `t5` and `t6` symlinks in `IW4L_GAMES` for missing games with exactly one valid Steam installation. Existing entries are preserved.
 
-**Car part physics.** `IW4L_PART_PHYSICS=1` makes the doors, hood and mirrors an
-exploding car throws, and the care package, rigid bodies with their model's own box
-and physics preset: they tumble, bounce off the ground and walls, and come to rest
-lying flat. A car explosion's busiest physics tick was about 0.4 ms on the Mac. Off
-by default until it has been checked on the phone. Off, a launched part is the
-falling box from before: it flies off, stops where it first touches and stands
-upright. Either way a car part never crushes a player, and the care package is let
-go level, so it lands upright. On the phone put the line in `iw4l-env.txt`; on the
+**Car part physics.** The doors, hood, mirrors and wheels an exploding car throws,
+and the care package, are rigid bodies with their model's own box and physics
+preset: they tumble, bounce off the ground and walls, and come to rest lying flat.
+A car explosion's busiest physics tick was about 0.4 ms on the Mac. On by default;
+`IW4L_PART_PHYSICS=0` turns it off, and a launched part is then the falling box
+from before: it flies off, stops where it first touches and stands upright, a
+wheel half in the ground. Either way a car part never crushes a player, and the
+care package is let go level. On the phone put the line in `iw4l-env.txt`; on the
 desktop it is an ordinary environment variable. The startup log says
 `part physics: on` or `off`, and `iw4l-memory-settings.txt` lists the value.
 
