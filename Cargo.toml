@@ -12,6 +12,14 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 # crates/bootstrap/src/frame_pace.rs sets them). Remove once on wgpu 30+, after
 # re-applying the pacing hook there.
 wgpu-hal = { path = "vendor/wgpu-hal" }
+# vendor/wgpu-core is wgpu-core 29.0.4 as published (Cargo.lock and
+# .cargo_vcs_info.json dropped, as with vendor/wgpu-hal) plus IW4L_LEAN_SHADERS (off
+# by default, Apple only): a render pipeline does not keep its shader modules alive,
+# so each module's naga IR (~745 MiB over Estate's exact-colour shaders) is freed
+# once render_gpu drops it. One function in src/pipeline.rs (`lean_shaders`) and one
+# branch in src/device/resource.rs create_render_pipeline. Remove with wgpu-hal on
+# wgpu 30+, after re-applying it there.
+wgpu-core = { path = "vendor/wgpu-core" }
 
 [workspace]
 resolver = "3"

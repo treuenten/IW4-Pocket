@@ -215,6 +215,10 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_DT_SNAP" | "IW4L_FRAME_STATS" => matches!(value, "0" | "1"),
         // Render on its own thread, one frame behind the main loop (off by default).
         "IW4L_PIPELINED_RENDERING" => matches!(value, "0" | "1"),
+        // Free each exact-colour shader's compiled data (naga IR) once its
+        // pipelines are built, instead of keeping it for the rest of the run (off
+        // by default; Apple only).
+        "IW4L_LEAN_SHADERS" => matches!(value, "0" | "1"),
         _ => false,
     }
 }
@@ -316,6 +320,11 @@ mod tests {
         assert!(!valid_file_setting("IW4L_\0", "1"));
         for v in ["off", "0", "30", "40", "60"] { assert!(valid_file_setting("IW4L_FRAME_PACE", v), "{v}"); }
         for v in ["on", "1", "45", "120", "", " 30", "30\0"] { assert!(!valid_file_setting("IW4L_FRAME_PACE", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_LEAN_SHADERS", "0"));
+        assert!(valid_file_setting("IW4L_LEAN_SHADERS", "1"));
+        for v in ["on", "off", "true", "2", "", " 1", "1\0"] {
+            assert!(!valid_file_setting("IW4L_LEAN_SHADERS", v), "{v:?}");
+        }
         for name in ["IW4L_DT_SNAP", "IW4L_FRAME_STATS"] {
             assert!(valid_file_setting(name, "0"));
             assert!(valid_file_setting(name, "1"));

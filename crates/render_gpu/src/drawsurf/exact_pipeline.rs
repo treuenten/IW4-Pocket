@@ -1,7 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bevy::mesh::VertexBufferLayout;
-use bevy::platform::collections::HashMap;
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::Resource;
 use bevy::render::render_resource::{
     BindGroupLayout, BindGroupLayoutDescriptor, ColorTargetState, DepthStencilState,
@@ -14,6 +14,26 @@ use bevy::tasks::{Task, futures_lite::future};
 
 use super::sm3_wgsl::{PASS_VERTEX_ENTRY, ValidatedPassWgsl};
 use render_material::PortId;
+
+const LEAN_SHADERS_ENV: &str = "IW4L_LEAN_SHADERS";
+
+/// Whether this run frees each exact-colour shader module once its batch of
+/// pipelines is built (`IW4L_LEAN_SHADERS=1`, Apple only, off by default).
+///
+/// Each module carries its naga IR: 744 MiB of naga allocations under
+/// `build_port` in an Estate match (about 1,560 modules for 2,438 pipelines).
+/// Two things kept it for the rest of the run: this registry's module cache,
+/// and every wgpu-core render pipeline's keep-alive of its modules. With the
+/// switch on, the cache is not filled and the vendored wgpu-core
+/// (`vendor/wgpu-core`, `pipeline::lean_shaders`, the same switch) drops the
+/// keep-alive, so a module dies with the job that built its pipelines. A plan
+/// for the same port found later builds the module again from its WGSL. Off
+/// Apple the switch is ignored: the keep-alive stays there, so dropping the
+/// cache would only cost rebuilds.
+pub(crate) fn lean_shaders() -> bool {
+    static LEAN: OnceLock<bool> = OnceLock::new();
+    *LEAN.get_or_init(|| cfg!(target_vendor = "apple") && perf::switch(LEAN_SHADERS_ENV))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct ModuleKey {
@@ -59,6 +79,8 @@ enum SlotState {
 struct PortBuild {
     module: ModuleKey,
     created: Option<Arc<ShaderModule>>,
+    /// Lean shaders: the module this job made and let go with its plans.
+    released: Option<Weak<ShaderModule>>,
     pipelines: Vec<(ExactPipelineSlot, RenderPipeline)>,
 }
 
@@ -76,6 +98,16 @@ pub(super) struct ExactPipelineRegistry {
         ),
     >,
     jobs: Vec<Task<PortBuild>>,
+
+    /// Lean shaders: modules made this run, how many of them were made
+    /// again for a port whose module had already been made and dropped, that
+    /// count at the last `lean shaders:` line, the ports made so far, and a
+    /// weak handle to each module made (dead ones are pruned at each line).
+    lean_created: usize,
+    lean_again: usize,
+    lean_logged: usize,
+    lean_ports: HashSet<ModuleKey>,
+    lean_made: Vec<Weak<ShaderModule>>,
 
     layouts: Mutex<HashMap<BindGroupLayoutDescriptor, BindGroupLayout>>,
 
@@ -165,11 +197,18 @@ impl ExactPipelineRegistry {
         }
 
         let pool = assets::load_pool();
+        let lean = lean_shaders();
         for (module, (source, plans)) in self.queued.drain() {
             let device = device.clone();
-            let existing = self.modules.get(&module).cloned();
+            let existing = if lean {
+                None
+            } else {
+                self.modules.get(&module).cloned()
+            };
             self.jobs.push(
-                pool.spawn(async move { build_port(&device, module, source, existing, plans) }),
+                pool.spawn(
+                    async move { build_port(&device, module, source, existing, lean, plans) },
+                ),
             );
         }
     }
@@ -186,9 +225,31 @@ impl ExactPipelineRegistry {
             if let Some(created) = build.created {
                 self.modules.insert(build.module, created);
             }
+            if let Some(released) = build.released {
+                self.lean_created += 1;
+                if !self.lean_ports.insert(build.module) {
+                    self.lean_again += 1;
+                }
+                self.lean_made.push(released);
+            }
             for (slot, pipeline) in build.pipelines {
                 self.slots[slot.0 as usize] = SlotState::Ready(pipeline);
             }
+        }
+        if self.jobs.is_empty() && self.lean_created != self.lean_logged {
+            self.lean_made.retain(|module| module.strong_count() > 0);
+            self.lean_logged = self.lean_created;
+            diag::info!(
+                World,
+                "lean shaders: modules created {}, alive {} (made again {}, pipelines {})",
+                self.lean_created,
+                self.lean_made.len() + self.modules.len(),
+                self.lean_again,
+                self.slots
+                    .iter()
+                    .filter(|slot| matches!(slot, SlotState::Ready(_)))
+                    .count()
+            );
         }
     }
 
@@ -206,6 +267,7 @@ fn build_port(
     module: ModuleKey,
     source: ExactModuleSource,
     existing: Option<Arc<ShaderModule>>,
+    lean: bool,
     plans: Vec<(ExactPipelineSlot, ExactPipelinePlan)>,
 ) -> PortBuild {
     let label = format!(
@@ -235,10 +297,24 @@ fn build_port(
         .into_iter()
         .map(|(slot, plan)| (slot, build_pipeline(device, &shader, &plan)))
         .collect();
+    drop(shader);
+    let (created, released) = keep_or_release(created, lean);
     PortBuild {
         module,
         created,
+        released,
         pipelines,
+    }
+}
+
+/// The module a job made: kept for the registry's cache, or (lean shaders)
+/// dropped here, so its naga IR is freed on the pool thread that built its
+/// pipelines rather than by the render thread. Only a weak handle comes back,
+/// for the `lean shaders:` count.
+fn keep_or_release<T>(created: Option<Arc<T>>, lean: bool) -> (Option<Arc<T>>, Option<Weak<T>>) {
+    match created {
+        Some(created) if lean => (None, Some(Arc::downgrade(&created))),
+        created => (created, None),
     }
 }
 
@@ -286,4 +362,32 @@ fn build_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lean_releases_the_module_and_off_keeps_it() {
+        let made = Arc::new(7u32);
+        let (kept, released) = keep_or_release(Some(made.clone()), false);
+        assert!(released.is_none());
+        assert!(Arc::ptr_eq(kept.as_ref().unwrap(), &made));
+
+        let watch = Arc::downgrade(&made);
+        drop((kept, made));
+        assert_eq!(watch.strong_count(), 0);
+
+        let made = Arc::new(7u32);
+        let (kept, released) = keep_or_release(Some(made.clone()), true);
+        assert!(kept.is_none());
+        let released = released.unwrap();
+        assert_eq!(released.strong_count(), 1);
+        drop(made);
+        assert_eq!(released.strong_count(), 0, "nothing but the job held it");
+
+        assert!(matches!(keep_or_release::<u32>(None, true), (None, None)));
+        assert!(matches!(keep_or_release::<u32>(None, false), (None, None)));
+    }
 }
