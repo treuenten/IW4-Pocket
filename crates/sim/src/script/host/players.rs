@@ -1328,6 +1328,15 @@ fn client_name(name: &[u8]) -> String {
     String::from_utf8_lossy(&name[..end]).into_owned()
 }
 
+fn max_health(
+    ps: Option<&playerstate_iw4::PlayerState>,
+    meta: Option<&crate::match_state::ClientMatchState>,
+) -> i32 {
+    meta.map(|m| m.max_health)
+        .filter(|&n| n > 0)
+        .unwrap_or(ps.map_or(0, |ps| ps.max_health))
+}
+
 pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<Value> {
     let id = ClientId(client);
     if name == "sessionstate" {
@@ -1366,15 +1375,17 @@ pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<V
         // calling the damage callback themselves (the Stealth Bomber and Predator
         // strikes), and its "using a remote" path fakes a death and respawn when the
         // hit is lethal, without the engine's damage step where god mode is checked.
-        "health" if ps.is_some() && crate::script_player::god_mode(&frame, id) => {
-            Value::Int(ps.map_or(0, |ps| ps.health).max(GOD_MODE_HEALTH))
+        // Health and maximum read the same, or the health-regeneration script takes
+        // the player for wounded and plays its recovery breath every few seconds.
+        "health" | "maxhealth" if ps.is_some() && crate::script_player::god_mode(&frame, id) => {
+            Value::Int(
+                GOD_MODE_HEALTH
+                    .max(ps.map_or(0, |ps| ps.health))
+                    .max(max_health(ps, meta)),
+            )
         }
         "health" => Value::Int(ps.map_or(0, |ps| ps.health)),
-        "maxhealth" => Value::Int(
-            meta.map(|m| m.max_health)
-                .filter(|&n| n > 0)
-                .unwrap_or(ps.map_or(0, |ps| ps.max_health)),
-        ),
+        "maxhealth" => Value::Int(max_health(ps, meta)),
         "name" => Value::String(client_name(&meta?.name).into()),
         "score" => Value::Int(meta?.score),
         "kills" => Value::Int(meta?.kills),
