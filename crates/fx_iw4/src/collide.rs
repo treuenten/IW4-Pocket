@@ -120,14 +120,25 @@ pub fn collision_reflect_base_vel_delta(
     ]
 }
 
+/// Half the cube a model-physics piece collides as. A piece's model origin is
+/// usually at an edge of the model rather than its middle (a suitcase half's
+/// is at the case's bottom edge), so the cube stands for the point the piece
+/// travels with, not its extent. 1 is the size the luggage, register and
+/// bottle pieces have flown with so far: their bounds were read as mins and
+/// maxs, which left them at this fallback.
+pub const FX_PHYS_PIECE_HALF: f32 = 1.0;
+
 /// How a model-physics piece meets the world: the bounce and friction of its
-/// model's physics preset, and how far its origin stays off what it lands on.
+/// model's physics preset, and which face it lies on once it lands.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FxPhysPiece {
     pub bounce: f32,
     pub friction: f32,
-    /// Half the model's thinnest extent, so a flat piece lies on its face.
-    pub rest_radius: f32,
+    /// The model axis of its thinnest extent (3 when the bounds are unknown),
+    /// and the model's bounds midpoint and half size along it.
+    pub flat_axis: u8,
+    pub flat_mid: f32,
+    pub flat_half: f32,
 }
 
 impl FxPhysPiece {
@@ -135,25 +146,140 @@ impl FxPhysPiece {
     pub const FALLBACK: Self = Self {
         bounce: 0.2,
         friction: 0.5,
-        rest_radius: 1.0,
+        flat_axis: 3,
+        flat_mid: 0.0,
+        flat_half: 0.0,
     };
 
-    /// `preset` is the model's (bounce, friction), `bounds` its (mins, maxs).
+    /// `preset` is the model's (bounce, friction), `bounds` its IW4 bounds:
+    /// (midpoint, half size).
     pub fn from_model(preset: Option<(f32, f32)>, bounds: Option<([f32; 3], [f32; 3])>) -> Self {
         let (bounce, friction) = preset
             .filter(|(b, f)| b.is_finite() && f.is_finite())
             .unwrap_or((Self::FALLBACK.bounce, Self::FALLBACK.friction));
-        let rest_radius = bounds
-            .map(|(lo, hi)| {
-                let thinnest = (hi[0] - lo[0]).min(hi[1] - lo[1]).min(hi[2] - lo[2]);
-                thinnest * 0.5
+        let (flat_axis, flat_mid, flat_half) = bounds
+            .filter(|(mid, half)| {
+                mid.iter().all(|v| v.is_finite()) && half.iter().all(|v| v.is_finite() && *v > 0.0)
             })
-            .filter(|r| r.is_finite() && *r > 0.0)
-            .map_or(Self::FALLBACK.rest_radius, |r| r.clamp(0.5, 8.0));
+            .and_then(|(mid, half)| {
+                let axis = (0..3).min_by(|&a, &b| half[a].total_cmp(&half[b]))?;
+                Some((axis as u8, mid[axis], half[axis]))
+            })
+            .unwrap_or((
+                Self::FALLBACK.flat_axis,
+                Self::FALLBACK.flat_mid,
+                Self::FALLBACK.flat_half,
+            ));
         Self {
             bounce: bounce.clamp(0.0, 1.0),
             friction: friction.clamp(0.0, 1.0),
-            rest_radius,
+            flat_axis,
+            flat_mid,
+            flat_half,
         }
+    }
+
+    /// How a piece that has landed is drawn: `axis` (the model's axes in the
+    /// world, as it tumbled) turned the least way that lays its thinnest
+    /// extent upright, so it lies on its broad face, and the height to add to
+    /// its origin so that face, at the model's draw `scale`, meets what the
+    /// piece's cube rests on. `axis` and no lift when the bounds are unknown.
+    pub fn rest_pose(&self, axis: [[f32; 3]; 3], scale: f32) -> ([[f32; 3]; 3], f32) {
+        let Some(&a) = axis.get(self.flat_axis as usize) else {
+            return (axis, 0.0);
+        };
+        let up = if a[2] >= 0.0 { 1.0 } else { -1.0 };
+        // Rotation taking `a` onto (0, 0, up): about v = a x target, with
+        // cos = a . target >= 0, so 1 / (1 + cos) stays bounded.
+        let v = [a[1] * up, -a[0] * up, 0.0];
+        let k = 1.0 / (1.0 + a[2] * up);
+        let turn = |p: [f32; 3]| {
+            let vxp = [
+                v[1] * p[2] - v[2] * p[1],
+                v[2] * p[0] - v[0] * p[2],
+                v[0] * p[1] - v[1] * p[0],
+            ];
+            let vxvxp = [
+                v[1] * vxp[2] - v[2] * vxp[1],
+                v[2] * vxp[0] - v[0] * vxp[2],
+                v[0] * vxp[1] - v[1] * vxp[0],
+            ];
+            [
+                p[0] + vxp[0] + vxvxp[0] * k,
+                p[1] + vxp[1] + vxvxp[1] * k,
+                p[2] + vxp[2] + vxvxp[2] * k,
+            ]
+        };
+        let flat = [turn(axis[0]), turn(axis[1]), turn(axis[2])];
+        let lowest = if up > 0.0 {
+            self.flat_mid - self.flat_half
+        } else {
+            -(self.flat_mid + self.flat_half)
+        };
+        (flat, -FX_PHYS_PIECE_HALF - lowest * scale)
+    }
+}
+
+#[cfg(test)]
+mod phys_piece_tests {
+    use super::*;
+
+    /// props/luggage_1_des elem 0 draws ap_luggage01_des, half an upright
+    /// suitcase: its origin sits at the case's bottom edge, its bounds
+    /// midpoint (0, 3.31, 17.12) and half size (12.5, 5.46, 17.12).
+    fn case_half() -> FxPhysPiece {
+        FxPhysPiece::from_model(
+            Some((0.2, 0.5)),
+            Some(([0.0, 3.31, 17.12], [12.5, 5.46, 17.12])),
+        )
+    }
+
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    #[test]
+    fn bounds_are_midpoint_and_half_size() {
+        let piece = case_half();
+        assert_eq!(piece.flat_axis, 1);
+        assert!((piece.flat_mid - 3.31).abs() < 1e-4, "{piece:?}");
+        assert!((piece.flat_half - 5.46).abs() < 1e-4, "{piece:?}");
+        assert_eq!(
+            FxPhysPiece::from_model(None, None).flat_axis,
+            FxPhysPiece::FALLBACK.flat_axis
+        );
+    }
+
+    #[test]
+    fn landed_piece_lies_on_its_broad_face() {
+        let piece = case_half();
+        // Tumbled to stand on an edge: its thin axis tipped 70 degrees from up.
+        let (s, c) = 70f32.to_radians().sin_cos();
+        let axis = [[1.0, 0.0, 0.0], [0.0, s, c], [0.0, -c, s]];
+        let (flat, lift) = piece.rest_pose(axis, 1.0);
+        assert!((flat[1][2] - 1.0).abs() < 1e-5, "{flat:?}");
+        assert!(
+            flat[0][2].abs() < 1e-5 && flat[2][2].abs() < 1e-5,
+            "{flat:?}"
+        );
+        for i in 0..3 {
+            assert!((dot(flat[i], flat[i]) - 1.0).abs() < 1e-5, "{flat:?}");
+            for j in (i + 1)..3 {
+                assert!(dot(flat[i], flat[j]).abs() < 1e-5, "{flat:?}");
+            }
+        }
+        // Its face, 2.15 below the origin, meets the bottom of its cube.
+        assert!((lift - (2.15 - FX_PHYS_PIECE_HALF)).abs() < 1e-4, "{lift}");
+        // Face down instead: the other face, 8.77 below the origin.
+        let down = [axis[0], [0.0, -s, -c], [0.0, c, -s]];
+        let (flat, lift) = piece.rest_pose(down, 1.0);
+        assert!((flat[1][2] + 1.0).abs() < 1e-5, "{flat:?}");
+        assert!((lift - (8.77 - FX_PHYS_PIECE_HALF)).abs() < 1e-4, "{lift}");
+    }
+
+    #[test]
+    fn piece_without_bounds_keeps_its_pose() {
+        let axis = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]];
+        assert_eq!(FxPhysPiece::FALLBACK.rest_pose(axis, 1.0), (axis, 0.0));
     }
 }

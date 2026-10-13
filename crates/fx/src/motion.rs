@@ -1,11 +1,11 @@
 use fx_iw4::{
-    FX_ELEM_AT_REST_NONE, FxPhysPiece, collide_marks_at_rest, collide_on_ground,
-    collide_substep_schedule, collision_reflect_base_vel_delta, elem_dies_on_touch,
-    elem_gravity_accel_z_sampled, elem_launch_velocity, elem_update_has_velocity_graph,
-    elem_uses_collision, elem_uses_vel_local, elem_uses_vel_world, get_at_rest_fraction,
-    get_velocity_at_time, impact_child_speed_allows, integrate_velocity_graph,
-    orientation_pos_from_world, orientation_pos_to_world, sample_reflection_factor, trace_mask,
-    vec3_length_sq,
+    FX_ELEM_AT_REST_NONE, FX_PHYS_PIECE_HALF, FxPhysPiece, collide_marks_at_rest,
+    collide_on_ground, collide_substep_schedule, collision_reflect_base_vel_delta,
+    elem_dies_on_touch, elem_gravity_accel_z_sampled, elem_launch_velocity,
+    elem_update_has_velocity_graph, elem_uses_collision, elem_uses_vel_local, elem_uses_vel_world,
+    get_at_rest_fraction, get_velocity_at_time, impact_child_speed_allows,
+    integrate_velocity_graph, orientation_pos_from_world, orientation_pos_to_world,
+    sample_reflection_factor, trace_mask, vec3_length_sq,
 };
 
 use crate::update::{FxElemMotionQuery, FxElemMotionResult, FxElemTraceHit, FxImpactSpawn};
@@ -288,14 +288,18 @@ const FX_PHYS_CONTACT_SLOP: f32 = 0.125;
 /// the physics world owns it from its first update. It leaves its spawn point
 /// at the velocity its graphs give at age 0, falls at the world's gravity,
 /// bounces and slides off the world with its model's preset, and is at rest
-/// once it is slow on the ground; the at-rest fraction then stops its spin as
-/// well (`clamp_elem_rotation_time`). Its graphs, its own gravity and its
+/// once it is slow on the ground. Its graphs, its own gravity and its
 /// reflection factor play no further part.
 ///
-/// Short of the retail physics world: the piece is an upright cube that does
-/// not turn with the model, it spins at the element's angular velocity until it
-/// rests instead of a simulated one, and it neither tips onto a face nor meets
-/// other pieces or entities.
+/// The at-rest fraction marks when it first lands: its spin stops there and
+/// it is drawn lying on its broad face (`FxPhysPiece::rest_pose`) while it
+/// bounces and slides to a stop. It is still moving until its velocity is zero.
+///
+/// Short of the retail physics world: the piece is a small upright cube about
+/// its model's origin (`FX_PHYS_PIECE_HALF`) that does not turn with the
+/// model, it spins at the element's angular velocity in the air instead of a
+/// simulated one, it is laid flat on landing instead of tumbling onto a face,
+/// and it meets neither other pieces nor entities.
 pub fn evaluate_elem_physics_motion(
     flags: i32,
     piece: FxPhysPiece,
@@ -312,8 +316,9 @@ pub fn evaluate_elem_physics_motion(
         at_rest_fraction: None,
         spawn_impact: None,
     };
-    if q.at_rest_fraction != FX_ELEM_AT_REST_NONE {
-        result.at_rest_fraction = Some(q.at_rest_fraction);
+    let mut landed = (q.at_rest_fraction != FX_ELEM_AT_REST_NONE).then_some(q.at_rest_fraction);
+    result.at_rest_fraction = landed;
+    if landed.is_some() && q.base_vel == [0.0; 3] {
         return result;
     }
     let from = q.prev_msec.max(q.msec_begin);
@@ -333,10 +338,9 @@ pub fn evaluate_elem_physics_motion(
         q.base_vel
     };
     let mask = trace_mask(use_item_clip);
-    let half = piece.rest_radius;
+    let half = FX_PHYS_PIECE_HALF;
     let (mins, maxs) = ([-half; 3], [half; 3]);
     let mut pos = orientation_pos_to_world(q.orient.origin, q.orient.axis, q.origin);
-    let mut at_rest = None;
     for step in collide_substep_schedule(from, q.msec_now) {
         let dt = (step.msec_end.saturating_sub(step.msec_start)).max(0) as f32 * 0.001;
         vel[2] -= FX_PHYS_GRAVITY * dt;
@@ -355,7 +359,7 @@ pub fn evaluate_elem_physics_motion(
                 }
                 None => {
                     vel = [0.0; 3];
-                    at_rest = Some(at_rest_byte(step.msec_start, q.msec_begin, q.life_ms));
+                    landed.get_or_insert(at_rest_byte(step.msec_start, q.msec_begin, q.life_ms));
                     break;
                 }
             }
@@ -383,11 +387,12 @@ pub fn evaluate_elem_physics_motion(
                 vel[axis] = normal_part + (vel[axis] - normal_part) * keep;
             }
         }
-        if collide_on_ground(n[2]) && vec3_length_sq(vel) < FX_PHYS_REST_SPEED * FX_PHYS_REST_SPEED
-        {
-            vel = [0.0; 3];
-            at_rest = Some(at_rest_byte(step.msec_end, q.msec_begin, q.life_ms));
-            break;
+        if collide_on_ground(n[2]) {
+            landed.get_or_insert(at_rest_byte(step.msec_end, q.msec_begin, q.life_ms));
+            if vec3_length_sq(vel) < FX_PHYS_REST_SPEED * FX_PHYS_REST_SPEED {
+                vel = [0.0; 3];
+                break;
+            }
         }
     }
     let stored = orientation_pos_from_world(q.orient.origin, q.orient.axis, pos);
@@ -397,7 +402,7 @@ pub fn evaluate_elem_physics_motion(
         stored[2] - q.origin[2],
     ];
     result.base_vel = vel;
-    result.at_rest_fraction = at_rest;
+    result.at_rest_fraction = landed;
     result
 }
 
@@ -575,10 +580,7 @@ mod physics_piece_tests {
         };
         let r = evaluate_elem_physics_motion(
             TOUCHPAD_FLAGS,
-            FxPhysPiece::from_model(
-                Some((0.1, 0.5)),
-                Some(([-2.0, -3.0, -0.5], [2.0, 3.0, 0.5])),
-            ),
+            FxPhysPiece::from_model(Some((0.1, 0.5)), Some(([0.0; 3], [2.0, 3.0, 0.5]))),
             false,
             graph,
             &[],
@@ -627,7 +629,7 @@ mod physics_piece_tests {
         let rested_at = rested_at.expect("never came to rest");
         assert!(rested_at < 1500, "rested only at {rested_at} ms");
         assert!(
-            (piece.origin[2] - (FLOOR_Z + 0.5)).abs() < 0.5,
+            (piece.origin[2] - (FLOOR_Z + FX_PHYS_PIECE_HALF)).abs() < 0.5,
             "{:?}",
             piece.origin
         );
@@ -667,6 +669,44 @@ mod physics_piece_tests {
         let travel = (piece.origin[0].powi(2) + piece.origin[1].powi(2)).sqrt();
         assert!(travel < 150.0, "slid {travel} units");
         assert!(piece.origin[2] < FLOOR_Z + 2.0, "{:?}", piece.origin);
+    }
+
+    #[test]
+    fn spin_stops_when_a_piece_lands_while_it_still_slides() {
+        // The register top lands moving sideways and hops once more: its spin
+        // stops at the first touch, its slide only when it is slow.
+        let graph = vec![
+            FxElemVec3Range {
+                base: [0.075, 0.075, 0.2],
+                amplitude: [0.0; 3],
+            };
+            2
+        ];
+        let mut piece = Piece {
+            origin: [0.0, 0.0, FLOOR_Z + 32.0],
+            base_vel: [0.0; 3],
+            at_rest: FX_ELEM_AT_REST_NONE,
+        };
+        let mut prev = -8;
+        let mut landed = None;
+        let mut stopped = None;
+        for frame in 0..(LIFE_MS / 16) {
+            let now = frame * 16;
+            step(&mut piece, prev, now, &graph);
+            prev = now;
+            if landed.is_none() && piece.at_rest != FX_ELEM_AT_REST_NONE {
+                landed = Some((now, piece.at_rest, piece.origin));
+            }
+            if landed.is_some() && stopped.is_none() && piece.base_vel == [0.0; 3] {
+                stopped = Some((now, piece.origin));
+            }
+        }
+        let (landed_at, frac, landed_origin) = landed.expect("never landed");
+        let (stopped_at, stopped_origin) = stopped.expect("never stopped");
+        assert!(landed_at < stopped_at, "{landed_at} {stopped_at}");
+        assert_ne!(landed_origin, stopped_origin);
+        assert_eq!(piece.at_rest, frac, "the spin stop moved");
+        assert_eq!(piece.origin, stopped_origin, "moved after it stopped");
     }
 
     #[test]

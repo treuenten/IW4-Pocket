@@ -88,10 +88,11 @@ pub use bolt::{
     update_effect_bolt,
 };
 pub use collide::{
-    FX_COLLIDE_SUBSTEP_MS, FX_COLLISION_REFLECT_SCALE, FX_IMPACT_CHILD_MIN_SPEED_SQ, FX_TRACE_MASK,
-    FX_TRACE_MASK_ITEM_CLIP, FxCollideSubstep, FxPhysPiece, collide_marks_at_rest,
-    collide_on_ground, collide_substep_schedule, collision_reflect_base_vel_delta,
-    impact_child_speed_allows, sample_reflection_factor, trace_mask,
+    FX_COLLIDE_SUBSTEP_MS, FX_COLLISION_REFLECT_SCALE, FX_IMPACT_CHILD_MIN_SPEED_SQ,
+    FX_PHYS_PIECE_HALF, FX_TRACE_MASK, FX_TRACE_MASK_ITEM_CLIP, FxCollideSubstep, FxPhysPiece,
+    collide_marks_at_rest, collide_on_ground, collide_substep_schedule,
+    collision_reflect_base_vel_delta, impact_child_speed_allows, sample_reflection_factor,
+    trace_mask,
 };
 pub use cull::{
     FX_ELEM_FLAG_CULL_DRAW_5_PLANES, cull_cloud, cull_cloud_plane_count, cull_cloud_radius,

@@ -1558,24 +1558,38 @@ fn evaluate_fx_model_instance(
     if scale == 0.0 {
         return None;
     }
-    let rot_t = clamp_elem_rotation_time(
-        ctx.age_msec as f32,
-        ctx.life_msec as f32,
-        ctx.at_rest_fraction,
-    );
-    let axis = get_elem_angles_axis(
+    // A model-physics piece that has landed stops spinning there, with no
+    // easing turn after it, and lies on its broad face.
+    let landed_piece = ctx.at_rest_fraction != fx_iw4::FX_ELEM_AT_REST_NONE
+        && fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags);
+    let rot_t = if landed_piece {
+        (ctx.at_rest_fraction as f32 * ctx.life_msec as f32 / 255.0).min(ctx.age_msec as f32)
+    } else {
+        clamp_elem_rotation_time(
+            ctx.age_msec as f32,
+            ctx.life_msec as f32,
+            ctx.at_rest_fraction,
+        )
+    };
+    let mut axis = get_elem_angles_axis(
         elem.view.spawn_angles,
         elem.view.angular_velocity,
         ctx.elem_random_seed,
         rot_t,
         ctx.axis,
     );
+    let mut origin = ctx.origin;
+    if landed_piece {
+        let (flat, lift) = elem.phys_piece(ctx.elem_random_seed).rest_pose(axis, scale);
+        axis = flat;
+        origin[2] += lift;
+    }
     Some(FxModelInstance {
         def_name: ctx.def_name.to_owned(),
         def_index: ctx.def_index,
         model_index,
         elem_handle: ctx.elem_handle,
-        origin: ctx.origin,
+        origin,
         axis,
         scale,
         flags: ctx.flags,
