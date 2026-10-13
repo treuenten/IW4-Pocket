@@ -943,7 +943,36 @@ fn grab_projectile(world: &mut FrameWorld, walker: ClientId, number: i32, tick: 
     perf::pickup(ps.pm_type);
 }
 
+/// How Player_GetUseList ranks something within use reach of a player, the
+/// lower the better: its distance from the eye plus up to 256 for how far it
+/// lies off his view direction. Dropped weapons and script usables such as a
+/// care package are ranked on this one scale, with no bonus for either, and
+/// the cursor hint offers the best.
+pub(crate) fn use_score(eye: [f32; 3], forward: [f32; 3], center: [f32; 3]) -> f32 {
+    let delta: [f32; 3] = core::array::from_fn(|i| center[i] - eye[i]);
+    let distance = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let dot: f32 = if distance > 0.0 {
+        (0..3).map(|i| forward[i] * delta[i] / distance).sum()
+    } else {
+        0.0
+    };
+    distance + (1.0 - (dot + 1.0) * 0.5) * 256.0
+}
+
+/// The use score of the item the player's hint can offer now, if any.
+pub(crate) fn item_hint_score(
+    world: &FrameWorld,
+    walker: ClientId,
+    ps: &PlayerState,
+) -> Option<f32> {
+    best_item(world, walker, ps).map(|(score, _)| score)
+}
+
 fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Option<UseItem> {
+    best_item(world, walker, ps).map(|(_, item)| item)
+}
+
+fn best_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Option<(f32, UseItem)> {
     if !walker_can_touch(world, walker, ps)
         || ps.pm_flags & (4 | 0x4000) != 0
         || (16..=20).contains(&ps.weaponstate_primary)
@@ -976,11 +1005,6 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         if distance > 128.0 {
             continue;
         }
-        let dot = if distance > 0.0 {
-            (0..3).map(|i| forward[i] * delta[i] / distance).sum()
-        } else {
-            0.0
-        };
         if world
             .trace_world(eye, center, [0.0; 3], [0.0; 3], 0x11)
             .fraction
@@ -988,7 +1012,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         {
             continue;
         }
-        let score = distance + (1.0 - (dot + 1.0) * 0.5) * 256.0;
+        let score = use_score(eye, forward, center);
         if best.as_ref().is_none_or(|(old, _)| score < *old) {
             best = Some((
                 score,
@@ -1020,12 +1044,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         {
             return;
         }
-        let dot = if distance > 0.0 {
-            (0..3).map(|i| forward[i] * delta[i] / distance).sum()
-        } else {
-            0.0
-        };
-        let score = distance + (1.0 - (dot + 1.0) * 0.5) * 256.0 - 512.0;
+        let score = use_score(eye, forward, projectile.origin) - 512.0;
         if best.as_ref().is_none_or(|(old, _)| score < *old) {
             best = Some((
                 score,
@@ -1037,7 +1056,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
             ));
         }
     });
-    best.map(|(_, item)| item)
+    best
 }
 
 pub(crate) fn phase_use_items(

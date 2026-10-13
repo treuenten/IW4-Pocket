@@ -1,4 +1,5 @@
 use super::args::{arg, float, string, vector};
+use super::triggers::UsableRank;
 use crate::frame::FrameWorld;
 use crate::script::Namespace::{Function, Method};
 use crate::script::{NativeRegistry, Runtime, Value};
@@ -143,6 +144,20 @@ fn shows_hint(usable: &super::entities::Usable) -> bool {
     usable.cursor > 0 && usable.hint >= 0
 }
 
+/// Where Player_GetUseList measures a usable from: the middle of its bounds,
+/// a care package's being its cloned crate collision. A usable without a
+/// brush is measured from its origin.
+fn use_center(runtime: &Runtime, frame: &FrameWorld, object: u64, origin: [f32; 3]) -> [f32; 3] {
+    runtime
+        .entities
+        .get(&object)
+        .and_then(|entity| entity.brush)
+        .and_then(|brush| frame.clip_cmodels().models.get(brush as usize))
+        .map_or(origin, |model| {
+            std::array::from_fn(|i| origin[i] + (model.mins[i] + model.maxs[i]) * 0.5)
+        })
+}
+
 /// Whether a usable is offered to a player: a trigger_use_touch when his hull
 /// touches it (`touches` is `Some`), anything else within the use radius of
 /// his eye.
@@ -212,20 +227,35 @@ pub(crate) fn select_usables(world: &mut World) {
                 let d2: f32 = (0..3).map(|i| (at[i] - eye[i]).powi(2)).sum();
                 let touches =
                     super::triggers::touch_use_reach(&mut runtime, &frame, *object, client, player);
-                offered(touches, d2).then_some((d2, *object, usable))
+                offered(touches, d2).then_some((d2, *object, at, usable))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0));
-        let Some((_, object, usable)) = nearest else {
+        let Some((_, object, at, usable)) = nearest else {
             continue;
         };
         selected.insert(client, object);
         // The item code has written this tick's hint: a weapon in reach, or
-        // nothing. A use trigger the player stands in takes it from a weapon.
-        let item = crate::item::hints_item(ps.cursor_hint);
-        let in_hinted_trigger = shows_hint(usable)
-            && super::triggers::in_use_trigger(&mut runtime, &frame, object, client, player);
-        let offer = super::triggers::use_offer(item, Some(object), in_hinted_trigger);
-        if (ps.cursor_hint == 0 || item)
+        // nothing. A use trigger the player stands in takes it from a weapon,
+        // and a script usable does when it ranks better (use_offer).
+        let item = crate::item::hints_item(ps.cursor_hint)
+            .then(|| crate::item::item_hint_score(&frame, id, &ps).unwrap_or(f32::INFINITY));
+        let map_trigger = runtime
+            .entities
+            .get(&object)
+            .is_some_and(|entity| super::triggers::is_use_trigger(&entity.classname));
+        let rank = if !shows_hint(usable) {
+            UsableRank::Behind
+        } else if super::triggers::in_use_trigger(&mut runtime, &frame, object, client, player) {
+            UsableRank::InTrigger
+        } else if !map_trigger {
+            let (forward, _, _) = math_iw4::angle_vectors(ps.viewangles);
+            let center = use_center(&runtime, &frame, object, *at);
+            UsableRank::Scored(crate::item::use_score(eye, forward, center))
+        } else {
+            UsableRank::Behind
+        };
+        let offer = super::triggers::use_offer(item, Some((object, rank)));
+        if (ps.cursor_hint == 0 || item.is_some())
             && offer == super::triggers::PressTarget::Usable(object)
             && let Some(ps) = frame.player_mut(id)
         {
