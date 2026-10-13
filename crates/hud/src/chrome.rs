@@ -979,11 +979,15 @@ fn push_stretch(
             rect.vert_align as i32,
         );
         if rest.w > f32::EPSILON && rest.w < surface.width() {
+            // Grow about the item's centre on both axes: the Chopper Gunner's
+            // reticle is part of its frame and must stay on the view centre.
             let grow = surface.width() / rest.w;
-            let centre = applied.x + applied.w * 0.5;
+            let centre_x = applied.x + applied.w * 0.5;
+            let centre_y = applied.y + applied.h * 0.5;
             applied.w *= grow;
             applied.h *= grow;
-            applied.x = centre - applied.w * 0.5;
+            applied.x = centre_x - applied.w * 0.5;
+            applied.y = centre_y - applied.h * 0.5;
         }
     }
     let color = style.fill_color(item);
