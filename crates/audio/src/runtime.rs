@@ -101,6 +101,7 @@ impl Default for AudioRuntime {
 
 impl AudioRuntime {
     pub fn new(device_enabled: bool) -> Self {
+        let device_enabled = device_enabled && !crate::AudioSilent::null_output();
         let shared = Arc::new(RenderShared::new());
         shared
             .device_required
@@ -1039,6 +1040,24 @@ fn control(
         if crate::diagnostics::enabled() {
             diag_max_pass = diag_max_pass.max(diag_pass.elapsed());
             if diag_last.elapsed() >= Duration::from_secs(1) {
+                let window_peak = f32::from_bits(shared.window_peak.swap(0, Ordering::Relaxed));
+                let window_energy = f64::from_bits(shared.window_energy.swap(0, Ordering::Relaxed));
+                let window_frames = shared.window_frames.swap(0, Ordering::Relaxed);
+                let audible = instances
+                    .iter()
+                    .filter(|logical| {
+                        logical.slot.is_some()
+                            && logical.request.instance.audible.load(Ordering::Acquire)
+                    })
+                    .count();
+                crate::diagnostics::emit(format!(
+                    "audio diag: mix peak={window_peak:.4} rms={:.5} voices={audible}",
+                    if window_frames == 0 {
+                        0.0
+                    } else {
+                        (window_energy / (2 * window_frames) as f64).sqrt()
+                    }
+                ));
                 crate::diagnostics::emit(format!(
                     "audio diag: transport elapsed_ms={:.3} audio_frame={} active={} device_blocks={} null_blocks={} underruns={} logical={} pending={} max_control_ms={:.3} max_control_gap_ms={:.3}",
                     diag_anchor.elapsed().as_secs_f64() * 1000.0,

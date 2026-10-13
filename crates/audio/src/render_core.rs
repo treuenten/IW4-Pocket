@@ -162,6 +162,11 @@ pub(crate) struct RenderShared {
     pub device_underruns: AtomicU64,
     pub cancelled: AtomicBool,
     pub peak: AtomicU32,
+    /// Loudest sample and sum of squares since the last diagnostics window
+    /// (`IW4L_AUDIO_DIAG=1` only).
+    pub window_peak: AtomicU32,
+    pub window_energy: AtomicU64,
+    pub window_frames: AtomicU64,
 }
 
 // The bounded rendering lease exclusively owns RenderState. Slot payload access
@@ -200,6 +205,9 @@ impl RenderShared {
             device_underruns: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
             peak: AtomicU32::new(0),
+            window_peak: AtomicU32::new(0),
+            window_energy: AtomicU64::new(0),
+            window_frames: AtomicU64::new(0),
         }
     }
 
@@ -289,6 +297,19 @@ impl RenderShared {
             peak = peak.max(sample.abs());
         }
         self.peak.store(peak.to_bits(), Ordering::Relaxed);
+        if crate::diagnostics::enabled() {
+            let (loudest, energy) = output.iter().flatten().fold((0.0f32, 0.0f64), |acc, s| {
+                (acc.0.max(s.abs()), acc.1 + f64::from(*s) * f64::from(*s))
+            });
+            let window = f32::from_bits(self.window_peak.load(Ordering::Relaxed));
+            self.window_peak
+                .store(window.max(loudest).to_bits(), Ordering::Relaxed);
+            let total = f64::from_bits(self.window_energy.load(Ordering::Relaxed));
+            self.window_energy
+                .store((total + energy).to_bits(), Ordering::Relaxed);
+            self.window_frames
+                .fetch_add(QUANTUM as u64, Ordering::Relaxed);
+        }
         self.frame.store(frame + QUANTUM as u64, Ordering::Release);
         match device {
             Some(true) => {

@@ -51,6 +51,7 @@ pub(crate) fn publish_audio_context(
     adopted: Option<Res<net::LastAdoptedSnapshot>>,
     prediction: Option<Res<net::ClientPredictionState>>,
     view: Option<Res<frame::ViewSubject>>,
+    mut diag_at: Local<Option<std::time::Instant>>,
 ) {
     if let Some(verdicts) = verdicts {
         runtime.set_fire_verdicts(verdicts.clone());
@@ -117,6 +118,23 @@ pub(crate) fn publish_audio_context(
         origin_inches: crate::transform_inches(pose.translation),
         right: (pose.rotation * Vec3::X).to_array(),
     }));
+    if crate::diagnostics::enabled()
+        && diag_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
+    {
+        *diag_at = Some(std::time::Instant::now());
+        let ps = local
+            .as_ref()
+            .zip(presented.as_ref())
+            .and_then(|(local, presented)| presented.player(local.0));
+        crate::diagnostics::emit(format!(
+            "audio diag: listener origin={:.0?} player_origin={:.0?} other_flags={:#x} link_flags={:#x} pm_type={:?}",
+            pose.map(|pose| crate::transform_inches(pose.translation)),
+            ps.map(|ps| ps.origin),
+            ps.map_or(0, |ps| ps.other_flags),
+            ps.map_or(0, |ps| ps.link_flags),
+            ps.map(|ps| ps.pm_type),
+        ));
+    }
 }
 
 fn cancel_audio_on_exit(mut exit: MessageReader<AppExit>, runtime: Res<AudioRuntime>) {

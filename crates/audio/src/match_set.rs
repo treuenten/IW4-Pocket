@@ -23,8 +23,19 @@ impl AudioSilent {
     pub fn active() -> bool {
         static SILENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *SILENT.get_or_init(|| {
-            std::env::var("IW4L_SOUND").is_ok_and(|value| matches!(value.as_str(), "off" | "0"))
+            !Self::null_output()
+                && std::env::var("IW4L_SOUND")
+                    .is_ok_and(|value| matches!(value.as_str(), "off" | "0"))
         })
+    }
+
+    /// `IW4L_AUDIO_NULL_OUTPUT=1`: sounds load and mix as usual, but no output
+    /// device is ever opened, so nothing reaches a speaker. It overrides
+    /// `IW4L_SOUND=off` for silent audio tests (with `IW4L_AUDIO_DIAG=1`).
+    pub fn null_output() -> bool {
+        static NULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *NULL
+            .get_or_init(|| std::env::var("IW4L_AUDIO_NULL_OUTPUT").is_ok_and(|value| value == "1"))
     }
 }
 
@@ -89,6 +100,11 @@ pub(crate) fn register(app: &mut App) {
     if AudioSilent::active() {
         diag::info!(Audio, "audio: Silent (IW4L_SOUND=off)");
         app.insert_resource(AudioSilent);
+    } else if AudioSilent::null_output() {
+        diag::info!(
+            Audio,
+            "audio: null output (IW4L_AUDIO_NULL_OUTPUT=1): mixing without a device"
+        );
     }
     app.init_resource::<AudioReady>()
         .init_resource::<MatchClipPrep>()

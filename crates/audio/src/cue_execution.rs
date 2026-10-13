@@ -353,6 +353,17 @@ impl CueWork {
                     return self.fail(StartFailure::FalloffEval);
                 }
                 let parameters = source.evaluate(listener);
+                if crate::diagnostics::enabled() {
+                    crate::diagnostics::emit(format!(
+                        "audio diag: spatial alias={} origin={:.0?} listener={:.0?} distance={distance:.0} dist_max={:.0} gain={:.4} source={}",
+                        self.request.alias,
+                        origin,
+                        listener.origin_inches,
+                        policy.dist_max,
+                        parameters.gains[0].hypot(parameters.gains[1]),
+                        self.source.is_some()
+                    ));
+                }
                 if self.source.is_none() && parameters.gains == [0.0; 2] {
                     self.complete(StartOutcome::Suppressed(SuppressReason::Inaudible));
                     return CueStep::Finished;

@@ -9,6 +9,9 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use crate::render_core::{QUANTUM, RenderShared, SAMPLE_RATE};
 
 pub(crate) fn supervise(shared: Arc<RenderShared>, shutdown: Arc<AtomicBool>) {
+    if crate::AudioSilent::null_output() {
+        return;
+    }
     assets::session_load::use_process_cpus();
     crate::diagnostics::thread("audio-device");
     let failed = Arc::new(AtomicU8::new(0));
@@ -94,6 +97,9 @@ pub(crate) fn open(
     failed: Arc<AtomicU8>,
     error_tx: SyncSender<cpal::StreamError>,
 ) -> Result<cpal::Stream, String> {
+    if crate::AudioSilent::null_output() {
+        return Err("IW4L_AUDIO_NULL_OUTPUT=1".into());
+    }
     let device = cpal::default_host()
         .default_output_device()
         .ok_or("no default output device")?;
