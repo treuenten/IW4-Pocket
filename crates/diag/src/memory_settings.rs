@@ -76,7 +76,7 @@ pub struct MemorySettings {
     /// Keep BC textures compressed on iOS when the GPU samples BC.
     pub ios_bc: bool,
     /// Prepare and draw effect model pieces (cash, debris, shells, glass).
-    /// Off on every platform until they have been checked on the phone.
+    /// On by default; `IW4L_FX_MODELS=0` turns them off.
     pub fx_models: bool,
     /// Keep posing animated script models the camera walk hid (Favela's
     /// washing) as shadow-only casters while they touch a sun partition, so
@@ -133,7 +133,7 @@ impl MemorySettings {
             },
             resident_map: flag(resident, tier.resident_map_default(ios)),
             ios_bc: flag(bc, true),
-            fx_models: flag(fx_models, false),
+            fx_models: flag(fx_models, true),
             offscreen_shadows: flag(offscreen_shadows, false),
             part_physics: flag(part_physics, false),
         }
@@ -271,7 +271,7 @@ mod tests {
         assert!(ios.move_images);
         assert!(!ios.resident_map);
         assert!(ios.ios_bc);
-        assert!(!ios.fx_models);
+        assert!(ios.fx_models);
         assert!(!ios.offscreen_shadows);
         assert!(!ios.part_physics);
         let invalid = MemorySettings::parse(true, Tier::Low, Some("-1"), Some("0"), Some("bad"), Some("bad"), Some("bad"), Some("bad"), Some("bad"), Some("bad"));
@@ -279,14 +279,14 @@ mod tests {
         assert_eq!(invalid.shader_workers, 1);
         assert!(!invalid.resident_map);
         assert!(invalid.ios_bc);
-        assert!(!invalid.fx_models);
+        assert!(invalid.fx_models);
         assert!(!invalid.offscreen_shadows);
         assert!(!invalid.part_physics);
         let desktop = MemorySettings::parse(false, Tier::High, None, None, None, None, None, None, None, None);
         assert_eq!(desktop.fpv_retain_bytes, u64::MAX);
         assert_eq!(desktop.effective_shader_workers(4), 4);
         assert!(desktop.resident_map);
-        assert!(!desktop.fx_models);
+        assert!(desktop.fx_models);
         assert!(!desktop.offscreen_shadows);
         assert!(!desktop.part_physics);
     }
@@ -325,18 +325,20 @@ mod tests {
         assert_eq!((forced.fpv_retain_bytes, forced.effective_shader_workers(4), forced.resident_map), (128 << 20, 3, true));
     }
     #[test]
-    fn fx_models_switch_is_off_unless_set_to_1() {
+    fn fx_models_switch_is_on_unless_set_to_0() {
         for (ios, tier) in [(true, Tier::Low), (true, Tier::High), (false, Tier::High)] {
             let fx = |value| MemorySettings::parse(ios, tier, None, None, None, None, None, value, None, None).fx_models;
-            assert!(!fx(None));
+            assert!(fx(None));
             assert!(!fx(Some("0")));
+            assert!(!fx(Some(" 0 ")));
             assert!(fx(Some("1")));
-            assert!(fx(Some(" 1 ")));
-            assert!(!fx(Some("on")));
-            assert!(!fx(Some("2")));
+            assert!(fx(Some("off")));
+            assert!(fx(Some("2")));
         }
-        assert!(MemorySettings::parse(true, Tier::Low, None, None, None, None, None, Some("1"), None, None)
+        assert!(MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, None, None)
             .report().contains("; IW4L_FX_MODELS=1;"));
+        assert!(MemorySettings::parse(true, Tier::Low, None, None, None, None, None, Some("0"), None, None)
+            .report().contains("; IW4L_FX_MODELS=0;"));
     }
     #[test]
     fn offscreen_shadows_switch_is_off_unless_set_to_1() {
