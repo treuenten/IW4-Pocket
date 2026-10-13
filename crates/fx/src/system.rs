@@ -845,6 +845,18 @@ impl FxSystemHost {
         Some(idx as u8)
     }
 
+    /// Returns a bolted effect's record to the free list once the effect is
+    /// gone. Without it the 255 records ran out a minute or two into a match,
+    /// and every later bolted effect (muzzle flashes, the airstrike's cluster
+    /// bomb) failed to spawn.
+    fn free_bolt_record(&mut self, index: u8) {
+        let Some(next) = self.bolt_next.get_mut(usize::from(index)) else {
+            return;
+        };
+        *next = self.bolt_first_free;
+        self.bolt_first_free = i32::from(index);
+    }
+
     pub fn spawn_effect(
         &mut self,
         def_name: &str,
@@ -858,6 +870,9 @@ impl FxSystemHost {
         if wants_spotlight && self.spotlight_count >= FX_SPOT_LIGHT_LIMIT {
             return Err(SpawnFail::TooManySpotlights);
         }
+        if self.ring_occupancy() >= FX_EFFECT_HANDLE_RING_SIZE as i32 {
+            return Err(SpawnFail::RingFull);
+        }
         let bolt_index = if bolt == FX_SPAWN_BOLT_NONE {
             0xff
         } else {
@@ -868,9 +883,6 @@ impl FxSystemHost {
         };
 
         let alloc = self.first_free_effect;
-        if self.ring_occupancy() >= FX_EFFECT_HANDLE_RING_SIZE as i32 {
-            return Err(SpawnFail::RingFull);
-        }
         self.first_free_effect = alloc.wrapping_add(1);
 
         let ring_i = (alloc as u32 & (FX_EFFECT_HANDLE_RING_SIZE - 1)) as usize;
@@ -970,6 +982,10 @@ impl FxSystemHost {
             self.set_handle_at_ring(active_index as u32, handle);
             active_index = active_index.wrapping_add(1);
             if let Some(slot) = handle_to_slot(handle) {
+                let bolt = self.effects[slot].bolt;
+                if bolt != 0xff {
+                    self.free_bolt_record(bolt);
+                }
                 self.effects[slot] = FxEffectSlot::default();
             }
         }
@@ -1073,4 +1089,47 @@ fn handle_to_slot(handle: u16) -> Option<usize> {
     }
     let slot = (byte_off / FX_EFFECT_SLOT_SIZE as u32) as usize;
     (slot < FX_EFFECT_POOL_CAPACITY as usize).then_some(slot)
+}
+
+#[cfg(test)]
+mod bolt_record_tests {
+    use super::*;
+    use crate::play::{FxPlayPose, FxPlayRequest, PlayResult, play_bolted};
+
+    const AXIS: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+    /// A precision airstrike's cluster bomb is a bolted effect played minutes
+    /// into a match, after hundreds of bolted muzzle flashes and shell ejects.
+    #[test]
+    fn a_finished_bolted_effect_gives_its_bolt_record_back() {
+        let mut host = FxSystemHost::new();
+        let target = FxBoltTarget {
+            dobj: 300,
+            bone: 0,
+            centity_teleport: false,
+            orientation: FxBoltOrientation {
+                origin: [0.0; 3],
+                axis: AXIS,
+            },
+        };
+        for spawn in 0..4 * fx_iw4::FX_BOLT_RECORD_CAPACITY {
+            let request = FxPlayRequest {
+                def_name: "explosions/clusterbomb",
+                pose: FxPlayPose {
+                    origin: [0.0; 3],
+                    axis: AXIS,
+                    msec: 0,
+                },
+                wants_spotlight: false,
+                def: None,
+                catalog_index: FX_CATALOG_INDEX_NONE,
+            };
+            let played = play_bolted(&mut host, request, target);
+            assert!(
+                !matches!(played, PlayResult::Failed(_)),
+                "bolted spawn {spawn} failed: {played:?}"
+            );
+            host.run_garbage_collection();
+        }
+    }
 }
