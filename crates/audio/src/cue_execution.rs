@@ -365,6 +365,12 @@ impl CueWork {
                     ));
                 }
                 if self.source.is_none() && parameters.gains == [0.0; 2] {
+                    // A secondary layer has its own falloff, and a distant
+                    // layer reaches farther than the alias that names it.
+                    self.secondary(
+                        asset_audio::SecondaryActivation::OnPrimaryPrepared,
+                        children,
+                    );
                     self.complete(StartOutcome::Suppressed(SuppressReason::Inaudible));
                     return CueStep::Finished;
                 }
