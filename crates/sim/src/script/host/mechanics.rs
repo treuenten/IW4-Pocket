@@ -572,12 +572,11 @@ const FALLBACK_PHYS: xmodel_runtime::ModelPhys = xmodel_runtime::ModelPhys {
 /// The old placeholder box, for a model without bounds.
 const FALLBACK_BOX: ([f32; 3], [f32; 3]) = ([0.0, 0.0, 12.0], [12.0; 3]);
 
-/// `IW4L_PART_PHYSICS=1` (a line in iw4l-env.txt on the phone): launched car
-/// parts and the care package move as rigid bodies that tumble, bounce and lie
-/// flat. Off by default on every platform until it has been checked on the
-/// phone. Off, a launched model is the falling box it was before (see
-/// [`launch_falling_box`]). Read once at startup with the other restart-only
-/// switches (`diag::memory_settings`).
+/// Launched car parts and the care package move as rigid bodies that tumble,
+/// bounce and lie flat. On by default; `IW4L_PART_PHYSICS=0` (a line in
+/// iw4l-env.txt on the phone) makes a launched model the falling box it was
+/// before (see [`launch_falling_box`]). Read once at startup with the other
+/// restart-only switches (`diag::memory_settings`).
 pub(crate) fn part_physics() -> bool {
     diag::memory_settings::get().part_physics
 }
@@ -1578,12 +1577,9 @@ mod tests {
     }
 
     #[test]
-    fn part_physics_is_off_unless_the_switch_is_set() {
+    fn part_physics_is_on_unless_the_switch_is_set() {
         if std::env::var_os(diag::memory_settings::PART_PHYSICS_ENV).is_none() {
-            assert!(
-                !part_physics(),
-                "IW4L_PART_PHYSICS unset means the falling box"
-            );
+            assert!(part_physics(), "IW4L_PART_PHYSICS unset means rigid bodies");
         }
     }
 

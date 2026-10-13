@@ -84,8 +84,8 @@ pub struct MemorySettings {
     /// frame, so it is off on every platform until measured on the phone.
     pub offscreen_shadows: bool,
     /// Launched car parts and the care package move as rigid bodies that
-    /// tumble, bounce and lie flat. New and still being checked on the phone,
-    /// so off on every platform: off, they are the old falling box.
+    /// tumble, bounce and lie flat. On by default; `IW4L_PART_PHYSICS=0`
+    /// turns them back into the old falling box.
     pub part_physics: bool,
 }
 
@@ -135,7 +135,7 @@ impl MemorySettings {
             ios_bc: flag(bc, true),
             fx_models: flag(fx_models, true),
             offscreen_shadows: flag(offscreen_shadows, false),
-            part_physics: flag(part_physics, false),
+            part_physics: flag(part_physics, true),
         }
     }
 
@@ -273,7 +273,7 @@ mod tests {
         assert!(ios.ios_bc);
         assert!(ios.fx_models);
         assert!(!ios.offscreen_shadows);
-        assert!(!ios.part_physics);
+        assert!(ios.part_physics);
         let invalid = MemorySettings::parse(true, Tier::Low, Some("-1"), Some("0"), Some("bad"), Some("bad"), Some("bad"), Some("bad"), Some("bad"), Some("bad"));
         assert_eq!(invalid.fpv_retain_bytes, 0);
         assert_eq!(invalid.shader_workers, 1);
@@ -281,14 +281,14 @@ mod tests {
         assert!(invalid.ios_bc);
         assert!(invalid.fx_models);
         assert!(!invalid.offscreen_shadows);
-        assert!(!invalid.part_physics);
+        assert!(invalid.part_physics);
         let desktop = MemorySettings::parse(false, Tier::High, None, None, None, None, None, None, None, None);
         assert_eq!(desktop.fpv_retain_bytes, u64::MAX);
         assert_eq!(desktop.effective_shader_workers(4), 4);
         assert!(desktop.resident_map);
         assert!(desktop.fx_models);
         assert!(!desktop.offscreen_shadows);
-        assert!(!desktop.part_physics);
+        assert!(desktop.part_physics);
     }
     #[test]
     fn ab_settings_are_bounded() {
@@ -356,19 +356,19 @@ mod tests {
         assert!(report(Some("1")).contains("; IW4L_OFFSCREEN_SHADOWS=1;"));
     }
     #[test]
-    fn part_physics_switch_is_off_unless_set_to_1() {
+    fn part_physics_switch_is_on_unless_set_to_0() {
         for (ios, tier) in [(true, Tier::Low), (true, Tier::Mid), (true, Tier::High), (false, Tier::High)] {
             let on = |value| MemorySettings::parse(ios, tier, None, None, None, None, None, None, None, value).part_physics;
-            assert!(!on(None), "off by default");
+            assert!(on(None), "on by default");
             assert!(!on(Some("0")));
+            assert!(!on(Some(" 0 ")));
             assert!(on(Some("1")));
-            assert!(on(Some(" 1 ")));
-            assert!(!on(Some("on")));
-            assert!(!on(Some("2")));
+            assert!(on(Some("off")));
+            assert!(on(Some("2")));
         }
         let report = |value| MemorySettings::parse(true, Tier::Low, None, None, None, None, None, None, None, value).report();
-        assert!(report(None).ends_with("IW4L_PART_PHYSICS=0"));
-        assert!(report(Some("1")).ends_with("IW4L_PART_PHYSICS=1"));
+        assert!(report(None).ends_with("IW4L_PART_PHYSICS=1"));
+        assert!(report(Some("0")).ends_with("IW4L_PART_PHYSICS=0"));
     }
     #[test]
     fn budget_boundaries() {
