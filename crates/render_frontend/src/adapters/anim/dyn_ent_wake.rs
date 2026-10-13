@@ -51,6 +51,17 @@ pub struct DynEntWakeBroadphase {
     pub query_ms: f32,
 }
 
+/// One pellet segment that ended on a surface. Shotgun pellets and turret
+/// rounds reach the client as pellet records rather than bullet hit events,
+/// and each of them strikes a dynent the way a bullet does.
+#[derive(Clone, Copy, Debug, Message)]
+pub struct DynEntPelletHit {
+    pub world: frame::WorldGeneration,
+    pub weapon: u32,
+    pub start: Vec3,
+    pub end: Vec3,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DynEntWakeEntry {
     entity: Entity,
@@ -792,6 +803,58 @@ pub(crate) fn on_entity_bullet_hit(
     }
 }
 
+pub(crate) fn hit_dyn_ents_from_pellets(
+    mut hits: MessageReader<DynEntPelletHit>,
+    weapons: Option<Res<PreparedWeapons>>,
+    catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
+    mut broadphase: ResMut<DynEntWakeBroadphase>,
+    mut instances: Query<
+        (
+            Entity,
+            &mut WorldDynEntInstance,
+            &Transform,
+            &mut Visibility,
+        ),
+        With<DynEntModelEntity>,
+    >,
+    mut impulses: MessageWriter<DynEntPhysImpulse>,
+    mut phys: ResMut<DynEntPhysWorld>,
+    mut host: Option<ResMut<HostFxSystem>>,
+    fx: Option<Res<PreparedFxCatalog>>,
+    scene: Option<Res<WorldScene>>,
+    entity_marks: Res<EntityMarks>,
+) {
+    let catalog = catalog.as_deref();
+    let fx = fx.as_deref();
+    let scene = scene.as_deref();
+    let marks = entity_marks.as_ref();
+    for hit in hits.read() {
+        let Some((entity, pose, bullet_scale)) =
+            closest_segment_hit(hit.start, hit.end, catalog, &mut broadphase, &instances)
+        else {
+            continue;
+        };
+        let weapons = weapons
+            .as_deref()
+            .and_then(|weapons| weapons.for_event(hit.world).ok());
+        hit_one_dyn_ent(
+            entity,
+            pose,
+            hit.start,
+            hit.end,
+            bullet_scale,
+            weapon_hit_damage(weapons.as_ref(), hit.weapon),
+            &mut instances,
+            &mut impulses,
+            phys.as_mut(),
+            host.as_deref_mut(),
+            fx,
+            scene,
+            marks,
+        );
+    }
+}
+
 pub(crate) fn on_entity_event_sound(
     sound: On<EntityEventSound>,
     weapons: Option<Res<PreparedWeapons>>,
@@ -926,6 +989,7 @@ fn on_physics_sphere(
 
 pub fn register_dyn_ent_wake(app: &mut App) {
     app.init_resource::<DynEntWakeBroadphase>()
+        .add_message::<DynEntPelletHit>()
         .add_observer(on_entity_explosion)
         .add_observer(on_physics_sphere)
         .add_observer(on_entity_bullet_hit)
@@ -933,6 +997,10 @@ pub fn register_dyn_ent_wake(app: &mut App) {
         .add_systems(
             Update,
             rebuild_dyn_ent_wake_broadphase.in_set(net::ClientSet::Receive),
+        )
+        .add_systems(
+            Update,
+            hit_dyn_ents_from_pellets.in_set(net::ClientSet::Present),
         )
         .add_systems(
             Update,
