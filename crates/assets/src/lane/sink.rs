@@ -1218,7 +1218,10 @@ impl AssetLinkSink for ZoneWalkSink {
             self.fpv_meshes.capture(stream, &self.materials);
             self.bodies.capture(stream, &self.materials);
             self.models.capture(stream);
-            self.fx_models.capture(stream, &self.materials);
+            let phys = stream
+                .xmodel()
+                .and_then(|geometry| self.phys_presets.model_phys(geometry.phys_preset));
+            self.fx_models.capture(stream, &self.materials, phys);
             self.xmodel_coll.insert(stream, slot, insert_slot);
         }
         if ty == AssetType::PhysPreset {

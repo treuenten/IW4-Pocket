@@ -12,9 +12,9 @@ use fx::{
     FxModelInstance, FxPackedLightingSrc, FxPlayPose, FxPlayRequest, FxSparkDrawQuery,
     FxSparkFillQuery, FxSparkFillVisual, FxSpriteInstance, FxSystemHost, FxTrailCollideHit,
     FxTrailDrawDef, FxTrailSampleVisual, PendingCollide, PlayResult, axis_from_hit_normal,
-    evaluate_elem_collide_motion, evaluate_elem_motion, generate_verts_with_trails, play_bolted,
-    play_oriented, spawn_impact_or_death_effect, spawn_looping_partial, spawn_oriented,
-    update as fx_update,
+    evaluate_elem_collide_motion, evaluate_elem_motion, evaluate_elem_physics_motion,
+    generate_verts_with_trails, play_bolted, play_oriented, spawn_impact_or_death_effect,
+    spawn_looping_partial, spawn_oriented, update as fx_update,
 };
 use fx_iw4::{
     FX_ELEM_ATLAS_OFF, FX_ELEM_ATLAS_SIZE, FxElemType, FxRandomChannel, apply_lighting_frac_bgra,
@@ -655,6 +655,14 @@ fn eval_pending_collide(
     let Some(elem) = effect.elems.get(q.def_index as usize) else {
         return out;
     };
+    if fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags) {
+        let Some(world) = clip_world else {
+            out.gap = Some(q.def_index);
+            return out;
+        };
+        out.result = Some(evaluate_physics_piece(elem, world, q));
+        return out;
+    }
     if fx_iw4::elem_uses_collision(elem.view.flags) {
         let Some(world) = clip_world else {
             out.gap = Some(q.def_index);
@@ -670,6 +678,7 @@ fn eval_pending_collide(
             elem.view.coll_maxs,
             elem.view.use_item_clip != 0,
             !elem.effect_on_impact.is_absent(),
+            elem.view.elem_type == FxElemType::Model as u8,
             q.elem_random_seed,
             elem.vel_graph_local.as_slice(),
             elem.vel_graph_world.as_slice(),
@@ -696,6 +705,32 @@ fn eval_pending_collide(
         q,
     );
     out
+}
+
+/// A model-physics piece: launched by its velocity graphs, then falling and
+/// coming to rest against the world with its model's preset.
+fn evaluate_physics_piece(
+    elem: &asset_game::OwnedFxElemDef,
+    world: &SimWorld,
+    q: fx::FxElemMotionQuery<'_>,
+) -> FxElemMotionResult {
+    evaluate_elem_physics_motion(
+        elem.view.flags,
+        elem.phys_piece(q.elem_random_seed),
+        elem.view.use_item_clip != 0,
+        elem.vel_graph_local.as_slice(),
+        elem.vel_graph_world.as_slice(),
+        q,
+        |start, end, mins, maxs, mask| {
+            let t = world.trace_world(start, end, mins, maxs, mask);
+            FxElemTraceHit {
+                fraction: t.fraction,
+                normal: t.normal,
+                startsolid: t.startsolid != 0,
+                allsolid: t.allsolid != 0,
+            }
+        },
+    )
 }
 
 const COLLIDE_JOBS_PER_WORKER: usize = 16;
@@ -829,6 +864,13 @@ fn tick_fx_pass(
             let out = (|| {
                 let effect = catalog_lookup(catalog, q.catalog_index)?;
                 let elem = effect.elems.get(q.def_index as usize)?;
+                if fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags) {
+                    let Some(world) = clip_world else {
+                        collide_gap_indices.borrow_mut().push(q.def_index);
+                        return None;
+                    };
+                    return Some(evaluate_physics_piece(elem, world, q));
+                }
                 if fx_iw4::elem_uses_collision(elem.view.flags) {
                     let Some(world) = clip_world else {
                         collide_gap_indices.borrow_mut().push(q.def_index);
@@ -844,6 +886,7 @@ fn tick_fx_pass(
                         elem.view.coll_maxs,
                         elem.view.use_item_clip != 0,
                         !elem.effect_on_impact.is_absent(),
+                        elem.view.elem_type == FxElemType::Model as u8,
                         q.elem_random_seed,
                         elem.vel_graph_local.as_slice(),
                         elem.vel_graph_world.as_slice(),

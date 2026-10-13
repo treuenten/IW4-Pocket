@@ -119,3 +119,41 @@ pub fn collision_reflect_base_vel_delta(
         reflected[2] - pre_impact_vel[2],
     ]
 }
+
+/// How a model-physics piece meets the world: the bounce and friction of its
+/// model's physics preset, and how far its origin stays off what it lands on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FxPhysPiece {
+    pub bounce: f32,
+    pub friction: f32,
+    /// Half the model's thinnest extent, so a flat piece lies on its face.
+    pub rest_radius: f32,
+}
+
+impl FxPhysPiece {
+    /// Inferred, for a model without a preset or bounds: a light prop.
+    pub const FALLBACK: Self = Self {
+        bounce: 0.2,
+        friction: 0.5,
+        rest_radius: 1.0,
+    };
+
+    /// `preset` is the model's (bounce, friction), `bounds` its (mins, maxs).
+    pub fn from_model(preset: Option<(f32, f32)>, bounds: Option<([f32; 3], [f32; 3])>) -> Self {
+        let (bounce, friction) = preset
+            .filter(|(b, f)| b.is_finite() && f.is_finite())
+            .unwrap_or((Self::FALLBACK.bounce, Self::FALLBACK.friction));
+        let rest_radius = bounds
+            .map(|(lo, hi)| {
+                let thinnest = (hi[0] - lo[0]).min(hi[1] - lo[1]).min(hi[2] - lo[2]);
+                thinnest * 0.5
+            })
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .map_or(Self::FALLBACK.rest_radius, |r| r.clamp(0.5, 8.0));
+        Self {
+            bounce: bounce.clamp(0.0, 1.0),
+            friction: friction.clamp(0.0, 1.0),
+            rest_radius,
+        }
+    }
+}

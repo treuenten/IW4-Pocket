@@ -72,14 +72,22 @@ impl FxModelCatalog {
         self.strings = strings;
     }
 
-    pub fn capture(&mut self, stream: &ZoneStream<'_>, materials: &MaterialCatalog) {
+    /// `phys` is the model's physics preset, which a model-physics effect
+    /// piece bounces and slides with.
+    pub fn capture(
+        &mut self,
+        stream: &ZoneStream<'_>,
+        materials: &MaterialCatalog,
+        phys: Option<xmodel_runtime::ModelPhys>,
+    ) {
         let Some(geometry) = stream.xmodel() else {
             return;
         };
-        let Some(skel) = capture_xmodel_skel(stream, &self.strings, geometry, Some(materials))
+        let Some(mut skel) = capture_xmodel_skel(stream, &self.strings, geometry, Some(materials))
         else {
             return;
         };
+        skel.phys = phys;
         self.capture_shared(Arc::new(skel), materials);
     }
 
