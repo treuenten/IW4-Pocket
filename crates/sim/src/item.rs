@@ -943,6 +943,11 @@ fn grab_projectile(world: &mut FrameWorld, walker: ClientId, number: i32, tick: 
     perf::pickup(ps.pm_type);
 }
 
+/// What blocks the sight line Player_GetUseList needs from the eye to
+/// anything it offers: solid and glass (17, CONTENTS_SOLID | CONTENTS_GLASS),
+/// so clip, water and players do not.
+pub(crate) const USE_SIGHT_MASK: u32 = 0x11;
+
 /// How Player_GetUseList ranks something within use reach of a player, the
 /// lower the better: its distance from the eye plus up to 256 for how far it
 /// lies off his view direction. Dropped weapons and script usables such as a
@@ -1006,7 +1011,7 @@ fn best_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Option<(
             continue;
         }
         if world
-            .trace_world(eye, center, [0.0; 3], [0.0; 3], 0x11)
+            .trace_world(eye, center, [0.0; 3], [0.0; 3], USE_SIGHT_MASK)
             .fraction
             < 1.0
         {
@@ -1038,7 +1043,7 @@ fn best_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Option<(
         let distance = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
         if distance > 160.0
             || world
-                .trace_world(eye, projectile.origin, [0.0; 3], [0.0; 3], 0x11)
+                .trace_world(eye, projectile.origin, [0.0; 3], [0.0; 3], USE_SIGHT_MASK)
                 .fraction
                 < 1.0
         {

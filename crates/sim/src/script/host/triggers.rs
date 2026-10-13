@@ -223,19 +223,16 @@ pub(crate) struct TriggerBlast {
     pub cone: Option<([f32; 3], f32)>,
 }
 
-fn damage_bounds(
-    runtime: &mut Runtime,
+/// An entity's bounds about its origin: a radius trigger's cylinder, a map
+/// trigger's hulls, or its brush model (a care package's being its cloned
+/// crate collision). None for anything else.
+pub(crate) fn local_bounds(
+    entity: &super::entities::ScriptEntity,
     frame: &FrameWorld,
-    object: u64,
 ) -> Option<([f32; 3], [f32; 3])> {
-    let entity = runtime.entities.get(&object)?;
-    let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
-    let Value::Vector(origin) = runtime.object_field(object, "origin") else {
-        return None;
-    };
-    let (mins, maxs) = if let Some((radius, height)) = cylinder {
-        ([-radius, -radius, 0.0], [radius, radius, height])
-    } else if let Some(model) = trigger_model {
+    if let Some((radius, height)) = entity.cylinder {
+        Some(([-radius, -radius, 0.0], [radius, radius, height]))
+    } else if let Some(model) = entity.trigger_model {
         let hulls = frame.clip_cmodels().triggers.get(model as usize)?;
         let mut mins = [f32::INFINITY; 3];
         let mut maxs = [f32::NEG_INFINITY; 3];
@@ -245,10 +242,21 @@ fn damage_bounds(
                 maxs[i] = maxs[i].max(hull.mid[i] + hull.half[i]);
             }
         }
-        (mins, maxs)
+        Some((mins, maxs))
     } else {
-        let model = frame.clip_cmodels().models.get(brush? as usize)?;
-        (model.mins, model.maxs)
+        let model = frame.clip_cmodels().models.get(entity.brush? as usize)?;
+        Some((model.mins, model.maxs))
+    }
+}
+
+fn damage_bounds(
+    runtime: &mut Runtime,
+    frame: &FrameWorld,
+    object: u64,
+) -> Option<([f32; 3], [f32; 3])> {
+    let (mins, maxs) = local_bounds(runtime.entities.get(&object)?, frame)?;
+    let Value::Vector(origin) = runtime.object_field(object, "origin") else {
+        return None;
     };
     let mins = std::array::from_fn(|i| mins[i] + origin[i]);
     let maxs = std::array::from_fn(|i| maxs[i] + origin[i]);
@@ -619,7 +627,9 @@ pub(crate) enum UsableRank {
 
 /// What the one cursor hint offers, and so what a press made under it acts
 /// on. `item` is the use score of a dropped weapon in reach, `usable` the
-/// usable select_usables chose and how it ranks.
+/// usable select_usables chose and how it ranks. Both are in the player's
+/// sight, or the usable is a use trigger he stands in: Player_GetUseList
+/// drops anything else before it ranks.
 ///
 /// The engine's Player_GetUseList (MW2 has it; its CoD4 and Black Ops
 /// versions are decompiled) puts dropped weapons and usables in one list and
