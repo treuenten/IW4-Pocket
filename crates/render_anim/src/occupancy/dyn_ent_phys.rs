@@ -16,6 +16,17 @@ const MSEC_STEP: i32 = 17;
 const MAX_ITERS: i32 = 2;
 
 const CONTENTS_SOLID: u32 = 1;
+/// A desk or shelf that is a static model stands in the clipmap as a clip
+/// brush with item clip, not as solid (the cubicle desks on mp_terminal).
+const CONTENTS_ITEMCLIP: u32 = 0x400;
+/// Masks a waking body may collide with, tried in order. Solid alone let a
+/// keyboard or monitor that was knocked off its spot drop through the desk to
+/// the floor. A prop placed inside item clip keeps solid alone, as before.
+const WAKE_MASKS: [u32; 2] = [CONTENTS_SOLID | CONTENTS_ITEMCLIP, CONTENTS_SOLID];
+/// Starting poses a waking body may take, tried in order: small lifts, then
+/// narrower footprints.
+const WAKE_LIFTS: [f32; 6] = [0.0, CONTACT_SLOP, 0.25, 0.5, 1.0, 2.0];
+const WAKE_FOOTPRINTS: [f32; 3] = [1.0, 0.75, 0.5];
 const SLEEP_SPEED: f32 = 4.0;
 const GROUND_NZ: f32 = 0.7;
 const CONTACT_SLOP: f32 = 0.125;
@@ -58,6 +69,7 @@ struct DynEntPhysBody {
     maxs: [f32; 3],
     bounce: f32,
     friction: f32,
+    mask: u32,
     on_ground: bool,
     asleep_ms: i32,
 }
@@ -101,6 +113,7 @@ pub fn step_phys_world0(
         }
         let (mins, maxs) = xmodel_phys_hull(catalog, &inst.current_model);
         let add_vel = impulse.impulse / preset.mass;
+        let phys_clip = clip.0.as_deref();
         world
             .bodies
             .entry(entity)
@@ -108,15 +121,22 @@ pub fn step_phys_world0(
                 body.vel += add_vel;
                 body.asleep_ms = 0;
             })
-            .or_insert_with(|| DynEntPhysBody {
-                origin: transform.translation,
-                vel: add_vel,
-                mins,
-                maxs,
-                bounce: preset.bounce,
-                friction: preset.friction,
-                on_ground: false,
-                asleep_ms: 0,
+            .or_insert_with(|| {
+                let pose = phys_clip
+                    .and_then(|clip| clear_wake_pose(clip, transform.translation, mins, maxs));
+                let (origin, mins, maxs, mask) =
+                    pose.unwrap_or((transform.translation, mins, maxs, CONTENTS_SOLID));
+                DynEntPhysBody {
+                    origin,
+                    vel: add_vel,
+                    mins,
+                    maxs,
+                    bounce: preset.bounce,
+                    friction: preset.friction,
+                    mask,
+                    on_ground: false,
+                    asleep_ms: 0,
+                }
             });
     }
 
@@ -187,6 +207,46 @@ pub fn step_phys_world0(
     }
 }
 
+/// The pose a waking body starts from. A placed prop often starts inside the
+/// world: a monitor's stand sits a hair inside the desk, and its unrotated
+/// model bounds reach into the cubicle wall behind it. `integrate_body` stops
+/// a body that starts inside, so such a prop never moved however often it was
+/// shot. It starts instead from the nearest clear pose, with the mask that
+/// pose is clear of. `None` when nothing tried is clear: the body stays where
+/// it was placed, as before.
+fn clear_wake_pose(
+    clip: &ClipCollision,
+    origin: Vec3,
+    mins: [f32; 3],
+    maxs: [f32; 3],
+) -> Option<(Vec3, [f32; 3], [f32; 3], u32)> {
+    for mask in WAKE_MASKS {
+        for scale in WAKE_FOOTPRINTS {
+            let (mins, maxs) = narrowed_footprint(mins, maxs, scale);
+            for lift in WAKE_LIFTS {
+                let at = (origin + Vec3::Z * lift).to_array();
+                let probe = clip.sweep_box(at, at, mins, maxs, mask);
+                if !probe.startsolid && !probe.allsolid {
+                    return Some((Vec3::from_array(at), mins, maxs, mask));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn narrowed_footprint(mins: [f32; 3], maxs: [f32; 3], scale: f32) -> ([f32; 3], [f32; 3]) {
+    let mut lo = mins;
+    let mut hi = maxs;
+    for axis in 0..2 {
+        let mid = (mins[axis] + maxs[axis]) * 0.5;
+        let half = (maxs[axis] - mins[axis]) * 0.5 * scale;
+        lo[axis] = mid - half;
+        hi[axis] = mid + half;
+    }
+    (lo, hi)
+}
+
 fn integrate_free(body: &mut DynEntPhysBody, dt: f32) {
     body.vel.z += GRAVITY_Z * dt;
     body.origin += body.vel * dt;
@@ -202,7 +262,7 @@ fn integrate_body(body: &mut DynEntPhysBody, clip: &ClipCollision, dt: f32) {
         end.to_array(),
         body.mins,
         body.maxs,
-        CONTENTS_SOLID,
+        body.mask,
     );
     if hit.allsolid || hit.startsolid {
         body.vel = Vec3::ZERO;
@@ -228,7 +288,7 @@ fn integrate_body(body: &mut DynEntPhysBody, clip: &ClipCollision, dt: f32) {
                 lifted.to_array(),
                 body.mins,
                 body.maxs,
-                CONTENTS_SOLID,
+                body.mask,
             );
             if !probe.startsolid && !probe.allsolid {
                 body.origin = lifted;
