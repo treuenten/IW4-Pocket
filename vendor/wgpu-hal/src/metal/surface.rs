@@ -14,6 +14,12 @@ use parking_lot::{Mutex, RwLock};
 
 use super::OsFeatures;
 
+#[cfg(target_os = "macos")]
+fn render_hidden() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("IW4L_MAC_RENDER_HIDDEN").is_some_and(|v| v == "1"))
+}
+
 impl super::Surface {
     pub fn new(layer: Retained<CAMetalLayer>) -> Self {
         Self {
@@ -76,6 +82,9 @@ impl crate::Surface for super::Surface {
             wgt::PresentMode::Immediate => false,
             m => unreachable!("Unsupported present mode: {m:?}"),
         };
+        // A covered window gets no vsync, so its presented drawables would never free.
+        #[cfg(target_os = "macos")]
+        let display_sync = display_sync && !render_hidden();
         let drawable_size = CGSize::new(config.extent.width as f64, config.extent.height as f64);
 
         match config.composite_alpha_mode {
@@ -120,8 +129,10 @@ impl crate::Surface for super::Surface {
     ) -> Result<crate::AcquiredSurfaceTexture<super::Api>, crate::SurfaceError> {
         let render_layer = self.render_layer.lock();
 
+        // IW4L_MAC_RENDER_HIDDEN=1 keeps drawing while the window is covered, for test
+        // runs behind other apps (display sync is off with it, see configure).
         #[cfg(target_os = "macos")]
-        {
+        if !render_hidden() {
             // Workaround for https://github.com/gfx-rs/wgpu/issues/8309
             // When the window is occluded on macOS, presented drawables get stuck waiting
             // for vsync. Check the window's occlusion state and skip acquisition if
