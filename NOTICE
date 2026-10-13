@@ -31,6 +31,9 @@ directory) with TWO modified files, both marked in the source: src/metal/adapter
 `pacing` module: optional present timing hooks and presentDrawable:afterMinimumDuration,
 both off unless the app sets them).
 
+vendor/wgpu-core is wgpu-core 29.0.4 (MIT OR Apache-2.0, licences included in that
+directory), unmodified.
+
 
 --------------------------------------------------------------------------------
 Third-party material bundled with this repository
