@@ -83,9 +83,9 @@ pub fn vec_to_yaw(x: f32, y: f32) -> f32 {
 
 const VECT_TO_ANGLES_PITCH_SCALE: f32 = -57.2957763671875_f32;
 
-const VECT_TO_ANGLES_PITCH_DOWN: f32 = 270.0;
+const VECT_TO_ANGLES_PITCH_DOWN: f32 = 90.0;
 
-const VECT_TO_ANGLES_PITCH_UP: f32 = 90.0;
+const VECT_TO_ANGLES_PITCH_UP: f32 = 270.0;
 
 pub fn vect_to_angles(forward: [f32; 3]) -> [f32; 3] {
     let [x, y, z] = forward;
@@ -118,7 +118,7 @@ fn axis_to_angles_roll_atan(v: [f32; 3]) -> f32 {
     let [x, y, z] = v;
     if y == 0.0 && x == 0.0 {
         return if 0.0 <= -z {
-            VECT_TO_ANGLES_PITCH_UP
+            VECT_TO_ANGLES_PITCH_DOWN
         } else {
             AXIS_TO_ANGLES_ROLL_PITCH_NEG
         };
@@ -235,5 +235,30 @@ fn format_floor(value: f32) -> f32 {
         truncated - 1.0
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertical_vectors_keep_their_direction() {
+        for z in [1.0_f32, -1.0, 500.0, -500.0] {
+            let forward = angle_vectors(vect_to_angles([0.0, 0.0, z])).0;
+            assert!(forward[2] * z.signum() > 0.999, "z={z}: {forward:?}");
+        }
+    }
+
+    #[test]
+    fn vertical_pitch_matches_nearly_vertical() {
+        for z in [1.0_f32, -1.0] {
+            let exact = vect_to_angles([0.0, 0.0, z])[0];
+            let near = vect_to_angles([1e-4, 0.0, z])[0];
+            assert!(
+                angle_subtract(exact, near).abs() < 0.01,
+                "z={z}: {exact} vs {near}"
+            );
+        }
     }
 }
