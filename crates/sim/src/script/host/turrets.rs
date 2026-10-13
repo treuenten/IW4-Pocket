@@ -499,6 +499,32 @@ fn shoot(world: &mut World, object: u64) {
     fire_bullet(world, object, from, turret.aim, turret.weapon, attacker);
 }
 
+/// A turret or vehicle gun's shot as a fire event from its muzzle, so clients
+/// play the weapon's fire sound there, whether or not the round hits anything.
+fn announce_shot(world: &mut World, object: u64, from: [f32; 3], dir: [f32; 3], weapon: u32) {
+    let Some(number) = world
+        .resource::<Runtime>()
+        .entities
+        .get(&object)
+        .map(|entity| entity.number)
+    else {
+        return;
+    };
+    let tick = world.resource::<crate::step::StepRequest>().tick;
+    FrameWorld::from_world(world).push_entity_event(
+        tick,
+        crate::EventAudience::All,
+        entity_iw4::EntityEventKind::SV_FIRE_WEAPON,
+        crate::EntityEventPayload {
+            number,
+            weapon,
+            origin: from,
+            direction: math_iw4::vect_to_angles(dir),
+            ..Default::default()
+        },
+    );
+}
+
 pub(crate) fn fire_bullet(
     world: &mut World,
     object: u64,
@@ -507,6 +533,7 @@ pub(crate) fn fire_bullet(
     weapon: u32,
     attacker: Option<ClientId>,
 ) {
+    announce_shot(world, object, from, dir, weapon);
     let range = weapon_range(world, weapon);
     let end = (Vec3::from_array(from) + Vec3::from_array(dir) * range).to_array();
     let ignore = ignore_self(world, object);

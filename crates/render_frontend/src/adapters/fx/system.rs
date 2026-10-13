@@ -2171,10 +2171,16 @@ fn publish_weapon_fire(
             settings.third_person,
         ),
     };
-    let player_view = identities
-        .get(fire.entity)
-        .ok()
-        .is_some_and(|identity| gate.skip_self_fpv(identity.number()));
+    // The gun the local player is linked to as its gunner (the Chopper Gunner's
+    // minigun) sounds to them as their own weapon.
+    let gunner = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .and_then(|meta| meta.linked_weapon_view)
+        .map(|view| view.entity_num);
+    let player_view = identities.get(fire.entity).ok().is_some_and(|identity| {
+        gate.skip_self_fpv(identity.number()) || gunner == Some(i32::from(identity.number()))
+    });
     let last_shot = is_weapon_fire_last_shot_event(fire.event.event);
     let alias = identities.get(fire.entity).ok().and_then(|_| {
         let weapons = weapons.as_ref()?;
@@ -2422,7 +2428,13 @@ fn drain_weapon_fire_fx(
                 .and_then(|weapon| weapon.event_facts())
                 .is_some_and(|facts| facts.hides_fire_ping())
         });
-        if fire.event.payload.number != local_number && !player_view && !hide_fire_ping {
+        let from_player = (0..playerstate_iw4::PLAYER_CORPSE_ENTITY_BASE)
+            .contains(&fire.event.payload.number);
+        if fire.event.payload.number != local_number
+            && from_player
+            && !player_view
+            && !hide_fire_ping
+        {
             ping_bus.pings.push(WeaponFirePing {
                 number: fire.event.payload.number,
                 origin_xy: [fire.event.payload.origin[0], fire.event.payload.origin[1]],
