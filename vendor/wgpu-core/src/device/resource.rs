@@ -4738,6 +4738,13 @@ impl Device {
             shader_modules.extend(desc.fragment.map(|f| f.stage.module));
             shader_modules
         };
+        // IW4 Pocket patch (IW4L_LEAN_SHADERS): the pipeline does not keep its
+        // shader modules alive; see `pipeline::lean_shaders`.
+        let shader_modules = if pipeline::lean_shaders() {
+            ArrayVec::new()
+        } else {
+            shader_modules
+        };
 
         let pipeline = pipeline::RenderPipeline {
             raw: ManuallyDrop::new(raw),

@@ -803,6 +803,43 @@ impl Default for VertexStep {
     }
 }
 
+/// IW4 Pocket patch: `IW4L_LEAN_SHADERS` (read once; absent, empty, `0`, `false`
+/// and `off` are off, anything else is on, the game's `perf::switch` rule).
+///
+/// When on (Apple only), a render pipeline does not keep its shader modules
+/// alive, so a module's naga IR (its `Module` and `ModuleInfo` in the Metal hal
+/// module, its validation interface here) is freed as soon as the caller drops
+/// the module, instead of living as long as every pipeline built from it.
+///
+/// `RenderPipeline::_shader_modules` is only a keep-alive: nothing reads it. On
+/// Metal the pipeline state is compiled when the pipeline is created, and the
+/// hal pipeline keeps its own `MTLLibrary` per stage
+/// (`wgpu_hal::metal::PipelineStageInfo::library`) and never refers to the hal
+/// shader module again; `destroy_shader_module` only decrements a counter.
+/// Layouts derived from the shader are built during creation and held by the
+/// pipeline's layout. Compute pipelines are unchanged.
+#[cfg(all(target_vendor = "apple", feature = "std"))]
+pub(crate) fn lean_shaders() -> bool {
+    static LEAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEAN.get_or_init(|| match std::env::var("IW4L_LEAN_SHADERS") {
+        Ok(value) => {
+            let value = value.trim();
+            !(value.is_empty()
+                || value == "0"
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => false,
+    })
+}
+
+/// IW4 Pocket patch: see the Apple version. Elsewhere pipelines always keep
+/// their shader modules.
+#[cfg(not(all(target_vendor = "apple", feature = "std")))]
+pub(crate) fn lean_shaders() -> bool {
+    false
+}
+
 #[derive(Debug)]
 pub struct RenderPipeline {
     pub(crate) raw: ManuallyDrop<Box<dyn hal::DynRenderPipeline>>,

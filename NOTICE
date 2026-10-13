@@ -32,7 +32,8 @@ directory) with TWO modified files, both marked in the source: src/metal/adapter
 both off unless the app sets them).
 
 vendor/wgpu-core is wgpu-core 29.0.4 (MIT OR Apache-2.0, licences included in that
-directory), unmodified.
+directory) with TWO modified files, src/pipeline.rs and src/device/resource.rs (the
+IW4L_LEAN_SHADERS switch, marked "IW4 Pocket patch" in both).
 
 
 --------------------------------------------------------------------------------
