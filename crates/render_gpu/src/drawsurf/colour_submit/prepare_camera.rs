@@ -1718,6 +1718,15 @@ fn prepare_camera_rows(
             world_exec_ready_keys.push(item.key);
         }
         let viewmodel = is_viewmodel_colour_draw(&item.kind, item.key);
+        // The view weapon and the effects bolted to it wait until all their
+        // pipelines are ready and then draw after the rest of their pass, the
+        // nearest things last. A distortion effect on it (the AA-12's muzzle
+        // ring) stays in its sort place instead, as in MW2: it draws the
+        // picture saved before the effects, so drawn last it painted over the
+        // smoke and sparks drawn since and showed the scene without them.
+        let held_viewmodel = viewmodel
+            && !(matches!(item.kind, RetainedDrawKind::CodeMesh { .. })
+                && execution_binds_code_texture(execution, super::CODE_TEXTURE_RESOLVED_POST_SUN));
         let binds_sun_shadow =
             execution_binds_code_texture(execution, super::CODE_TEXTURE_SHADOWMAP_SUN);
         let binds_spot_shadow =
@@ -1763,7 +1772,7 @@ fn prepare_camera_rows(
             }
             continue;
         }
-        let dest = if viewmodel {
+        let dest = if held_viewmodel {
             &mut pending_viewmodel_prepared
         } else {
             &mut prepared
@@ -1853,7 +1862,7 @@ fn prepare_camera_rows(
                         continue;
                     }
                 }
-                if viewmodel {
+                if held_viewmodel {
                     pending_viewmodel_keys.push(item.key);
                 } else {
                     ready_draws = ready_draws.saturating_add(1);
@@ -1937,7 +1946,7 @@ fn prepare_camera_rows(
                         .unwrap_or_else(|| format!("ord{ordinal}"));
                     *bind_smodel_mats.entry(name).or_default() += 1;
                 }
-                if viewmodel && matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
+                if held_viewmodel && matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
                     viewmodel_pipeline_gap = true;
                 }
                 if matches!(item.kind, RetainedDrawKind::MarkMesh { .. }) {
