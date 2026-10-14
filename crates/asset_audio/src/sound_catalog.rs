@@ -102,6 +102,12 @@ pub struct SoundCatalog {
     revision: u64,
     playback: Vec<Vec<crate::AliasPlaybackPolicy>>,
     selection_weights: Vec<Vec<f32>>,
+
+    /// `(material, picture)` for this zone's 2D materials whose picture has
+    /// another name. A localized zone is walked only for its sounds, so this
+    /// is where its HUD icons' pictures are known (Capture the Flag's
+    /// `waypoint_capture_flag` draws `waypoint_grab_red`).
+    pub material_pictures: Vec<(String, String)>,
 }
 
 impl SoundCatalog {

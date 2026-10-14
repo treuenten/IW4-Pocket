@@ -13,7 +13,8 @@ pub mod material_draw;
 pub mod material_images;
 mod ui_material_images;
 pub use ui_material_images::{
-    retain_ui_material_images, retain_ui_preview_fallback, ui_material_image, ui_preview_fallback,
+    retain_ui_material_images, retain_ui_material_picture, retain_ui_preview_fallback,
+    ui_material_image, ui_preview_fallback,
 };
 pub mod t5_code_remap;
 pub mod t5_tech_map;

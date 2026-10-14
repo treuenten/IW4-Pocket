@@ -177,6 +177,11 @@ fn start_match_load(
                                 .expect("prepared map family"),
                             map,
                         );
+                        for (namespace, material, picture) in &bank.material_pictures {
+                            asset_material::retain_ui_material_picture(
+                                *namespace, material, picture,
+                            );
+                        }
                         prepared.sound_gaps = bank.gaps.len();
                         prepared.script_sound_aliases = Some(bank.catalog.script_alias_looping());
                         Ok(bank.catalog)

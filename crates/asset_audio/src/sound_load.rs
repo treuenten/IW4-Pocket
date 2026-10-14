@@ -1,9 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use fastfile_iw4::{
-    AssetLinkSink, AssetSink, AssetType, Ptr, ScriptStrings, ZoneStream, load_asset_at_observed,
-    load_zone,
+    AssetLinkSink, AssetSink, AssetType, Ptr, ScriptStrings, ZoneStream, block_is_aliasable,
+    load_asset_at_observed, load_zone,
 };
 
 use crate::discover::{GamesRoot, find_runtime_zone, find_zone_file, find_zone_file_version};
@@ -16,6 +18,86 @@ struct SoundSink {
     catalog: SoundCatalog,
     walked: usize,
     stopped_at: Option<(usize, &'static str)>,
+    pictures: MaterialPictures,
+}
+
+/// Which picture each material of the walked zone draws: only the name, for
+/// the HUD (see `SoundCatalog::material_pictures`).
+#[derive(Default)]
+struct MaterialPictures {
+    /// Image name by the slot it was loaded into, or the slot it repeats.
+    images: HashMap<Ptr, Result<String, Ptr>>,
+    found: Vec<(String, String)>,
+}
+
+impl MaterialPictures {
+    fn bind(&mut self, slot: Ptr, link: Result<String, Ptr>) {
+        if block_is_aliasable(slot.block) {
+            self.images.insert(slot, link);
+        }
+    }
+
+    fn image_at(&self, mut slot: Ptr) -> Option<&str> {
+        for _ in 0..32 {
+            match self.images.get(&slot)? {
+                Ok(name) => return Some(name),
+                Err(target) => slot = *target,
+            }
+        }
+        None
+    }
+
+    fn loaded(&mut self, s: &ZoneStream<'_>, ty: AssetType, slot: Ptr, insert: Option<Ptr>) {
+        match ty {
+            AssetType::Image => {
+                let Some(name) = s
+                    .latest_image()
+                    .and_then(|image| image.name)
+                    .and_then(|name| s.cstr(name).ok())
+                    .map(|name| name.trim_start_matches(',').to_owned())
+                else {
+                    return;
+                };
+                self.bind(slot, Ok(name.clone()));
+                if let Some(insert) = insert {
+                    self.bind(insert, Ok(name));
+                }
+            }
+            AssetType::Material => {
+                const TS_2D: u8 = 0;
+                const TS_COLOR_MAP: u8 = 2;
+                let Some(material) = s.latest_material() else {
+                    return;
+                };
+                let Some(name) = material.name.and_then(|name| s.cstr(name).ok()) else {
+                    return;
+                };
+                if name.starts_with(',') {
+                    return;
+                }
+                let Some(table) = material.textures else {
+                    return;
+                };
+                let picture = |wanted: u8| {
+                    (0..material.texture_count).find_map(|i| {
+                        let texture = table.at(i * material.texture_stride);
+                        (s.u8_at(texture, 7).ok()? == wanted)
+                            .then(|| self.image_at(texture.at(8)))
+                            .flatten()
+                    })
+                };
+                let picture = picture(TS_2D)
+                    .or_else(|| picture(TS_COLOR_MAP))
+                    .map(str::to_owned);
+                if let Some(picture) = picture
+                    && !picture.eq_ignore_ascii_case(name)
+                {
+                    self.found.push((name.to_owned(), picture));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl AssetSink for SoundSink {
@@ -44,10 +126,14 @@ impl AssetLinkSink for SoundSink {
         slot: Ptr,
         insert_slot: Option<Ptr>,
     ) -> fastfile_iw4::Result<()> {
+        self.pictures.loaded(s, ty, slot, insert_slot);
         self.catalog.loaded(s, ty, slot, insert_slot)
     }
 
     fn alias(&mut self, ty: AssetType, slot: Ptr, target: Ptr) -> fastfile_iw4::Result<()> {
+        if ty == AssetType::Image {
+            self.pictures.bind(slot, Err(target));
+        }
         self.catalog.alias(ty, slot, target)
     }
 
@@ -108,6 +194,7 @@ pub fn load_sound_catalog(path: &Path) -> Result<SoundCatalog, String> {
         catalog: SoundCatalog::default(),
         walked: 0,
         stopped_at: None,
+        pictures: MaterialPictures::default(),
     };
     sink.catalog
         .set_capture_zone(crate::ZoneOwner::from_zone_path(path));
@@ -121,6 +208,22 @@ pub fn load_sound_catalog(path: &Path) -> Result<SoundCatalog, String> {
     sink.catalog.resolve_curve_knots();
     sink.catalog.resolve_ent_channels();
     sink.catalog.publish();
+    if !sink.pictures.found.is_empty() {
+        diag::info!(
+            Zone,
+            "material pictures: {} in {}: {}",
+            sink.pictures.found.len(),
+            path.display(),
+            sink.pictures
+                .found
+                .iter()
+                .take(8)
+                .map(|(material, picture)| format!("{material}->{picture}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    sink.catalog.material_pictures = sink.pictures.found;
     Ok(sink.catalog)
 }
 
@@ -136,6 +239,9 @@ pub struct SoundZoneGap {
 pub struct LoadedSoundBank {
     pub catalog: SoundCatalog,
     pub gaps: Vec<SoundZoneGap>,
+    /// `(namespace, material, picture)` from the shared zones' walks; see
+    /// `SoundCatalog::material_pictures`.
+    pub material_pictures: Vec<(AssetNamespace, String, String)>,
 }
 
 fn namespace_of_game(game: ZoneGame) -> AssetNamespace {
@@ -239,6 +345,7 @@ pub struct SoundSources {
     before_map: SoundCatalog,
     after_map: Vec<(SoundSource, Arc<SoundCatalog>)>,
     gaps: Vec<SoundZoneGap>,
+    material_pictures: Vec<(AssetNamespace, String, String)>,
 }
 
 fn origin_label(origin: ZoneSoundOrigin) -> String {
@@ -254,6 +361,7 @@ pub fn gather_sound_sources(games: &GamesRoot, map: &Path) -> SoundSources {
         before_map: SoundCatalog::default(),
         after_map: Vec::new(),
         gaps: Vec::new(),
+        material_pictures: Vec::new(),
     };
     for source in before {
         if let Some(catalog) = sources.take(&source) {
@@ -297,6 +405,10 @@ impl SoundSources {
                     catalog.sounds.len(),
                     catalog.loaded.len()
                 );
+                self.material_pictures
+                    .extend(catalog.material_pictures.iter().map(|(material, picture)| {
+                        (source.namespace, material.clone(), picture.clone())
+                    }));
                 Some(catalog)
             }
             Err(error) => {
@@ -325,10 +437,12 @@ pub fn compose_sound_bank(
         before_map,
         after_map,
         gaps,
+        material_pictures,
     } = sources;
     let mut bank = LoadedSoundBank {
         catalog: before_map,
         gaps,
+        material_pictures,
     };
     match map {
         Ok(map) => {
