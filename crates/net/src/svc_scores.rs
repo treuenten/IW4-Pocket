@@ -64,7 +64,7 @@ pub fn format_scoreboard_cmd(
     for (id, meta) in clients.iter().take(n) {
         entries.push_str(&format!(
             " {} {} {} {} {} {} {} {}",
-            id.0, meta.score, 0, meta.deaths, 0, meta.kills, 0, 0
+            id.0, meta.score, 0, meta.deaths, 0, meta.kills, meta.assists, 0
         ));
     }
     format!("b {n} {team_axis} {team_allies} {score_limit}{entries}")

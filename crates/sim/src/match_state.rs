@@ -123,6 +123,7 @@ pub struct ClientMatchState {
     pub kills: i32,
     pub deaths: i32,
     pub score: i32,
+    pub assists: i32,
     pub kill_streak: i32,
     pub radar: RadarMode,
     pub radar_blocked: bool,
@@ -229,6 +230,7 @@ impl ClientMatchState {
             score: self.score,
             kills: self.kills,
             deaths: self.deaths,
+            assists: self.assists,
             kill_streak: self.kill_streak,
             radar: self.radar,
             radar_blocked: self.radar_blocked,
@@ -288,6 +290,7 @@ impl ClientMatchState {
         self.score = meta.score;
         self.kills = meta.kills;
         self.deaths = meta.deaths;
+        self.assists = meta.assists;
         self.kill_streak = meta.kill_streak;
         self.radar = meta.radar;
         self.radar_blocked = meta.radar_blocked;

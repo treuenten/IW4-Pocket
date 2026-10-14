@@ -1459,6 +1459,8 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         score,
         kills,
         deaths,
+        // Not on the wire: the `b` scores command carries every client's assists.
+        assists: 0,
         kill_streak,
         radar,
         radar_blocked,

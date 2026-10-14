@@ -1390,6 +1390,7 @@ pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<V
         "score" => Value::Int(meta?.score),
         "kills" => Value::Int(meta?.kills),
         "deaths" => Value::Int(meta?.deaths),
+        "assists" => Value::Int(meta?.assists),
         "sessionteam" => Value::string(team_name(meta?.client_state_team)),
         _ => return None,
     })
@@ -1503,7 +1504,7 @@ pub(crate) fn store_field(
                 ps.health = ps.health.min(n);
             }
         }
-        "score" | "kills" | "deaths" => {
+        "score" | "kills" | "deaths" | "assists" => {
             let n = int(value)?;
             let mut frame = FrameWorld::from_world(world);
             if frame.client_meta(id).is_some() {
@@ -1511,6 +1512,7 @@ pub(crate) fn store_field(
                 match name {
                     "score" => meta.score = n,
                     "kills" => meta.kills = n,
+                    "assists" => meta.assists = n,
                     _ => meta.deaths = n,
                 }
             }
