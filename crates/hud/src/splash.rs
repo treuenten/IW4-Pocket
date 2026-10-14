@@ -154,6 +154,12 @@ impl ExprHost for SplashExprHost<'_> {
             .ok_or(ExprError::Host("no local player data"))?
             .read(path)
     }
+    // The pro-perk pop-up (perk_challenge) shows "perk -> pro perk" icons only once
+    // the pro perk is unlocked. It opens right after the challenge that unlocks it,
+    // and the menu host treats every item as unlocked too.
+    fn is_item_unlocked(&self, _item: &str) -> Result<i32, ExprError> {
+        Ok(1)
+    }
     fn milliseconds(&self) -> i32 {
         self.ms
     }
