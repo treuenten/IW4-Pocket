@@ -177,10 +177,31 @@ fn grenade_fuse_due(now_ms: i32, detonate_at_ms: Option<i32>, live: bool) -> boo
 
 pub(crate) const AIRDROP_MARKER_WEAPON: &str = "airdrop_marker_mp";
 
-// The airdrop marker's fuse would otherwise pop the flare midair on a steep throw.
+/// The care package markers, as `_airdrop.gsc` isAirdropMarker lists them. The
+/// sentry and emergency airdrop markers share `airdrop_marker_mp`'s weapon def.
+const AIRDROP_MARKER_WEAPONS: [&str; 3] = [
+    AIRDROP_MARKER_WEAPON,
+    "airdrop_mega_marker_mp",
+    "airdrop_sentry_marker_mp",
+];
+
+// A smoke grenade goes off only while it touches the ground (MW2 checks its ground
+// entity when the fuse runs out, and waits otherwise). The care package markers wait
+// the same way, else their smoke would pop in mid-air on a steep or long throw.
 fn waits_for_ground(world: &FrameWorld, facts: &EquipmentRuntimeFacts, weapon: u32) -> bool {
     facts.offhand_class == OFFHAND_CLASS_SMOKE
-        || world.weapon_script_name(weapon) == AIRDROP_MARKER_WEAPON
+        || AIRDROP_MARKER_WEAPONS.contains(&world.weapon_script_name(weapon))
+}
+
+/// Where a grenade that waits for the ground goes off this tick: at a contact with
+/// a floor (anything but a player, facing up), which is the ground it touches now.
+fn floor_contact(
+    hit: Option<([f32; 3], [f32; 3], Option<ColliderId>, f32)>,
+) -> Option<([f32; 3], [f32; 3])> {
+    hit.filter(|(_, normal, collider, _)| {
+        normal[2] > 0.7 && !matches!(collider, Some(ColliderId::Player { .. }))
+    })
+    .map(|(end, normal, _, _)| (end, normal))
 }
 
 fn grenade_deadlines(
@@ -839,12 +860,25 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         contact_time = prev.saturating_add(((eval_time - prev) as f32 * fraction) as i32);
     }
     let mut fuse_due = grenade_fuse_due(time, projectile.detonate_at_ms, projectile.live);
-    if fuse_due && !projectile.grounded && waits_for_ground(world, &facts, projectile.weapon) {
-        fuse_due = false;
-        projectile.detonate_at_ms = Some(time.saturating_add(crate::MATCH_TICK_MS as i32));
+    // A grenade that waits for the ground goes off at a floor contact (its bounce
+    // point), not wherever it is in the air when the fuse runs out: having touched
+    // the floor once before does not count, as it may be high on a rebound by now.
+    // `grounded` is set only by a script detonate or a payload stuck to a floor.
+    let mut fuse_on_floor = None;
+    if fuse_due
+        && !projectile.grounded
+        && projectile.pos.tr_type != TR_STATIONARY
+        && waits_for_ground(world, &facts, projectile.weapon)
+    {
+        fuse_on_floor = floor_contact(hit);
+        if fuse_on_floor.is_none() {
+            fuse_due = false;
+            projectile.detonate_at_ms = Some(time.saturating_add(crate::MATCH_TICK_MS as i32));
+        }
     }
     let cleanup_due = time >= projectile.cleanup_at_ms;
     let contact_before_fuse = hit.is_some()
+        && fuse_on_floor.is_none()
         && !(projectile.pos.tr_type == TR_STATIONARY && fuse_due)
         && projectile
             .detonate_at_ms
@@ -870,13 +904,20 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             return;
         }
         TickOutcome::Fuse => {
-            let fuse_time = projectile.detonate_at_ms.unwrap_or(eval_time);
-            projectile.origin = projectile.origin_at(fuse_time);
-            projectile.velocity = projectile.velocity_at(fuse_time);
+            let normal = if let Some((floor, normal)) = fuse_on_floor {
+                projectile.origin = floor;
+                projectile.velocity = projectile.velocity_at(contact_time);
+                normal
+            } else {
+                let fuse_time = projectile.detonate_at_ms.unwrap_or(eval_time);
+                projectile.origin = projectile.origin_at(fuse_time);
+                projectile.velocity = projectile.velocity_at(fuse_time);
+                [0.0, 0.0, 1.0]
+            };
             pending_detonation = Some(PendingDetonation {
                 projectile,
                 origin: projectile.origin,
-                normal: [0.0, 0.0, 1.0],
+                normal,
                 surf_type: 0,
                 geometry: ProjectileHitGeometry::Fuse,
                 terminal: None,
@@ -1711,7 +1752,6 @@ fn bounce_missile(
     let time = level_time_ms(tick);
     let prev = time.saturating_sub(crate::MATCH_TICK_MS as i32);
     let hit_time = prev.saturating_add(((time - prev) as f32 * fraction) as i32);
-    projectile.grounded |= normal[2] > 0.7;
     projectile.velocity = projectile.velocity_at(hit_time);
     let incoming = projectile.velocity;
     let facts = required_projectile_facts(world, projectile.weapon);
@@ -1810,4 +1850,58 @@ fn entity_collision_epoch(
     rows.iter()
         .find(|row| row.owner == owner)
         .map(|row| row.epoch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORLD: ColliderId = ColliderId::World {
+        surface_flags: 0,
+        contents: 1,
+        glass_encoded: 0,
+    };
+
+    #[test]
+    fn a_grenade_waiting_for_the_ground_goes_off_at_a_floor_bounce() {
+        let floor = Some(([10.0, 20.0, 0.25], [0.0, 0.0, 1.0], Some(WORLD), 0.4));
+        assert_eq!(
+            floor_contact(floor),
+            Some(([10.0, 20.0, 0.25], [0.0, 0.0, 1.0]))
+        );
+        // A gentle slope is still ground.
+        let slope = Some(([0.0; 3], [0.0, 0.6, 0.8], Some(WORLD), 0.4));
+        assert!(floor_contact(slope).is_some());
+    }
+
+    #[test]
+    fn walls_players_and_open_air_are_not_ground() {
+        assert_eq!(floor_contact(None), None);
+        let wall = Some(([0.0; 3], [1.0, 0.0, 0.0], Some(WORLD), 0.4));
+        assert_eq!(floor_contact(wall), None);
+        let ceiling = Some(([0.0; 3], [0.0, 0.0, -1.0], Some(WORLD), 0.4));
+        assert_eq!(floor_contact(ceiling), None);
+        let head = Some((
+            [0.0; 3],
+            [0.0, 0.0, 1.0],
+            Some(ColliderId::Player {
+                client: ClientId(1),
+                life: crate::LifeSequence(1),
+                hitloc: 0,
+            }),
+            0.4,
+        ));
+        assert_eq!(floor_contact(head), None);
+    }
+
+    #[test]
+    fn every_care_package_marker_waits_for_the_ground() {
+        for name in [
+            "airdrop_marker_mp",
+            "airdrop_mega_marker_mp",
+            "airdrop_sentry_marker_mp",
+        ] {
+            assert!(AIRDROP_MARKER_WEAPONS.contains(&name), "{name}");
+        }
+    }
 }
