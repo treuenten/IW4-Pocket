@@ -336,7 +336,7 @@ pub fn spawn_pending_fpv(
     let left = view.left.clone().map(ViewmodelController::new);
     diag::info!(
         Fpv,
-        "fpv: viewmodel controller `{}` — {} clips{}, fireTime={}ms raiseTime={}ms (action from weapAnim)",
+        "fpv: viewmodel controller `{}` — {} clips{}, fireTime={}ms holdFireTime={}ms raiseTime={}ms (action from weapAnim)",
         view.right.name,
         view.right.resolved_count(),
         view.left
@@ -344,6 +344,7 @@ pub fn spawn_pending_fpv(
             .map(|left| format!(" R, {} clips L (dual DObj)", left.resolved_count()))
             .unwrap_or_else(String::new),
         view.right.fire_time_ms,
+        view.right.hold_fire_time_ms,
         view.right.raise_time_ms,
     );
     let idle_kind = match view.idle_name.as_deref() {
