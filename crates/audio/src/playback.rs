@@ -55,6 +55,7 @@ impl Plugin for PlayerSoundPlugin {
             .init_resource::<crate::ambient::MapSources>()
             .init_resource::<crate::script_ambient::ScriptAmbientPlayback>()
             .init_resource::<crate::destructible_loops::DestructibleSources>()
+            .init_resource::<crate::projectile_loops::ProjectileLoopSources>()
             .init_resource::<crate::ambient::SoundBankLoadAttempted>()
             .init_resource::<crate::ambient::ResidentSoundBank>()
             .init_resource::<crate::BobCycleTracker>()
@@ -96,6 +97,7 @@ impl Plugin for PlayerSoundPlugin {
                     play_bound_weapon_sounds.after(collect_cue_decisions),
                     play_land_sound_messages,
                     crate::destructible_loops::update,
+                    crate::projectile_loops::update,
                 )
                     .in_set(ClientSet::Effects),
             )
