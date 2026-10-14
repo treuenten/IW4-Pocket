@@ -260,6 +260,10 @@ impl ViewmodelController {
                 WeaponState::Firing,
                 positive_ms(self.weapon.hold_fire_time_ms),
             ),
+            WeaponAnimSlot::Detonate => (
+                WeaponState::Firing,
+                positive_ms(self.weapon.detonate_time_ms),
+            ),
             WeaponAnimSlot::FirstRaise => (
                 WeaponState::Raising {
                     first: true,
@@ -673,6 +677,23 @@ mod slot_timer_tests {
         assert_eq!(
             controller.state_and_timer_for_slot(WeaponAnimSlot::HoldFire),
             (WeaponState::Firing, None)
+        );
+    }
+
+    #[test]
+    fn detonate_is_a_dispatchable_native_slot() {
+        let index = asset_iw4::size::weap_anim::DETONATE;
+        assert_eq!(
+            WeaponAnimSlot::from_index(index),
+            Some(WeaponAnimSlot::Detonate)
+        );
+        assert!(slot_uses_native_rate(index));
+        assert!(dispatch_slots().any(|slot| slot == index));
+        let mut c4 = WeaponAnimations::empty("c4");
+        c4.detonate_time_ms = 500;
+        assert_eq!(
+            ViewmodelController::new(c4).state_and_timer_for_slot(WeaponAnimSlot::Detonate),
+            (WeaponState::Firing, Some(500))
         );
     }
 }
