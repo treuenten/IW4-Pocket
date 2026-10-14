@@ -164,8 +164,8 @@ pub fn weapon_model_attachment(model: &str) -> Option<u32> {
 }
 pub use world::{
     ClientId, HitvolDumpRow, PendingLocalSound, PendingPlayerCardEvent, PendingPlayerCardKind,
-    PendingPrint, PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels, SimClipMesh,
-    SimStaticModel, SimTriggerHull, Tick, blank_player_state,
+    PendingPrint, PlayerKitCollision, SensorScene, SimBrush, SimClipBsp, SimClipCmodels,
+    SimClipMesh, SimStaticModel, SimTriggerHull, Tick, blank_player_state,
 };
 pub use world_objects::{
     DestructibleLoopSound, GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP,

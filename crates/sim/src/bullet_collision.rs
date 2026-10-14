@@ -817,16 +817,20 @@ impl EntityCollisionCapabilities {
         start: [f32; 3],
         end: [f32; 3],
     ) -> bool {
+        ray_may_hit_bounds(self.trace_bounds(cmodels), start, end)
+    }
+
+    /// The world bounds `ray_may_hit` tests a ray against; none when the row
+    /// is not solid or has no collision.
+    pub(crate) fn trace_bounds(&self, cmodels: &SimClipCmodels) -> Option<([f32; 3], [f32; 3])> {
         if !self.solid {
-            return false;
+            return None;
         }
         let collision = self
             .dobj
             .as_ref()
             .and_then(|state| state.current_collision.as_ref());
-        entity_abs_aabb(&self.linked_brushes, collision, cmodels).is_some_and(|(mins, maxs)| {
-            !matches!(ray_aabb_box(start, end, mins, maxs), RayAabb::Miss)
-        })
+        entity_abs_aabb(&self.linked_brushes, collision, cmodels)
     }
 
     pub fn trace_geom(&self) -> EntityCollisionTraceGeom {
@@ -2597,6 +2601,16 @@ fn geom_abs_aabb(
     cmodels: &SimClipCmodels,
 ) -> Option<([f32; 3], [f32; 3])> {
     entity_abs_aabb(&geom.linked_brushes, geom.collision.as_ref(), cmodels)
+}
+
+/// The `ray_may_hit` test on bounds worked out beforehand.
+pub(crate) fn ray_may_hit_bounds(
+    bounds: Option<([f32; 3], [f32; 3])>,
+    start: [f32; 3],
+    end: [f32; 3],
+) -> bool {
+    bounds
+        .is_some_and(|(mins, maxs)| !matches!(ray_aabb_box(start, end, mins, maxs), RayAabb::Miss))
 }
 
 fn entity_abs_aabb(

@@ -358,6 +358,17 @@ impl<W: WorldQuery> WorldQuery for Budgeted<'_, W> {
     }
 }
 
+fn sensor_query(start: [f32; 3], end: [f32; 3], mask: u32, ignore: ClientId) -> BulletTraceQuery {
+    BulletTraceQuery {
+        start,
+        end,
+        mask,
+        ignore: Some(ignore),
+        ignore_hit: None,
+        ignore_model: None,
+    }
+}
+
 impl WorldQuery for SimWorld {
     fn sight_ray(
         &mut self,
@@ -365,14 +376,9 @@ impl WorldQuery for SimWorld {
         end: [f32; 3],
         ignore: ClientId,
     ) -> QueryResult<SightSample> {
-        Ok(classify_shot(self.sensor_trace(BulletTraceQuery {
-            start,
-            end,
-            mask: MASK_SIGHT,
-            ignore: Some(ignore),
-            ignore_hit: None,
-            ignore_model: None,
-        })))
+        Ok(classify_shot(self.sensor_trace(sensor_query(
+            start, end, MASK_SIGHT, ignore,
+        ))))
     }
 
     fn shot_ray(
@@ -381,14 +387,9 @@ impl WorldQuery for SimWorld {
         end: [f32; 3],
         ignore: ClientId,
     ) -> QueryResult<SightSample> {
-        Ok(classify_shot(self.sensor_trace(BulletTraceQuery {
-            start,
-            end,
-            mask: MASK_SHOT,
-            ignore: Some(ignore),
-            ignore_hit: None,
-            ignore_model: None,
-        })))
+        Ok(classify_shot(
+            self.sensor_trace(sensor_query(start, end, MASK_SHOT, ignore)),
+        ))
     }
 
     fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
@@ -423,6 +424,74 @@ impl WorldQuery for SimWorld {
             reload_time_ms: facts.reload_time_ms,
             reload_empty_time_ms: facts.reload_empty_time_ms,
         })
+    }
+}
+
+/// `SimWorld` for one think of all the bots. Nothing in the world moves
+/// while they think, so the bounds of the entity collision rows that every
+/// sight and shot ray tests are worked out once, on the first ray
+/// (`SimWorld::sensor_scene`), instead of in each of the hundred-odd rays a
+/// think casts. Every answer is the one `SimWorld` itself gives.
+pub(crate) struct ThinkWorld<'a> {
+    world: &'a SimWorld,
+    scene: Option<sim::SensorScene>,
+}
+
+impl<'a> ThinkWorld<'a> {
+    pub(crate) fn new(world: &'a SimWorld) -> Self {
+        Self { world, scene: None }
+    }
+
+    fn sensor_trace(&mut self, query: BulletTraceQuery) -> TraceOutcome {
+        let world = self.world;
+        let scene = self.scene.get_or_insert_with(|| world.sensor_scene());
+        world.sensor_trace_in(scene, query)
+    }
+}
+
+impl WorldQuery for ThinkWorld<'_> {
+    fn sight_ray(
+        &mut self,
+        start: [f32; 3],
+        end: [f32; 3],
+        ignore: ClientId,
+    ) -> QueryResult<SightSample> {
+        Ok(classify_shot(self.sensor_trace(sensor_query(
+            start, end, MASK_SIGHT, ignore,
+        ))))
+    }
+
+    fn shot_ray(
+        &mut self,
+        start: [f32; 3],
+        end: [f32; 3],
+        ignore: ClientId,
+    ) -> QueryResult<SightSample> {
+        Ok(classify_shot(
+            self.sensor_trace(sensor_query(start, end, MASK_SHOT, ignore)),
+        ))
+    }
+
+    fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
+        Ok(crate::nav::BakeTraces::bake_hull(self.world, start, end))
+    }
+
+    fn navigation_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
+        Ok(crate::nav::BakeTraces::bake_navigation(
+            self.world, start, end,
+        ))
+    }
+
+    fn objective_contains(&self, obj: ModeObjective, feet: [f32; 3]) -> bool {
+        WorldQuery::objective_contains(self.world, obj, feet)
+    }
+
+    fn weapon_class(&self, weapon: u16) -> WeaponClass {
+        WorldQuery::weapon_class(self.world, weapon)
+    }
+
+    fn weapon_facts(&self, weapon: u16) -> Option<WeaponFacts> {
+        WorldQuery::weapon_facts(self.world, weapon)
     }
 }
 
