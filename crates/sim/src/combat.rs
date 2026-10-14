@@ -1173,11 +1173,17 @@ fn segment_is_shield(collider: Option<ColliderId>) -> bool {
     )
 }
 
+/// `just_recorded`: the caller recorded the collision history for `tick`
+/// right before and changed nothing since, so the first emission's current
+/// poses are that record's. Later emissions pose again: an earlier one may
+/// have killed or moved somebody.
 pub(crate) fn phase_trace(
     world: &mut FrameWorld,
     tick: Tick,
     emissions: &[Emission],
+    just_recorded: bool,
 ) -> TracePhaseOutput {
+    let mut recorded = just_recorded;
     let mut output = TracePhaseOutput::default();
     let mut segment_ordinals = HashMap::<(ShotId, PelletId), u16>::new();
     let mut models_damaged = ModelsDamaged::default();
@@ -1187,7 +1193,11 @@ pub(crate) fn phase_trace(
         let Some(facts) = world.combat_facts_for(em.weapon) else {
             continue;
         };
-        let query = world.lagcomp_query_for(em.attacker, tick);
+        let query = if std::mem::take(&mut recorded) {
+            world.lagcomp_query_after_record(em.attacker, tick)
+        } else {
+            world.lagcomp_query_for(em.attacker, tick)
+        };
         let end = [
             em.origin[0] + em.direction[0] * em.max_range,
             em.origin[1] + em.direction[1] * em.max_range,

@@ -936,7 +936,10 @@ fn fanout_loopback(
         .configuration_changes
         .push_journal(&tick.snapshot.meta.journal);
 
-    let mut listen_snapshot = tick.snapshot.clone();
+    // The local viewer gets its seat's copy of the snapshot; without one the
+    // live snapshot is only read, so it is borrowed rather than cloned (a full
+    // snapshot clone that was thrown away every tick).
+    let mut listen_snapshot = std::borrow::Cow::Borrowed(&tick.snapshot);
     let mut seat_applied = 0i32;
     if let Some(local) = queues.local.as_ref() {
         let (out, sample) = crate::policy::seat::snapshot_and_sample_for_viewer(
@@ -946,7 +949,7 @@ fn fanout_loopback(
             local.0,
             clock.time_ms,
         );
-        listen_snapshot = out;
+        listen_snapshot = std::borrow::Cow::Owned(out);
         if let Some(sample) = sample {
             seat_applied = 1;
             let session = seats.get(local.0);
@@ -1062,7 +1065,7 @@ fn fanout_loopback(
             .map(|id| queues.pending_gamenotify.take_for(id.0))
             .unwrap_or_default();
         if let Err(e) = loopback.send_tick(
-            &listen_snapshot,
+            listen_snapshot,
             acks.clone(),
             svc,
             svc_scores,

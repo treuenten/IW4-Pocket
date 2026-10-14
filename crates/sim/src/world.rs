@@ -1598,9 +1598,37 @@ impl SimState {
         current: Tick,
         player: impl Fn(ClientId) -> Option<PlayerState>,
     ) -> crate::bullet_collision::LagcompQuery {
+        self.lagcomp_query_with(attacker, current, player, None)
+    }
+
+    /// `lagcomp_query_for` with nothing changed since `record_collision_history`
+    /// recorded `current`: the current poses are the ones it just posed, so
+    /// they are copied from that frame instead of posed a second time.
+    pub(crate) fn lagcomp_query_after_record(
+        &self,
+        attacker: ClientId,
+        current: Tick,
+        player: impl Fn(ClientId) -> Option<PlayerState>,
+    ) -> crate::bullet_collision::LagcompQuery {
+        let recorded = self
+            .collision_runtime
+            .players
+            .latest_poses()
+            .filter(|(tick, _)| *tick == current)
+            .map(|(_, poses)| poses);
+        self.lagcomp_query_with(attacker, current, player, recorded)
+    }
+
+    fn lagcomp_query_with(
+        &self,
+        attacker: ClientId,
+        current: Tick,
+        player: impl Fn(ClientId) -> Option<PlayerState>,
+        recorded: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
+    ) -> crate::bullet_collision::LagcompQuery {
         let plan = self.lagcomp_plan(attacker, current);
         crate::bullet_collision::LagcompQuery {
-            players: self.lagcomp_players(current, plan, player),
+            players: self.lagcomp_players(current, plan, player, recorded),
             entities: self.lagcomp_entities(current, plan),
         }
     }
@@ -1610,12 +1638,13 @@ impl SimState {
         current: Tick,
         plan: LagcompPlan,
         player: impl Fn(ClientId) -> Option<PlayerState>,
+        recorded: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
     ) -> crate::bullet_collision::HistorySample {
         use crate::bullet_collision::{HistoryClampReason, HistorySample, HistorySampleVerdict};
 
         match plan {
             LagcompPlan::CurrentAuthority { reason } => HistorySample {
-                poses: self.alive_collision_poses(player),
+                poses: recorded.map_or_else(|| self.alive_collision_poses(player), <[_]>::to_vec),
                 verdict: HistorySampleVerdict::CurrentAuthority {
                     tick: current,
                     reason,
@@ -2177,6 +2206,53 @@ impl SimState {
             })
             .map(EntityCollisionCapabilities::trace_geom)
             .collect();
+        self.bullet_trace_geoms(query, poses, &geoms)
+    }
+
+    /// The bounds of every entity collision row as `ray_may_hit` works them
+    /// out, for a run of sensor traces over a world nothing changes in between
+    /// (the bots' think). Working them out once instead of in every trace is
+    /// the only difference from `sensor_trace`.
+    pub fn sensor_scene(&self) -> SensorScene {
+        SensorScene {
+            bounds: self
+                .entity_collision_capabilities
+                .iter()
+                .map(|capabilities| capabilities.trace_bounds(self.content.clip_cmodels()))
+                .collect(),
+        }
+    }
+
+    /// `sensor_trace` with the row bounds from `scene`, which must have been
+    /// made from this world as it still is.
+    pub fn sensor_trace_in(
+        &self,
+        scene: &SensorScene,
+        query: crate::bullet_collision::BulletTraceQuery,
+    ) -> crate::bullet_collision::TraceOutcome {
+        assert_eq!(
+            scene.bounds.len(),
+            self.entity_collision_capabilities.len(),
+            "sensor scene made from another world"
+        );
+        let geoms: Vec<EntityCollisionTraceGeom> = self
+            .entity_collision_capabilities
+            .iter()
+            .zip(&scene.bounds)
+            .filter(|(_, bounds)| {
+                crate::bullet_collision::ray_may_hit_bounds(**bounds, query.start, query.end)
+            })
+            .map(|(capabilities, _)| capabilities.trace_geom())
+            .collect();
+        self.bullet_trace_geoms(query, None, &geoms)
+    }
+
+    fn bullet_trace_geoms(
+        &self,
+        query: crate::bullet_collision::BulletTraceQuery,
+        poses: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
+        geoms: &[EntityCollisionTraceGeom],
+    ) -> crate::bullet_collision::TraceOutcome {
         let default = [];
         let players = poses.unwrap_or_else(|| {
             self.collision_runtime
@@ -2191,7 +2267,7 @@ impl SimState {
             self.content.clip_cmodels(),
             self.content.clip_mesh(),
             players,
-            &geoms,
+            geoms,
             &query,
             &|piece| self.world_objects.glass_is_solid(piece as u32),
         )
@@ -2349,6 +2425,34 @@ impl SimState {
         }
         self.clients.push((id, ClientMatchState::default()));
         &mut self.clients.last_mut().expect("just pushed").1
+    }
+
+    /// The part of `snapshot_with_dynamic_rows` the bots read: the tick, the
+    /// players, each client's meta as `to_snapshot_meta` makes it, the mode
+    /// and the objectives. Everything else is left empty, including the
+    /// client meta's HUD banks and shield collision, which only clients read.
+    /// The bots build one every tick for their sensors; the full snapshot
+    /// poses every shield carrier and copies every HUD element and entity.
+    pub(crate) fn sensor_snapshot_with_players(
+        &self,
+        tick: Tick,
+        players: Vec<(ClientId, PlayerState)>,
+    ) -> Snapshot {
+        Snapshot {
+            tick,
+            players,
+            projectiles: Vec::new(),
+            meta: SnapshotMeta {
+                clients: self
+                    .clients
+                    .iter()
+                    .map(|(id, m)| (*id, m.to_snapshot_meta()))
+                    .collect(),
+                kind: self.bootstrap.kind,
+                objectives: self.objectives.clone(),
+                ..SnapshotMeta::default()
+            },
+        }
     }
 
     pub(crate) fn snapshot_with_dynamic_rows(
@@ -3393,4 +3497,10 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
     ps.other_flags |= playerstate_iw4::other_flags::PLAYER;
     ps.corpse_index = -1;
     ps
+}
+
+/// Entity collision row bounds for `SimState::sensor_trace_in`.
+#[derive(Clone, Debug)]
+pub struct SensorScene {
+    bounds: Vec<Option<([f32; 3], [f32; 3])>>,
 }

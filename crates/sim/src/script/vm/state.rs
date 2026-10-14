@@ -10,6 +10,9 @@ pub(crate) struct Frame {
     pub(crate) stack_base: usize,
     pub(crate) receiver: Value,
     pub(crate) locals: Vec<Value>,
+    /// Whether an `endon` ran in this call. Only then can the thread have an
+    /// endon waiter at this frame for the call's return to clear.
+    pub(crate) endons: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

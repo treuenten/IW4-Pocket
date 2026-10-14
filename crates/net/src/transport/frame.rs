@@ -388,7 +388,17 @@ pub fn frame_from_acked_tick(
     snapshot: &Snapshot,
     acks: Vec<(ClientId, CmdSeq)>,
 ) -> Frame {
-    frame_from_acked_tick_with_reliable(
+    frame_from_acked_cow_tick(coder, std::borrow::Cow::Borrowed(snapshot), acks)
+}
+
+/// `frame_from_acked_tick`; a snapshot handed over owned gives the frame its
+/// meta instead of a copy of it.
+pub fn frame_from_acked_cow_tick(
+    coder: &mut crate::SnapshotEncoder,
+    snapshot: std::borrow::Cow<'_, Snapshot>,
+    acks: Vec<(ClientId, CmdSeq)>,
+) -> Frame {
+    frame_from_cow_tick_with_reliable(
         coder,
         snapshot,
         acks,
@@ -406,15 +416,31 @@ pub fn frame_from_acked_tick_with_reliable(
     acks: Vec<(ClientId, CmdSeq)>,
     reliable: ReliablePayload,
 ) -> Frame {
+    frame_from_cow_tick_with_reliable(coder, std::borrow::Cow::Borrowed(snapshot), acks, reliable)
+}
+
+fn frame_from_cow_tick_with_reliable(
+    coder: &mut crate::SnapshotEncoder,
+    snapshot: std::borrow::Cow<'_, Snapshot>,
+    acks: Vec<(ClientId, CmdSeq)>,
+    reliable: ReliablePayload,
+) -> Frame {
     let world_objects_wire = coder
         .encode_world_objects(snapshot.tick, &snapshot.meta.world_objects)
         .to_vec();
+    let tick = snapshot.tick;
+    let state_hash = compute_state_hash(&snapshot.players);
+    let snapshot_delta = coder.encode(&snapshot);
+    let snapshot_meta = match snapshot {
+        std::borrow::Cow::Borrowed(snapshot) => snapshot.meta.clone(),
+        std::borrow::Cow::Owned(snapshot) => snapshot.meta,
+    };
     Frame {
-        tick: snapshot.tick,
-        state_hash: compute_state_hash(&snapshot.players),
+        tick,
+        state_hash,
         acks,
-        snapshot_delta: coder.encode(snapshot),
-        snapshot_meta: snapshot.meta.clone(),
+        snapshot_delta,
+        snapshot_meta,
         world_objects_wire,
         reliable,
         svc_sounds: Vec::new(),

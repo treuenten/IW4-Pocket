@@ -472,7 +472,14 @@ fn think_bots(mut p: ThinkBots) {
         return;
     }
 
-    let snapshot = p.world.0.snapshot(Tick(p.clock.tick.saturating_sub(1)));
+    // The sensors read the players, the client meta, the mode and the
+    // objectives; the rest of a full snapshot (HUD banks, shield poses,
+    // entities) was built every tick for nothing.
+    let snapshot = p
+        .world
+        .0
+        .sensor_snapshot(Tick(p.clock.tick.saturating_sub(1)));
+    let mut think_world = crate::query::ThinkWorld::new(&p.world.0);
     let fires = p.fire.drain();
     let mut budget = TraceBudget::new(TRACE_QUOTA);
     let mut astar = ASTAR_QUOTA;
@@ -521,7 +528,7 @@ fn think_bots(mut p: ThinkBots) {
                 ..playerstate_iw4::UserCmd::default()
             }
         } else if let Some(brain) = bot.brain.as_mut() {
-            let mut queried = Budgeted::new(&mut p.world.0, &mut budget);
+            let mut queried = Budgeted::new(&mut think_world, &mut budget);
             let Some(obs) =
                 sensor::observe_focused(&snapshot, bot.id, &mut queried, brain.focus_target())
             else {

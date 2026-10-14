@@ -548,6 +548,18 @@ impl FrameWorld<'_> {
         })
     }
 
+    /// `lagcomp_query_for` right after `record_collision_history`, with
+    /// nothing changed in between; see `SimState::lagcomp_query_after_record`.
+    pub(crate) fn lagcomp_query_after_record(
+        &self,
+        attacker: ClientId,
+        current: Tick,
+    ) -> crate::bullet_collision::LagcompQuery {
+        SimState::lagcomp_query_after_record(self, attacker, current, |id| {
+            player_ref(self.ecs, id).copied()
+        })
+    }
+
     pub(crate) fn alive_origins(&self) -> Vec<[f32; 3]> {
         self.client_ids_sorted()
             .into_iter()

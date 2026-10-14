@@ -55,6 +55,24 @@ pub enum WeaponClass {
     Shotgun,
 }
 
+/// Each family stem of the unique-loadout table with the group of its first
+/// row.
+fn family_groups() -> &'static std::collections::HashMap<String, crate::unique_loadout::UniqueGroup>
+{
+    static GROUPS: std::sync::OnceLock<
+        std::collections::HashMap<String, crate::unique_loadout::UniqueGroup>,
+    > = std::sync::OnceLock::new();
+    GROUPS.get_or_init(|| {
+        let mut groups = std::collections::HashMap::new();
+        for row in crate::unique_loadout::UNIQUE_WEAPONS {
+            groups
+                .entry(crate::unique_loadout::family_stem(row.key))
+                .or_insert(row.group);
+        }
+        groups
+    })
+}
+
 impl WeaponClass {
     pub fn fight_hold(self) -> f32 {
         match self {
@@ -66,7 +84,23 @@ impl WeaponClass {
         }
     }
 
+    /// The group of the first unique-loadout row in the weapon's family, as a
+    /// scan of the table in order would find it. Every bot reads this for
+    /// every weapon it carries every tick, so the table's stems are worked
+    /// out once instead of on each call.
     pub fn from_script_name(name: &str) -> Self {
+        if name.is_empty() {
+            return Self::Assault;
+        }
+        let stem = crate::unique_loadout::family_stem(name);
+        family_groups()
+            .get(stem.as_str())
+            .map_or(Self::Assault, |group| Self::from_group(*group))
+    }
+
+    /// `from_script_name` as a scan of the table; the tests hold them equal.
+    #[cfg(test)]
+    fn from_script_name_by_scan(name: &str) -> Self {
         if name.is_empty() {
             return Self::Assault;
         }
@@ -329,5 +363,42 @@ impl BotObservation {
             }
         }
         events
+    }
+}
+
+#[cfg(test)]
+mod weapon_class_tests {
+    use super::WeaponClass;
+
+    #[test]
+    fn the_family_table_answers_as_the_scan_did() {
+        let mut names = vec![
+            String::new(),
+            "riotshield_mp".to_owned(),
+            "iw4:weapon/acr_mp".to_owned(),
+            "iw5_acr_mp".to_owned(),
+            "usp45_mp".to_owned(),
+            "spas_mp".to_owned(),
+            "1887_mp".to_owned(),
+            "ak47_fmj_silencer_mp".to_owned(),
+            "frag_grenade_mp".to_owned(),
+            "no_such_weapon".to_owned(),
+            "a:b/c".to_owned(),
+        ];
+        for row in crate::unique_loadout::UNIQUE_WEAPONS {
+            let short = row.key.rsplit('/').next().unwrap();
+            names.push(row.key.to_owned());
+            names.push(short.to_owned());
+            names.push(short.trim_end_matches("_mp").to_owned());
+            names.push(format!("{}_mp", short.trim_end_matches("_mp")));
+            names.push(format!("iw5_{short}"));
+        }
+        for name in &names {
+            assert_eq!(
+                WeaponClass::from_script_name(name),
+                WeaponClass::from_script_name_by_scan(name),
+                "{name:?}"
+            );
+        }
     }
 }

@@ -347,6 +347,16 @@ impl SimWorld {
         )
     }
 
+    /// What the bots' sensors read of `snapshot(tick)`, and nothing else; see
+    /// `SimState::sensor_snapshot_with_players`.
+    pub fn sensor_snapshot(&self, tick: Tick) -> Snapshot {
+        let state = self
+            .ecs
+            .get::<SimState>(self.state_entity)
+            .expect("simulation state entity is missing its SimState component");
+        state.sensor_snapshot_with_players(tick, collect_players(&self.ecs))
+    }
+
     pub fn slow_motion(&self) -> Option<crate::ScriptSlowMotion> {
         self.ecs
             .resource::<crate::script::Runtime>()
