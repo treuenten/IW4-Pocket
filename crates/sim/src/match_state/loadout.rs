@@ -90,13 +90,13 @@ pub struct LoadoutSpec {
 
 pub const PERSONAL_CLASS_SLOTS: usize = 5;
 
-pub const CLASS_CATALOG_DEATHSTREAKS: [&str; 5] = [
+/// MW2's four deathstreaks: the ones its class script plays (Dead Man's Hand
+/// is cut content it swaps for Copycat).
+pub const CLASS_CATALOG_DEATHSTREAKS: [&str; 4] = [
     "specialty_copycat",
     "specialty_combathigh",
     "specialty_grenadepulldeath",
     "specialty_finalstand",
-    // Dead Man's Hand. Last, so the indices of the four before it are unchanged.
-    "specialty_c4death",
 ];
 
 pub use weapon_iw4::IW4_CAMOS;
