@@ -3467,6 +3467,7 @@ dependencies = [
  "playerstate_iw4",
  "render_material",
  "sim",
+ "structured_data_iw4",
  "weapon_iw4",
 ]
 

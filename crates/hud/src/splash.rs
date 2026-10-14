@@ -40,6 +40,37 @@ struct SplashExprHost<'a> {
     catalog: Option<&'a MenuCatalog>,
     localize: Option<&'a asset_game::LocalizeCatalog>,
     input: Option<&'a frame::HudInputView>,
+    player_data: Option<LocalPlayerData<'a>>,
+}
+
+/// The local player's own copy of its player data (the account snapshot the host
+/// keeps it in step with) and the schema to read it. MW2's challenge splash reads
+/// the challenge's tier from it (getPlayerData "challengeState").
+#[derive(Clone, Copy)]
+struct LocalPlayerData<'a> {
+    schemas: &'a sim::PersistentDataStore,
+    snapshot: &'a sim::AccountSnapshot,
+}
+
+impl LocalPlayerData<'_> {
+    fn read(&self, path: &[Operand]) -> Result<Operand, ExprError> {
+        use structured_data_iw4::{Key, Value};
+        let keys: Vec<Key<'_>> = path
+            .iter()
+            .map(|key| match key {
+                Operand::Str(name) => Key::Name(name),
+                other => Key::Index(hud_iw4::source_int(other)),
+            })
+            .collect();
+        match self.schemas.read_snapshot(self.snapshot, &keys) {
+            Ok(Value::Int(n)) => Ok(Operand::Int(n)),
+            Ok(Value::Bool(b)) => Ok(Operand::Int(i32::from(b))),
+            Ok(Value::Float(f)) => Ok(Operand::Float(f)),
+            Ok(Value::String(s)) => Ok(Operand::Str(s.to_owned())),
+            Ok(Value::Bytes(b)) => Ok(Operand::Str(String::from_utf8_lossy(b).into_owned())),
+            Err(_) => Err(ExprError::Host("player data path")),
+        }
+    }
 }
 
 impl SplashExprHost<'_> {
@@ -99,6 +130,30 @@ impl SplashExprHost<'_> {
 }
 
 impl ExprHost for SplashExprHost<'_> {
+    fn localize_string(&self, args: &[Operand]) -> Result<String, ExprError> {
+        let Some(Operand::Str(key)) = args.first() else {
+            return Err(ExprError::Host("locstring template"));
+        };
+        let localized = |key: &str| {
+            self.localize
+                .and_then(|table| table.text(key.trim_start_matches('@')))
+                .map(str::to_owned)
+        };
+        let template = localized(key).ok_or(ExprError::Host("locstring localization"))?;
+        let values: Vec<String> = args[1..]
+            .iter()
+            .map(|arg| match arg {
+                Operand::Str(s) => localized(s).unwrap_or_else(|| s.clone()),
+                other => hud_iw4::source_str(other),
+            })
+            .collect();
+        Ok(hud_iw4::expr::fill_insertions(&template, &values))
+    }
+    fn player_data(&self, path: &[Operand]) -> Result<Operand, ExprError> {
+        self.player_data
+            .ok_or(ExprError::Host("no local player data"))?
+            .read(path)
+    }
     fn milliseconds(&self) -> i32 {
         self.ms
     }
@@ -298,6 +353,10 @@ pub(crate) fn update_splash(
     input: Option<Res<frame::HudInputView>>,
     presented: Res<net::PresentedSnapshot>,
     local: Res<net::LocalPresentClient>,
+    own_data: (
+        Option<Res<net::LocalAccount>>,
+        Option<Res<net::ClientPredictionState>>,
+    ),
 ) {
     if !surface.is_ready() {
         return;
@@ -384,6 +443,15 @@ pub(crate) fn update_splash(
     };
 
     let material = table.cell(live.row, SPLASH_COL_MATERIAL);
+    let (account, prediction) = &own_data;
+    let player_data = account
+        .as_ref()
+        .and_then(|account| account.snapshot.as_ref())
+        .zip(prediction.as_ref())
+        .map(|(snapshot, prediction)| LocalPlayerData {
+            schemas: prediction.0.world().persistent_data(),
+            snapshot,
+        });
     let host = SplashExprHost {
         menu,
         ms: now_ms,
@@ -392,6 +460,7 @@ pub(crate) fn update_splash(
         catalog: catalog.as_deref(),
         localize: strings.as_ref().map(|s| &s.0),
         input: input.as_deref(),
+        player_data,
     };
     let lerp = item_run_script_lerp(&menu.on_open, live.start_ms);
     for command in &lerp.leftover {
