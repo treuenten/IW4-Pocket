@@ -29,7 +29,21 @@ fn hide(pass: &mut HudTessPass) {
     pass.mantle_hint = TessJob::Hide;
 }
 
-fn bind_letter(strings: &PreparedLocalizedStrings) -> Option<String> {
+/// The key or button the player jumps with, named for the device in use (a
+/// controller's or the touch controls' button while on one), as the engine
+/// fills [{+gostand}] in PLATFORM_MANTLE; the keyboard default only when
+/// nothing is bound.
+fn bind_letter(
+    strings: &PreparedLocalizedStrings,
+    input: Option<&frame::HudInputView>,
+) -> Option<String> {
+    if let Some(bound) = input.and_then(|input| {
+        ["+gostand", "+moveup"]
+            .iter()
+            .find_map(|command| input.binding_keys.get(*command))
+    }) {
+        return Some(bound.clone());
+    }
     if let Some(letter) = default_mp_key_binding("+gostand") {
         return Some(letter.to_owned());
     }
@@ -51,6 +65,7 @@ pub(crate) fn update_mantle_hint(
     mut images: ResMut<Assets<Image>>,
     mut gaps: ResMut<HudPresentationGaps>,
     mut pass: ResMut<HudTessPass>,
+    input: Option<Res<frame::HudInputView>>,
 ) {
     let Some(ps) = presented.alive_player(local.0) else {
         hide(&mut pass);
@@ -96,7 +111,7 @@ pub(crate) fn update_mantle_hint(
         hide(&mut pass);
         return;
     };
-    let Some(bind) = bind_letter(strings) else {
+    let Some(bind) = bind_letter(strings, input.as_deref()) else {
         gaps.raise(GapCause::LocalizedRowMissing {
             key: KEY_UNBOUND.to_owned(),
         });
