@@ -1598,9 +1598,37 @@ impl SimState {
         current: Tick,
         player: impl Fn(ClientId) -> Option<PlayerState>,
     ) -> crate::bullet_collision::LagcompQuery {
+        self.lagcomp_query_with(attacker, current, player, None)
+    }
+
+    /// `lagcomp_query_for` with nothing changed since `record_collision_history`
+    /// recorded `current`: the current poses are the ones it just posed, so
+    /// they are copied from that frame instead of posed a second time.
+    pub(crate) fn lagcomp_query_after_record(
+        &self,
+        attacker: ClientId,
+        current: Tick,
+        player: impl Fn(ClientId) -> Option<PlayerState>,
+    ) -> crate::bullet_collision::LagcompQuery {
+        let recorded = self
+            .collision_runtime
+            .players
+            .latest_poses()
+            .filter(|(tick, _)| *tick == current)
+            .map(|(_, poses)| poses);
+        self.lagcomp_query_with(attacker, current, player, recorded)
+    }
+
+    fn lagcomp_query_with(
+        &self,
+        attacker: ClientId,
+        current: Tick,
+        player: impl Fn(ClientId) -> Option<PlayerState>,
+        recorded: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
+    ) -> crate::bullet_collision::LagcompQuery {
         let plan = self.lagcomp_plan(attacker, current);
         crate::bullet_collision::LagcompQuery {
-            players: self.lagcomp_players(current, plan, player),
+            players: self.lagcomp_players(current, plan, player, recorded),
             entities: self.lagcomp_entities(current, plan),
         }
     }
@@ -1610,12 +1638,13 @@ impl SimState {
         current: Tick,
         plan: LagcompPlan,
         player: impl Fn(ClientId) -> Option<PlayerState>,
+        recorded: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
     ) -> crate::bullet_collision::HistorySample {
         use crate::bullet_collision::{HistoryClampReason, HistorySample, HistorySampleVerdict};
 
         match plan {
             LagcompPlan::CurrentAuthority { reason } => HistorySample {
-                poses: self.alive_collision_poses(player),
+                poses: recorded.map_or_else(|| self.alive_collision_poses(player), <[_]>::to_vec),
                 verdict: HistorySampleVerdict::CurrentAuthority {
                     tick: current,
                     reason,
