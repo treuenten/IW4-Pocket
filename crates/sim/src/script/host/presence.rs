@@ -367,6 +367,12 @@ pub(crate) fn tag_offset(world: &mut World, object: u64, tag: &str) -> Option<[f
     tag_lookup(world, object, tag).flatten()
 }
 
+/// The offset a link to `tag` follows on `object`'s model, or `None` while the model is not
+/// posed yet. A tag the model does not have links at its origin.
+pub(crate) fn link_tag_offset(world: &mut World, object: u64, tag: &str) -> Option<[f32; 3]> {
+    tag_lookup(world, object, tag).map(|offset| offset.unwrap_or([0.0; 3]))
+}
+
 fn resolve_link_tags(world: &mut World) {
     let pending: Vec<(u64, u64, Arc<str>)> = world
         .resource::<Runtime>()
@@ -378,7 +384,7 @@ fn resolve_link_tags(world: &mut World) {
         })
         .collect();
     for (id, parent, tag) in pending {
-        let Some(offset) = tag_lookup(world, parent, &tag) else {
+        let Some(offset) = link_tag_offset(world, parent, &tag) else {
             continue;
         };
         if let Some(link) = world
@@ -387,7 +393,7 @@ fn resolve_link_tags(world: &mut World) {
             .get_mut(&id)
             .and_then(|e| e.linked_to.as_mut())
         {
-            link.tag_offset = Some(offset.unwrap_or([0.0; 3]));
+            link.tag_offset = Some(offset);
         }
     }
 }
