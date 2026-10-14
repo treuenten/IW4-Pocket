@@ -363,6 +363,21 @@ fn collect_collide_jobs(
     }
 }
 
+/// Where an element's update starts: the effect's last update, or the
+/// element's birth if it was born since. An element moves from when it was
+/// born: with its gravity integrated from the effect's last update, a looping
+/// effect started in the past (MW2's global_FX starts Favela's barrel fire and
+/// the lamp glows 15-20 s early) threw its first elements up as if they had
+/// risen for the whole 15-20 s, to 3,500-155,000 units (IP-148). Trails
+/// already start at birth. `IW4L_FX_MOTION=0` brings back the old start.
+fn elem_update_begin(prev_msec: i32, msec_begin: i32) -> i32 {
+    if fx_iw4::motion_fix() {
+        prev_msec.max(msec_begin)
+    } else {
+        prev_msec
+    }
+}
+
 fn pending_collide_for_elem(
     host: &FxSystemHost,
     effect_slot: usize,
@@ -389,6 +404,7 @@ fn pending_collide_for_elem(
     let msec_begin = elem.msec_begin;
     let life_msec = elem.life_span_msec.max(1);
     let flags = elem.flags;
+    let prev_msec = elem_update_begin(prev_msec, msec_begin);
     let (def_name, catalog_index, now, alt) = match host.effect_at(effect_slot) {
         Some(e) => (
             slot_def_name(e),
@@ -652,6 +668,7 @@ fn update_element(
     if msec_now < elem.msec_begin {
         return true;
     }
+    let prev_msec = elem_update_begin(prev_msec, elem.msec_begin);
     let death = elem.msec_begin.wrapping_add(elem.life_span_msec);
     let def_index = elem.def_index;
     let flags = elem.flags;
@@ -965,5 +982,19 @@ fn spawn_death_child(
             child: ChildSpawn::Death,
             def_index,
         });
+    }
+}
+
+#[cfg(test)]
+mod update_begin_tests {
+    use super::*;
+
+    #[test]
+    fn an_element_born_since_the_last_update_moves_from_its_birth() {
+        // A barrel fire started 20 s early: its first update runs from -20 s,
+        // and an element born at -0.5 s rises for 0.5 s, not 20.
+        assert_eq!(elem_update_begin(-20_000, -500), -500);
+        // An element alive across the update moves for all of it.
+        assert_eq!(elem_update_begin(1_000, 400), 1_000);
     }
 }

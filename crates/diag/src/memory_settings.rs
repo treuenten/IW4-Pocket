@@ -232,7 +232,8 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_FX_FAST_RANDOM" => matches!(value, "0" | "1"),
         // 0 brings back the old effect motion: graph velocities read too slow,
         // physics pieces turning about their model origin, glass shards
-        // launched faster the smaller they are (on by default).
+        // launched faster the smaller they are, elements moved from before
+        // their birth (on by default).
         "IW4L_FX_MOTION" => matches!(value, "0" | "1"),
         // Top priority for the tick and render threads; the server tick on the
         // main thread (both off by default).

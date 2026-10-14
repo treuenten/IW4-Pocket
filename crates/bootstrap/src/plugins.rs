@@ -273,9 +273,10 @@ fn fx_fast_random() -> bool {
 
 const FX_MOTION_ENV: &str = "IW4L_FX_MOTION";
 
-/// The effect motion fixes (IP-129, IP-089, IP-114): graph velocities read at
-/// the speed the graphs move an element, physics pieces that turn about their
-/// middle and tip onto a face, glass shards at their own speed. On unless
+/// The effect motion fixes (IP-129, IP-089, IP-114, IP-148): graph velocities
+/// read at the speed the graphs move an element, physics pieces that turn about
+/// their middle and tip onto a face, glass shards at their own speed, elements
+/// that move from their birth. On unless
 /// `IW4L_FX_MOTION=0` (also a line in iw4l-env.txt), which brings back the
 /// old motion for comparing runs.
 fn fx_motion_fix() -> bool {
