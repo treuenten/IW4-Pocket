@@ -917,7 +917,9 @@ fn class_profile_data(world: &mut World, class: &crate::ClassDef) -> Vec<(Vec<Va
     data
 }
 
-fn menu_kind(menu: &str) -> Option<bool> {
+/// Some(false) for the team picker, Some(true) for the class picker, None for
+/// any other menu.
+pub(super) fn menu_kind(menu: &str) -> Option<bool> {
     if menu == TEAM_MENU {
         Some(false)
     } else if menu.starts_with(CLASS_MENU) {
@@ -965,16 +967,31 @@ fn deliver_answers(world: &mut World, client: u32) {
     {
         return;
     }
+    // MW2's engine raises "menuresponse" in any session state: a spectator who
+    // backed out of the class picker still has the pause menu's Change Team
+    // and Change Class, and the host's End Game. Only a pick for the team or
+    // class picker waits, and only until the scripts first open a picker: the
+    // connect callback opens it a frame after "begin" (waittillframeend in
+    // Callback_PlayerConnect), and bots and the lobby queue their picks at
+    // join. A waiting pick does not hold up the replies behind it, so no reply
+    // is left queued to fire later.
     let in_game = matches!(&*slot.sessionstate, "playing" | "dead");
-    if slot.menu.is_none() && !in_game {
+    let waits = |answer: &MenuAnswer| {
+        !slot.picker_opened && slot.menu.is_none() && !in_game && menu_kind(&answer.menu).is_some()
+    };
+    let Some(index) = runtime
+        .menu_answers
+        .get(&client)
+        .and_then(|queue| queue.iter().position(|answer| !waits(answer)))
+    else {
         return;
-    }
+    };
     let object = slot.object;
     let mut runtime = world.resource_mut::<Runtime>();
     let answer = runtime
         .menu_answers
         .get_mut(&client)
-        .and_then(VecDeque::pop_front)
+        .and_then(|queue| queue.remove(index))
         .expect("checked above");
     let slot = runtime.players.get_mut(&client).expect("checked above");
     slot.menu = None;
@@ -1008,6 +1025,8 @@ pub(crate) struct PlayerSlot {
     pub sessionstate: Arc<str>,
     pub dvars: BTreeMap<Arc<str>, Arc<str>>,
     pub menu: Option<Arc<str>>,
+    /// The scripts have opened the team or class picker for this player.
+    pub picker_opened: bool,
     pub commands: Vec<(Arc<str>, Arc<str>)>,
     pub presented: BTreeMap<&'static str, Vec<Value>>,
     pub perks: std::collections::BTreeSet<Arc<str>>,
@@ -1054,6 +1073,7 @@ impl PlayerSlot {
             sessionstate: "spectator".into(),
             dvars: BTreeMap::new(),
             menu: None,
+            picker_opened: false,
             commands: Vec::new(),
             presented: BTreeMap::new(),
             perks: Default::default(),
@@ -1834,5 +1854,114 @@ mod seat_tests {
         let before = frame.client_state_team(ClientId(BOT));
         seat_team_answer(frame.ecs(), BOT, TEAM_MENU, "allies");
         assert_eq!(frame.client_state_team(ClientId(BOT)), before);
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+
+    const HOST: u32 = 0;
+
+    /// A begun spectator with no menu open; `picker_opened` says whether the
+    /// scripts have shown it the team or class picker yet.
+    fn spectator(picker_opened: bool) -> World {
+        let mut world = World::new();
+        world.insert_resource(Runtime::default());
+        world.insert_resource(crate::PersistentDataStore::default());
+        let mut slot = PlayerSlot::new(7);
+        slot.begun = true;
+        slot.picker_opened = picker_opened;
+        world.resource_mut::<Runtime>().players.insert(HOST, slot);
+        world
+    }
+
+    /// The menu responses raised so far, and clears them.
+    fn raised(world: &mut World) -> Vec<String> {
+        std::mem::take(&mut world.resource_mut::<Runtime>().pending_notifies)
+            .into_iter()
+            .map(|(_, name, args)| {
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|arg| match arg {
+                        Value::String(text) => text.to_string(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                format!("{name} {}", args.join(" "))
+            })
+            .collect()
+    }
+
+    fn queued(world: &World) -> usize {
+        world
+            .resource::<Runtime>()
+            .menu_answers
+            .get(&HOST)
+            .map_or(0, VecDeque::len)
+    }
+
+    #[test]
+    fn a_spectator_gets_the_pause_menu_and_end_game_replies() {
+        // Match 20A: backed out of the class picker, never spawned.
+        let mut world = spectator(true);
+        answer_menu(&mut world, HOST, "class", "changeteam");
+        answer_menu(&mut world, HOST, "popup_endgame", "endround");
+        deliver_answers(&mut world, HOST);
+        assert_eq!(raised(&mut world), ["menuresponse class changeteam"]);
+        deliver_answers(&mut world, HOST);
+        assert_eq!(raised(&mut world), ["menuresponse popup_endgame endround"]);
+        assert_eq!(queued(&world), 0);
+    }
+
+    #[test]
+    fn a_pick_waits_for_the_first_picker_without_holding_up_other_replies() {
+        let mut world = spectator(false);
+        answer_menu(&mut world, HOST, TEAM_MENU, "autoassign");
+        answer_menu(&mut world, HOST, "popup_endgame", "endround");
+        deliver_answers(&mut world, HOST);
+        assert_eq!(raised(&mut world), ["menuresponse popup_endgame endround"]);
+        deliver_answers(&mut world, HOST);
+        assert!(raised(&mut world).is_empty());
+        assert_eq!(queued(&world), 1);
+
+        {
+            let mut runtime = world.resource_mut::<Runtime>();
+            let slot = runtime.players.get_mut(&HOST).expect("slot");
+            slot.menu = Some(TEAM_MENU.into());
+            slot.picker_opened = true;
+        }
+        deliver_answers(&mut world, HOST);
+        assert_eq!(
+            raised(&mut world),
+            [format!("menuresponse {TEAM_MENU} autoassign")]
+        );
+    }
+
+    #[test]
+    fn a_pick_after_the_picker_was_shown_is_not_left_to_fire_later() {
+        let mut world = spectator(true);
+        answer_menu(&mut world, HOST, CLASS_MENU, "back");
+        deliver_answers(&mut world, HOST);
+        assert_eq!(
+            raised(&mut world),
+            [format!("menuresponse {CLASS_MENU} back")]
+        );
+        assert_eq!(queued(&world), 0);
+    }
+
+    #[test]
+    fn nothing_is_delivered_before_begin() {
+        let mut world = spectator(true);
+        world
+            .resource_mut::<Runtime>()
+            .players
+            .get_mut(&HOST)
+            .expect("slot")
+            .begun = false;
+        answer_menu(&mut world, HOST, "popup_endgame", "endround");
+        deliver_answers(&mut world, HOST);
+        assert!(raised(&mut world).is_empty());
+        assert_eq!(queued(&world), 1);
     }
 }
