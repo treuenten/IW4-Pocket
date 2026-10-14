@@ -868,7 +868,7 @@ pub(crate) fn advance_weapon_command(
                 }
                 WeaponTickEvent::OffhandCookedOff { weapon } => {
                     spend_offhand_round(world, *id, weapon);
-                    crate::equipment::explode_offhand_in_hand(world, *id, weapon, tick);
+                    crate::equipment::cook_off_in_hand(world, *id, weapon, tick);
                 }
                 WeaponTickEvent::ReloadStarted => {
                     apply_player_anim_event(world, *id, ANIM_ET_RELOAD);
