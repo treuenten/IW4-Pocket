@@ -714,9 +714,12 @@ fn evaluate_physics_piece(
     world: &SimWorld,
     q: fx::FxElemMotionQuery<'_>,
 ) -> FxElemMotionResult {
+    let (spin, scale) = phys_piece_spin(elem, q.elem_random_seed, q.effect_axis);
     evaluate_elem_physics_motion(
         elem.view.flags,
         elem.phys_piece(q.elem_random_seed),
+        spin,
+        scale,
         elem.view.use_item_clip != 0,
         elem.vel_graph_local.as_slice(),
         elem.vel_graph_world.as_slice(),
@@ -731,6 +734,30 @@ fn evaluate_physics_piece(
             }
         },
     )
+}
+
+/// A model-physics piece's launch pose and spin, and the scale it is drawn
+/// at when it launches, which its model's middle is placed at.
+fn phys_piece_spin(
+    elem: &asset_game::OwnedFxElemDef,
+    seed: u64,
+    effect_axis: [[f32; 3]; 3],
+) -> (fx_iw4::FxPhysSpin, f32) {
+    let spin = fx_iw4::FxPhysSpin::launch(
+        elem.view.spawn_angles,
+        elem.view.angular_velocity,
+        seed,
+        effect_axis,
+    );
+    let scale = evaluate_scale(
+        elem.vis_samples.as_slice(),
+        elem.view.vis_state_interval_count,
+        0.0,
+        sample_f32(seed, FxRandomChannel::Scale),
+    )
+    .filter(|scale| scale.is_finite() && *scale > 0.0)
+    .unwrap_or(1.0);
+    (spin, scale)
 }
 
 const COLLIDE_JOBS_PER_WORKER: usize = 16;
@@ -1558,10 +1585,31 @@ fn evaluate_fx_model_instance(
     if scale == 0.0 {
         return None;
     }
-    // A model-physics piece that has landed stops spinning there, with no
-    // easing turn after it, and lies on its broad face.
-    let landed_piece = ctx.at_rest_fraction != fx_iw4::FX_ELEM_AT_REST_NONE
-        && fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags);
+    // A model-physics piece turns about its middle and tips onto a face where
+    // it lands, as its motion traced it (`evaluate_elem_physics_motion`).
+    let physics_piece = fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags);
+    if physics_piece && fx_iw4::motion_fix() {
+        let (spin, _) = phys_piece_spin(elem, ctx.elem_random_seed, ctx.axis);
+        let landed_ms = (ctx.at_rest_fraction != fx_iw4::FX_ELEM_AT_REST_NONE).then(|| {
+            fx_iw4::msec_for_sampling_axis(ctx.at_rest_fraction, ctx.life_msec.max(1) as f32)
+        });
+        let axis =
+            elem.phys_piece(ctx.elem_random_seed)
+                .pose(&spin, ctx.age_msec as f32, landed_ms);
+        return Some(FxModelInstance {
+            def_name: ctx.def_name.to_owned(),
+            def_index: ctx.def_index,
+            model_index,
+            elem_handle: ctx.elem_handle,
+            origin: ctx.origin,
+            axis,
+            scale,
+            flags: ctx.flags,
+        });
+    }
+    // IW4L_FX_MOTION=0: a model-physics piece that has landed stops spinning
+    // there, with no easing turn after it, and lies on its broad face.
+    let landed_piece = ctx.at_rest_fraction != fx_iw4::FX_ELEM_AT_REST_NONE && physics_piece;
     let rot_t = if landed_piece {
         (ctx.at_rest_fraction as f32 * ctx.life_msec as f32 / 255.0).min(ctx.age_msec as f32)
     } else {

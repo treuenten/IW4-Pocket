@@ -29,6 +29,7 @@ mod orient;
 mod orientation;
 mod origin;
 mod particle_cloud;
+mod phys_piece;
 mod pool;
 mod post_light;
 mod quat;
@@ -242,6 +243,7 @@ pub use particle_cloud::{
     sparkcloud_fill_sample, sparkcloud_history_advance, sparkcloud_history_should_advance,
     sparkcloud_lerp_sample, sparkcloud_tent_weights,
 };
+pub use phys_piece::{FX_PHYS_ANGULAR_DRAG, FX_PHYS_TIP_MS, FxPhysSpin};
 pub use pool::{
     FX_BUFFERS_OFF_EFFECTS, FX_BUFFERS_OFF_ELEMS, FX_BUFFERS_OFF_SPARK_CLOUD,
     FX_BUFFERS_POOL_STRIDE, FX_EFFECT_HANDLE_RING_MASK, FX_EFFECT_HANDLE_RING_SIZE,
