@@ -13,13 +13,15 @@ pub mod material_draw;
 pub mod material_images;
 mod ui_material_images;
 pub use ui_material_images::{
-    retain_ui_material_images, retain_ui_preview_fallback, ui_material_image, ui_preview_fallback,
+    retain_ui_material_images, retain_ui_material_picture, retain_ui_preview_fallback,
+    ui_material_image, ui_preview_fallback,
 };
 pub mod t5_code_remap;
 pub mod t5_tech_map;
 pub mod t6_techset;
 pub mod vertex_layout;
 pub use vertex_layout::*;
+pub mod water_map;
 
 pub use asset_core::*;
 pub use asset_transport::{

@@ -259,6 +259,12 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         // Keep each colour draw's prepared records and constants from the last
         // frame while nothing it is made from changed (off by default).
         "IW4L_DRAW_REUSE" => matches!(value, "0" | "1"),
+        // Build each water surface's wave map at load so the water is drawn
+        // instead of black (off by default).
+        "IW4L_WATER_MAP" => matches!(value, "0" | "1"),
+        // Draw no reflections (the shine on metal, glass and water), to save
+        // graphics time (off by default).
+        "IW4L_NO_REFLECTIONS" => matches!(value, "0" | "1"),
         // Health fields in the logs: memory, thermal state, Low Power Mode,
         // main-thread CPU, graphics-chip time, sim tick timing and memory
         // warnings (see crate::health). On by default; 0 turns all of it off.

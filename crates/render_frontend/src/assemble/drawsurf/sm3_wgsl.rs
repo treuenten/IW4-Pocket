@@ -4,7 +4,7 @@ use d3d9_sm3::{
 };
 use render_material::MATERIAL_ALPHA_TESTS;
 
-use super::sm3_abi::{ConstantSource, PassProgramAbi};
+use super::sm3_abi::{ConstantSource, PassProgramAbi, SamplerSource};
 
 pub use d3d9_sm3::{PASS_FRAGMENT_ENTRY, PASS_VERTEX_ENTRY};
 
@@ -30,6 +30,25 @@ fn known_decl_type(decl_type: DeclType) -> DeclType {
         DeclType::Unknown(_) => unreachable!("the ABI refuses unknown declaration types"),
         known => known,
     }
+}
+
+/// `IW4L_NO_REFLECTIONS=1`: every reflection-probe read (the shine on metal,
+/// glass and water) is lowered to black with no fetch, so the shader compiler
+/// can drop the reflection math too. Off by default. Read once.
+pub const NO_REFLECTIONS_ENV: &str = "IW4L_NO_REFLECTIONS";
+
+fn reflections_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| {
+        let off = perf::switch(NO_REFLECTIONS_ENV);
+        if off {
+            diag::info!(
+                World,
+                "{NO_REFLECTIONS_ENV}=1: reflection probes read as black"
+            );
+        }
+        off
+    })
 }
 
 pub fn pass_lowering_abi(abi: &PassProgramAbi) -> PassLoweringAbi {
@@ -85,6 +104,7 @@ pub fn pass_lowering_abi(abi: &PassProgramAbi) -> PassLoweringAbi {
                 register: binding.register,
                 dimension: binding.dimension,
                 depth_compare: binding.depth_compare,
+                black: binding.source == SamplerSource::SurfaceReflectionProbe && reflections_off(),
             })
             .collect(),
         alpha_tests: MATERIAL_ALPHA_TESTS.to_vec(),

@@ -42,12 +42,30 @@ pub struct ConstantSlot {
     pub program_defined: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SamplerSlot {
     pub register: u16,
     pub dimension: SamplerTextureDimension,
 
     pub depth_compare: bool,
+    /// Read as opaque black (0, 0, 0, 1) without a fetch.
+    pub black: bool,
+}
+
+// The lowered-WGSL disk cache keys on this text: a slot that is not `black`
+// prints exactly as it did before the field existed, so turning the field on
+// for some passes leaves every other pass's cached WGSL valid.
+impl core::fmt::Debug for SamplerSlot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut slot = f.debug_struct("SamplerSlot");
+        slot.field("register", &self.register)
+            .field("dimension", &self.dimension)
+            .field("depth_compare", &self.depth_compare);
+        if self.black {
+            slot.field("black", &self.black);
+        }
+        slot.finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

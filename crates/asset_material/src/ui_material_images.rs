@@ -41,6 +41,16 @@ pub fn retain_ui_material_images(materials: &crate::MaterialCatalog) {
     }
 }
 
+/// A picture name for a material no catalog captured (one from a zone walked
+/// only for its sounds). A name the catalogs already gave is kept.
+pub fn retain_ui_material_picture(namespace: AssetNamespace, material: &str, image: &str) {
+    IMAGES
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .entry((namespace, material.to_ascii_lowercase()))
+        .or_insert_with(|| image.to_owned());
+}
+
 pub fn ui_material_image(namespace: AssetNamespace, material: &str) -> Option<String> {
     IMAGES
         .read()
