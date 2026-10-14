@@ -271,8 +271,13 @@ pub(crate) fn select_usables(world: &mut World) {
     let mut frame = FrameWorld::from_world(world);
     for (client, player) in clients {
         let id = ClientId(client);
+        // A frozen player is offered nothing (Player_UpdateCursorHints skips a
+        // client with bFrozen), so a hint goes once the end of a match or round
+        // freezes him.
         if !frame.client_meta(id).is_some_and(|m| {
-            m.lifecycle == crate::ClientLifecycle::Alive && !m.controls.usability_disabled
+            m.lifecycle == crate::ClientLifecycle::Alive
+                && !m.controls.usability_disabled
+                && !m.controls.frozen
         }) {
             continue;
         }
