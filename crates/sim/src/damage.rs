@@ -5,7 +5,7 @@ use crate::world::{ClientId, Tick};
 use crate::world_objects::{GlassPaneBasis, GlassPieceId};
 use gamemode_iw4::{
     G_CAN_DAMAGE_CONTENTS_MASK, can_damage_player_vis_scale, radius_damage_amount,
-    radius_damage_distance_to_aabb,
+    radius_damage_distance_to_aabb, shield_blast_vis_scale,
 };
 
 const AREA_ENTITY_CAPACITY: usize = 0x800;
@@ -226,12 +226,21 @@ pub(crate) fn apply_script_blast(
             continue;
         };
         let dist = radius_damage_distance_to_aabb(blast.origin, bounds.mid(), bounds.half());
-        let vis_scale = player_radius_vis_scale(
+        let mut vis_scale = player_radius_vis_scale(
             world,
             blast.origin,
             target,
             blast.inflictor.map(crate::AuthorityModelOwner::ScriptModel),
         );
+        let protection = if vis_scale > 0.0 {
+            shield_blast_protection(world, target, blast.origin)
+        } else {
+            0.0
+        };
+        if protection > 0.0 {
+            vis_scale = shield_blast_vis_scale(vis_scale, protection);
+        }
+        let hitloc = shield_splash_hitloc(protection);
         let amount = radius_damage_amount(blast.max, blast.min, blast.radius, dist, vis_scale);
         if amount <= 0 {
             continue;
@@ -255,14 +264,14 @@ pub(crate) fn apply_script_blast(
                 amount,
                 killcam_entity_start_time: 0,
                 inflictor_origin: Some(blast.origin),
-                hitloc: 0,
+                hitloc,
             })
         });
         let hit = crate::script_player::Hit {
             victim: target,
             attacker: blast.attacker,
             amount,
-            flags: IDFLAGS_RADIUS,
+            flags: crate::script_player::radius_flags(hitloc),
             means: blast.means,
             weapon: blast.weapon,
             point: blast.origin,
@@ -271,7 +280,7 @@ pub(crate) fn apply_script_blast(
             } else {
                 [0.0; 3]
             },
-            hitloc: 0,
+            hitloc,
             inflictor: None,
             commit,
         };
@@ -375,7 +384,15 @@ fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<Dam
             continue;
         }
         let dist = radius_damage_distance_to_aabb(blast.origin, bounds.mid(), bounds.half());
-        let vis_scale = player_radius_vis_scale(world, blast.origin, target, None);
+        let mut vis_scale = player_radius_vis_scale(world, blast.origin, target, None);
+        let protection = if vis_scale > 0.0 {
+            shield_blast_protection(world, target, blast.origin)
+        } else {
+            0.0
+        };
+        if protection > 0.0 {
+            vis_scale = shield_blast_vis_scale(vis_scale, protection);
+        }
         let amount = radius_damage_amount(
             blast.inner_damage,
             blast.outer_damage,
@@ -398,10 +415,59 @@ fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<Dam
             amount,
             killcam_entity_start_time: blast.killcam_entity_start_time,
             inflictor_origin: Some(blast.origin),
-            hitloc: 0,
+            hitloc: shield_splash_hitloc(protection),
         });
     }
     intents
+}
+
+/// `IW4L_SHIELD_BLAST=1`: a riot shield takes part of an explosion off its
+/// carrier, as MW2's G_RadiusDamage does (see `shield_blast_protection`).
+/// Off by default, since it makes C4, grenades and rockets weaker against
+/// shields than they have been in this game so far.
+pub(crate) fn shield_blast_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var(SHIELD_BLAST_ENV).is_ok_and(|value| value.trim() == "1"))
+}
+
+pub const SHIELD_BLAST_ENV: &str = "IW4L_SHIELD_BLAST";
+
+/// The share of a blast at `origin` that `target`'s riot shield takes off:
+/// MW2 measures the blast's angle from the forward axis of the tag the
+/// shield model is attached to (in the hand or on the back), and a player
+/// with no shield model attached gets none.
+fn shield_blast_protection(world: &FrameWorld, target: ClientId, origin: [f32; 3]) -> f32 {
+    if !shield_blast_enabled() {
+        return 0.0;
+    }
+    let Some(ps) = world.player(target).copied() else {
+        return 0.0;
+    };
+    let Some(frame) = world.shield_tag_frame(target, &ps) else {
+        return 0.0;
+    };
+    let dot = gamemode_iw4::shield_blast_dot(origin, frame.origin, frame.normal);
+    let protection = gamemode_iw4::shield_blast_protection(dot);
+    diag::info!(
+        Sim,
+        "shield blast: player {} protection={protection} dot={dot:.3} blast={origin:?} tag={:?} facing={:?} yaw={:.0}",
+        target.0,
+        frame.origin,
+        frame.normal,
+        ps.viewangles[1]
+    );
+    protection
+}
+
+/// A blast the victim's shield softened reaches the damage script on the
+/// "shield" hit location with the shield explosive splash flag
+/// (`script_player::radius_flags`), which _damage.gsc turns back into "none".
+fn shield_splash_hitloc(protection: f32) -> u8 {
+    if protection > 0.0 {
+        crate::shield::HITLOC
+    } else {
+        0
+    }
 }
 
 fn radius_glass_hits(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<GlassBlastHit> {

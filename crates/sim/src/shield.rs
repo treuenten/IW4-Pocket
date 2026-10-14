@@ -20,6 +20,14 @@ pub struct ShieldCarrierCollision {
     pub bones: Vec<xmodel_runtime::CollisionBone>,
 }
 
+/// Where the tag a player's riot shield hangs on is, and the way it faces
+/// (the tag's forward axis), in the world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ShieldTagFrame {
+    pub origin: [f32; 3],
+    pub normal: [f32; 3],
+}
+
 pub(crate) const HITLOC: u8 = 19;
 pub(crate) const SURFACE: u8 = 29;
 

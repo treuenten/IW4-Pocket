@@ -89,3 +89,98 @@ pub fn can_damage_player_vis_scale(
     }
     can_damage_hits_to_scale(hits)
 }
+
+/// MW2's `shieldBlastDamageProtection_30/_60/_120/_180`: how much of an
+/// explosion a riot shield takes off, by how squarely the shield faces it.
+/// Each entry is the cosine the blast's direction must be above (half of
+/// the arc in the dvar's name) and the share of the damage taken off. The
+/// thresholds and the dvar defaults are iw4mp.exe's; no MW2 config or
+/// script changes the dvars.
+pub const SHIELD_BLAST_PROTECTION: [(f32, f32); 4] =
+    [(0.966, 0.95), (0.866, 0.80), (0.5, 0.55), (0.0, 0.15)];
+
+/// How squarely a riot shield hanging on a tag at `tag_origin`, whose
+/// forward axis is `tag_forward`, faces a blast at `blast`: the cosine of
+/// the angle between that axis and the direction to the blast. MW2 measures
+/// it from the tag the shield model is attached to: `tag_weapon_left` while
+/// the shield is held, `tag_shield_back` while it is on the back.
+pub fn shield_blast_dot(blast: [f32; 3], tag_origin: [f32; 3], tag_forward: [f32; 3]) -> f32 {
+    let mut dir = [
+        blast[0] - tag_origin[0],
+        blast[1] - tag_origin[1],
+        blast[2] - tag_origin[2],
+    ];
+    let len = libm::sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if len != 0.0 {
+        dir = dir.map(|c| c / len);
+    }
+    dir[0] * tag_forward[0] + dir[1] * tag_forward[1] + dir[2] * tag_forward[2]
+}
+
+/// The share of a blast a riot shield takes off when it faces the blast as
+/// squarely as `dot` (see `shield_blast_dot`): none beside or behind it.
+pub fn shield_blast_protection(dot: f32) -> f32 {
+    SHIELD_BLAST_PROTECTION
+        .iter()
+        .find(|(above, _)| dot > *above)
+        .map_or(0.0, |&(_, protection)| protection)
+}
+
+/// The visibility scale a blast's damage is multiplied by once a shield
+/// taking off `protection` of it is counted, as MW2's G_RadiusDamage does
+/// before turning the damage into a whole number.
+pub fn shield_blast_vis_scale(vis_scale: f32, protection: f32) -> f32 {
+    vis_scale * (1.0 - protection)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn protect(blast: [f32; 3]) -> f32 {
+        shield_blast_protection(shield_blast_dot(blast, [0.0; 3], [1.0, 0.0, 0.0]))
+    }
+
+    fn at_angle(degrees: f32) -> f32 {
+        let r = degrees.to_radians();
+        protect([100.0 * r.cos(), 100.0 * r.sin(), 0.0])
+    }
+
+    #[test]
+    fn protection_follows_the_four_arcs() {
+        assert_eq!(at_angle(0.0), 0.95);
+        assert_eq!(at_angle(14.0), 0.95);
+        assert_eq!(at_angle(16.0), 0.80);
+        assert_eq!(at_angle(29.0), 0.80);
+        assert_eq!(at_angle(31.0), 0.55);
+        assert_eq!(at_angle(-59.0), 0.55);
+        assert_eq!(at_angle(61.0), 0.15);
+        assert_eq!(at_angle(-89.0), 0.15);
+        assert_eq!(at_angle(91.0), 0.0);
+        assert_eq!(at_angle(180.0), 0.0);
+    }
+
+    #[test]
+    fn a_blast_on_the_tag_itself_gets_no_protection() {
+        assert_eq!(shield_blast_dot([5.0; 3], [5.0; 3], [1.0, 0.0, 0.0]), 0.0);
+        assert_eq!(shield_blast_protection(0.0), 0.0);
+    }
+
+    #[test]
+    fn height_counts_in_the_angle() {
+        // Straight above the tag is 90 degrees off its forward axis.
+        assert_eq!(protect([0.0, 0.0, 50.0]), 0.0);
+        // 45 degrees up and straight ahead is inside the 120-degree arc.
+        assert_eq!(protect([50.0, 0.0, 50.0]), 0.55);
+    }
+
+    #[test]
+    fn c4_at_the_shield_face_does_a_twentieth() {
+        // C4 is 200 close up; facing it squarely leaves 5% with every trace clear.
+        let vis = shield_blast_vis_scale(1.0, at_angle(0.0));
+        assert_eq!(radius_damage_amount(200.0, 50.0, 256.0, 0.0, vis), 10);
+        // Behind the shield's back the full blast lands.
+        let vis = shield_blast_vis_scale(1.0, at_angle(180.0));
+        assert_eq!(radius_damage_amount(200.0, 50.0, 256.0, 0.0, vis), 200);
+    }
+}

@@ -1832,7 +1832,7 @@ impl SimState {
                 continue;
             }
             let (bones, shield_normal) = match self.player_hitvol_bones(*id, &ps) {
-                Ok(bones) => bones,
+                Ok((bones, frame)) => (bones, frame.map(|frame| frame.normal)),
                 Err(error) => {
                     on_err(&error);
                     (Vec::new(), None)
@@ -1934,11 +1934,34 @@ impl SimState {
         )
     }
 
+    /// The frame of the tag player `id`'s riot shield hangs on, posed as `ps`
+    /// stands: None without a shield, or when the body cannot be posed.
+    pub(crate) fn shield_tag_frame(
+        &self,
+        id: ClientId,
+        ps: &PlayerState,
+    ) -> Option<crate::shield::ShieldTagFrame> {
+        self.client_meta(id)?.shield?;
+        match self.player_hitvol_bones(id, ps) {
+            Ok((_, frame)) => frame,
+            Err(error) => {
+                diag::warn!(Sim, "shield tag for player {}: {error}", id.0);
+                None
+            }
+        }
+    }
+
     fn player_hitvol_bones(
         &self,
         id: ClientId,
         ps: &PlayerState,
-    ) -> Result<(Vec<xmodel_runtime::CollisionBone>, Option<[f32; 3]>), String> {
+    ) -> Result<
+        (
+            Vec<xmodel_runtime::CollisionBone>,
+            Option<crate::shield::ShieldTagFrame>,
+        ),
+        String,
+    > {
         let kit = self.collision_kit(id);
         let Some(cap) = kit.body.as_ref() else {
             return Ok((Vec::new(), None));
@@ -2058,18 +2081,24 @@ impl SimState {
                 .iter()
                 .position(|bone| bone.name == shield.tag())
                 .ok_or("shield tag missing")?;
-            let normal = posed
-                .get(tag)
-                .and_then(|matrix| matrix.x_axis.truncate().try_normalize())
+            let matrix = posed.get(tag).ok_or("shield tag transform invalid")?;
+            let normal = matrix
+                .x_axis
+                .truncate()
+                .try_normalize()
                 .ok_or("shield tag transform invalid")?
                 .to_array();
+            let frame = crate::shield::ShieldTagFrame {
+                origin: matrix.w_axis.truncate().to_array(),
+                normal,
+            };
             if !bones
                 .iter()
                 .any(|bone| bone.part_classification == crate::shield::HITLOC)
             {
                 return Err("shield model has no collision geometry".into());
             }
-            return Ok((bones, Some(normal)));
+            return Ok((bones, Some(frame)));
         }
         if let Some(slot) = self.player_bodies.player_dobjs.get(&id.0) {
             return xmodel_runtime::collision_dobj_with_controller(
@@ -2369,9 +2398,12 @@ impl SimState {
                     && let Some(ps) = players
                         .iter()
                         .find_map(|(client, ps)| (*client == *id).then_some(ps))
-                    && let Ok((bones, Some(normal))) = self.player_hitvol_bones(*id, ps)
+                    && let Ok((bones, Some(frame))) = self.player_hitvol_bones(*id, ps)
                 {
-                    meta.shield_collision = Some(crate::ShieldCarrierCollision { normal, bones });
+                    meta.shield_collision = Some(crate::ShieldCarrierCollision {
+                        normal: frame.normal,
+                        bones,
+                    });
                 }
 
                 let (archival, current) = crate::hudelem::hud_elem_update_client(

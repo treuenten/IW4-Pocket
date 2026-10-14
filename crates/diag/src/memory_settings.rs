@@ -243,6 +243,9 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         // A player killed while holding a live grenade drops it, as MW2 does
         // (off by default).
         "IW4L_HELD_GRENADE_DROP" => matches!(value, "0" | "1"),
+        // A riot shield takes part of an explosion off its carrier when it
+        // faces the blast, as in MW2 (off by default).
+        "IW4L_SHIELD_BLAST" => matches!(value, "0" | "1"),
         // 0 lets the Chopper Gunner's camera pitch and roll with the helicopter.
         "IW4L_GUNNER_STEADY" => matches!(value, "0" | "1"),
         // 0 counts a loop nobody can hear against its sound channel's voice
@@ -447,6 +450,9 @@ mod tests {
         assert!(valid_file_setting("IW4L_HELD_GRENADE_DROP", "0"));
         assert!(valid_file_setting("IW4L_HELD_GRENADE_DROP", "1"));
         for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_HELD_GRENADE_DROP", v), "{v:?}"); }
+        assert!(valid_file_setting("IW4L_SHIELD_BLAST", "0"));
+        assert!(valid_file_setting("IW4L_SHIELD_BLAST", "1"));
+        for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_SHIELD_BLAST", v), "{v:?}"); }
         assert!(valid_file_setting("IW4L_LEAN_SHADERS", "0"));
         assert!(valid_file_setting("IW4L_LEAN_SHADERS", "1"));
         for v in ["on", "off", "true", "2", "", " 1", "1\0"] { assert!(!valid_file_setting("IW4L_LEAN_SHADERS", v), "{v:?}"); }
