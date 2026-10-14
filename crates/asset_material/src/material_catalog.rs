@@ -957,6 +957,105 @@ impl MaterialCatalog {
             .position(|m| m.namespace == namespace && m.name.is_real() && m.name.same_name(&name))
     }
 
+    /// A water material's height map (texture semantic 11) ships without
+    /// pixels: build it from the wave spectrum the material carries. It is
+    /// linked under a name of its own (`$water/<material>`) because the shipped
+    /// image names repeat from map to map. `None` (water not drawn) when the
+    /// switch is off or the spectrum cannot be read.
+    fn capture_water_map(
+        &mut self,
+        s: &ZoneStream<'_>,
+        texture: Ptr,
+        material: &AssetRef,
+    ) -> Option<usize> {
+        use crate::water_map::{
+            WATER_MAP_SCALE, water_heights, water_map_bytes, water_map_rgba_mips,
+            water_maps_enabled,
+        };
+        use bevy::asset::RenderAssetUsages;
+        use bevy::image::{Image, ImageSampler};
+        use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+        use fastfile_iw4::ZonePtr;
+
+        if !water_maps_enabled() || s.wire_format() != fastfile_iw4::Iw4WireFormat::X86 {
+            return None;
+        }
+        let started = std::time::Instant::now();
+        let ZonePtr::Offset(water) = s.ptr_at(texture, 8).ok()? else {
+            return None;
+        };
+        let water = s.resolve_alias(water);
+        let m = usize::try_from(s.i32_at(water, 12).ok()?).ok()?;
+        let n = usize::try_from(s.i32_at(water, 16).ok()?).ok()?;
+        let ZonePtr::Offset(h0) = s.ptr_at(water, 4).ok()? else {
+            return None;
+        };
+        let floats = m.checked_mul(n)?.checked_mul(2)?;
+        if floats > 2 * 256 * 256 {
+            return None;
+        }
+        let h0: Vec<f32> = s
+            .slice_at(h0, 0, floats * 4)
+            .ok()?
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
+        let heights = water_heights(m, n, &h0)?;
+        let bytes = water_map_bytes(&heights, WATER_MAP_SCALE);
+        let (rgba, levels) = water_map_rgba_mips(n, m, &bytes);
+        let sampler_state = s.u8_at(texture, 6).ok()?;
+
+        let rms = (heights.iter().map(|h| f64::from(*h).powi(2)).sum::<f64>()
+            / heights.len() as f64)
+            .sqrt();
+        let (low, high) = bytes
+            .iter()
+            .fold((u8::MAX, u8::MIN), |(lo, hi), &b| (lo.min(b), hi.max(b)));
+        diag::info!(
+            Zone,
+            "water map {material}: {m}x{n} height rms {rms:.1}, bytes {low}..{high}, built in {} us",
+            started.elapsed().as_micros()
+        );
+
+        let mut image = Image::new_uninit(
+            Extent3d {
+                width: n as u32,
+                height: m as u32,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.texture_descriptor.mip_level_count = levels;
+        image.data = Some(rgba);
+        image.sampler =
+            ImageSampler::Descriptor(crate::sampler_from_iw4(sampler_state, levels, false));
+        Some(
+            self.link_image(AuthoredImage {
+                namespace: self
+                    .capture_ns
+                    .expect("asset capture requires an explicit family"),
+                name: AssetRef::Real(format!("$water/{}", material.as_str())),
+                map_type: 3,
+                semantic: TS_WATER_MAP,
+                category: 5,
+                use_srgb_reads: false,
+                width: n as u16,
+                height: m as u16,
+                depth: 1,
+                level_count: levels as u8,
+                format: 0,
+                payload: Arc::new(Vec::new()),
+                decoded: Some(Arc::new(image)),
+                common_owned: false,
+                decoded_variant: None,
+                decoded_by: None,
+                pending_decode: None,
+            }),
+        )
+    }
+
     fn capture_material(&mut self, s: &ZoneStream<'_>) -> Option<usize> {
         let geometry = s.latest_material()?;
         let name = geometry
@@ -970,15 +1069,18 @@ impl MaterialCatalog {
             for i in 0..geometry.texture_count {
                 let texture = table.at(i * geometry.texture_stride);
                 let semantic = s.u8_at(texture, 7).ok()?;
+                let image = if semantic == TS_WATER_MAP {
+                    self.capture_water_map(s, texture, &name)
+                } else {
+                    self.link.resolve(LinkKind::Image, texture.at(8))
+                };
                 textures.push(MaterialTextureBinding {
                     name_hash: s.u32_at(texture, 0).ok()?,
                     name_start: s.u8_at(texture, 4).ok()?,
                     name_end: s.u8_at(texture, 5).ok()?,
                     sampler_state: s.u8_at(texture, 6).ok()?,
                     semantic,
-                    image: (semantic != 11)
-                        .then(|| self.link.resolve(LinkKind::Image, texture.at(8)))
-                        .flatten(),
+                    image,
                 });
             }
         }

@@ -289,6 +289,9 @@ fn load_water(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink, slot: Ptr) 
         return Ok(());
     }
     let water = s.alloc_load(4, s.layout(sz::WATER, 96))?;
+    // The material's water map is built from this spectrum after the load, so
+    // the texture slot has to lead to it.
+    s.fixup_slot(slot, water)?;
     let width = s.i32_at(water, s.layout(12, 32))?.max(0) as usize;
     let height = s.i32_at(water, s.layout(16, 36))?.max(0) as usize;
     let count = width.saturating_mul(height);

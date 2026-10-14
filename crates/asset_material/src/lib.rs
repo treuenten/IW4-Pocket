@@ -20,6 +20,7 @@ pub mod t5_tech_map;
 pub mod t6_techset;
 pub mod vertex_layout;
 pub use vertex_layout::*;
+pub mod water_map;
 
 pub use asset_core::*;
 pub use asset_transport::{
