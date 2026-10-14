@@ -912,6 +912,11 @@ pub struct BulletTraceSegment {
     pub hit_type: i32,
 
     pub hit_id: u16,
+
+    /// Whether this impact gets its effect event. MW2 skips the exit effect
+    /// and the next entry effect of a penetrating bullet that travels no
+    /// more than `bullet_penetrationMinFxDist` between them.
+    pub impact_fx: bool,
 }
 
 impl BulletTraceSegment {
@@ -1586,7 +1591,7 @@ fn fire_extended(
     let mut terminal = None;
     let mut seg_start = query.start;
     for _ in 0..MAX_EXTENDED_STEPS {
-        let outcome = trace_from(world, query, start, ignore_hit);
+        let outcome = trace_from(world, query, start, ignore_hit, query.ignore_model);
         match decode_hit(outcome) {
             Decode::StopMiss { end } => {
                 segments.push(make_segment(
@@ -1691,9 +1696,10 @@ fn fire_penetrate(
     let mut last_surf = 0u32;
     let mut seg_start = query.start;
 
+    let mut ignore_model = query.ignore_model;
     let mut open_skips = 0u32;
     let (first, first_startsolid) = loop {
-        match decode_hit(trace_from(world, query, start, ignore_hit)) {
+        match decode_hit(trace_from(world, query, start, ignore_hit, ignore_model)) {
             Decode::StopMiss { end } => {
                 segments.push(make_segment(
                     seg_start,
@@ -1773,10 +1779,14 @@ fn fire_penetrate(
             break;
         };
         ignore_hit = player_id(last_hit.collider).or(ignore_hit);
+        // MW2 advances past an entity by ignoring it in the next trace, not
+        // by moving the start: a trace started on a model's surface would
+        // hit that surface again at the same point.
+        ignore_model = model_id(last_hit.collider).or(ignore_model);
         start = next_start;
         seg_start = last_hit.end;
         let entry_pos = last_hit.end;
-        let fwd = decode_hit(trace_from(world, query, start, ignore_hit));
+        let fwd = decode_hit(trace_from(world, query, start, ignore_hit, ignore_model));
         let (trace_hit, fwd_hit) = match fwd {
             Decode::Hit(hit) => (true, Some(hit)),
             Decode::StopMiss { end } => {
@@ -1800,6 +1810,7 @@ fn fire_penetrate(
                     start,
                     dir,
                     ignore_hit,
+                    ignore_model,
                     (max_depth + PEN_THICKNESS_FLOOR).max(2.0),
                 ) else {
                     break;
@@ -1851,13 +1862,19 @@ fn fire_penetrate(
         }
 
         let rev_ignore = fwd_hit.as_ref().and_then(|h| player_id(h.collider));
+        // The way back ignores what the forward trace hit, or the entry
+        // model when it hit nothing, as MW2's reverse trace does.
+        let rev_ignore_model = match fwd_hit.as_ref() {
+            Some(hit) => model_id(hit.collider).or(query.ignore_model),
+            None => ignore_model,
+        };
         let rev_q = BulletTraceQuery {
             start: rev_start,
             end: rev_end,
             mask: query.mask,
             ignore: query.ignore,
             ignore_hit: rev_ignore,
-            ignore_model: query.ignore_model,
+            ignore_model: rev_ignore_model,
         };
         let rev = bullet_trace_filtered(
             world.brushes,
@@ -1907,6 +1924,11 @@ fn fire_penetrate(
             break;
         }
 
+        let impact_fx = match (rev_hit_pos, fwd_hit.as_ref()) {
+            (Some(exit), Some(hit)) => penetration_fx_far_enough(exit, hit.end),
+            (None, Some(hit)) => penetration_fx_far_enough(entry_pos, hit.end),
+            (_, None) => true,
+        };
         if let Some(pos) = rev_hit_pos {
             let mut exit_seg = make_segment(
                 entry_pos,
@@ -1920,12 +1942,13 @@ fn fire_penetrate(
                 false,
             );
             exit_seg.surface_flags |= fx_iw4::FX_IMPACT_EXIT_SURFACE_FLAG;
+            exit_seg.impact_fx = impact_fx;
             segments.push(exit_seg);
         }
 
         if let Some(hit) = fwd_hit {
             last_surf = depth_surf(hit.collider, last_surf);
-            segments.push(make_segment_from_hit(
+            let mut entry_seg = make_segment_from_hit(
                 seg_start,
                 &hit,
                 true,
@@ -1933,7 +1956,9 @@ fn fire_penetrate(
                 multiplier,
                 BulletPath::Penetrate,
                 false,
-            ));
+            );
+            entry_seg.impact_fx = impact_fx;
+            segments.push(entry_seg);
             terminal = Some(hit.collider);
             last_hit = hit;
         } else {
@@ -1978,6 +2003,7 @@ fn trace_from(
     query: &BulletTraceQuery,
     start: [f32; 3],
     ignore_hit: Option<ClientId>,
+    ignore_model: Option<ScriptModelId>,
 ) -> TraceOutcome {
     bullet_trace_filtered(
         world.brushes,
@@ -1992,7 +2018,7 @@ fn trace_from(
             mask: query.mask,
             ignore: query.ignore,
             ignore_hit,
-            ignore_model: query.ignore_model,
+            ignore_model,
         },
         world.glass_is_solid,
     )
@@ -2027,6 +2053,7 @@ fn make_segment(
         glass_encoded: collider.map(collider_glass_encoded).unwrap_or(0),
         hit_type,
         hit_id,
+        impact_fx: true,
     }
 }
 
@@ -2169,6 +2196,27 @@ fn player_id(collider: ColliderId) -> Option<ClientId> {
     }
 }
 
+fn model_id(collider: ColliderId) -> Option<ScriptModelId> {
+    match collider {
+        ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. } => {
+            owner.script_model()
+        }
+        _ => None,
+    }
+}
+
+/// MW2's `bullet_penetrationMinFxDist` default: a penetrating bullet's exit
+/// and next entry effects play only when it travels further than this
+/// between the two points (or between two entries when it found no exit).
+pub const PENETRATION_MIN_FX_DIST: f32 = 30.0;
+
+fn penetration_fx_far_enough(from: [f32; 3], to: [f32; 3]) -> bool {
+    let dx = to[0] - from[0];
+    let dy = to[1] - from[1];
+    let dz = to[2] - from[2];
+    dx * dx + dy * dy + dz * dz > PENETRATION_MIN_FX_DIST * PENETRATION_MIN_FX_DIST
+}
+
 fn segment_length(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
@@ -2194,13 +2242,14 @@ fn walk_out_of_solid(
     start: [f32; 3],
     dir: [f32; 3],
     ignore_hit: Option<ClientId>,
+    ignore_model: Option<ScriptModelId>,
     limit: f32,
 ) -> Option<[f32; 3]> {
     let step = 0.25_f32;
     let mut traveled = step;
     while traveled <= limit {
         let probe = vec3_mad(start, traveled, dir);
-        match trace_from(world, query, probe, ignore_hit) {
+        match trace_from(world, query, probe, ignore_hit, ignore_model) {
             TraceOutcome::StartSolid { .. } => {}
             TraceOutcome::Invalid { .. } => return None,
             _ => return Some(probe),
@@ -2707,3 +2756,40 @@ pub const COLLISION_COVERAGE: &[CollisionCoverageRow] = &[
         note: "the missile world trace is the same zero-extent brush∪mesh ray as hitscan; plantable capsule hull and TR_STATIONARY rest stay open",
     },
 ];
+
+#[cfg(test)]
+mod penetration_fx_tests {
+    use super::*;
+
+    #[test]
+    fn penetration_effects_need_more_than_the_min_distance() {
+        let a = [0.0, 0.0, 0.0];
+        assert!(!penetration_fx_far_enough(a, [0.5, 0.0, 0.0]));
+        assert!(!penetration_fx_far_enough(
+            a,
+            [PENETRATION_MIN_FX_DIST, 0.0, 0.0]
+        ));
+        assert!(penetration_fx_far_enough(
+            a,
+            [0.0, 0.0, PENETRATION_MIN_FX_DIST + 0.1]
+        ));
+    }
+
+    #[test]
+    fn model_colliders_name_their_model_and_others_do_not() {
+        let id = ScriptModelId(7);
+        let bone = ColliderId::EntityDObjBone {
+            owner: AuthorityModelOwner::ScriptModel(id),
+            bone: 3,
+            part_classification: 0,
+            surface_flags: 0,
+        };
+        assert_eq!(model_id(bone), Some(id));
+        let world = ColliderId::World {
+            surface_flags: 0,
+            contents: 1,
+            glass_encoded: 0,
+        };
+        assert_eq!(model_id(world), None);
+    }
+}

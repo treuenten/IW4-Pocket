@@ -1425,7 +1425,10 @@ pub(crate) fn phase_trace(
                 Some(ColliderId::Player { client, .. }) => Some(client),
                 _ => None,
             };
-            if bullet_process_on_hit(segment.collider) {
+            if !segment.impact_fx {
+                // Penetration impact MW2 plays no effect for (too close to
+                // the previous one); damage below still applies.
+            } else if bullet_process_on_hit(segment.collider) {
                 if let Some(world_event) = entity_iw4::bullet_hit_event(
                     if segment_is_shield(segment.collider) {
                         3
