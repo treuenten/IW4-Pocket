@@ -35,10 +35,13 @@ struct ClassMenuInputs {
     status: Option<String>,
 }
 
-fn camo_names(catalog: &ClassLoadoutCatalog, weapon: &str) -> Vec<String> {
+fn camo_names(catalog: &ClassLoadoutCatalog, row: ClassEditRow, weapon: &str) -> Vec<String> {
     let Some(registry) = catalog.resolver.0.as_deref() else {
         return Vec::new();
     };
+    if !ClassLoadoutCatalog::takes_camo(row, weapon) {
+        return Vec::new();
+    }
     let Ok(id) =
         session::resolve_class_weapon(registry, weapon, &[], asset_game::LoadoutRules::default())
     else {
@@ -151,7 +154,7 @@ impl ClassMenuState {
                 return Vec::new();
             };
             std::iter::once(String::new())
-                .chain(camo_names(catalog, slot.row_value(row)))
+                .chain(camo_names(catalog, row, slot.row_value(row)))
                 .collect()
         } else if self.attachments {
             let Some(slot) = store.slots.get(store.selected) else {
@@ -288,7 +291,7 @@ pub(crate) fn route(
                         .slots
                         .get(store.selected)
                         .ok_or("Class is unavailable")?;
-                    if camo_names(&catalog, slot.row_value(row)).is_empty() {
+                    if camo_names(&catalog, row, slot.row_value(row)).is_empty() {
                         return Err("This weapon has no camouflage".into());
                     }
                     *state = ClassMenuState {
@@ -397,9 +400,14 @@ pub(crate) fn route(
                                 chosen.pop();
                             }
                         }
-                        let weapons = [candidate.primary.clone(), candidate.secondary.clone()];
-                        for (weapon, camo) in weapons.iter().zip(&mut candidate.camos) {
-                            if !camo.is_empty() && !camo_names(&catalog, weapon).contains(camo) {
+                        let weapons = [
+                            (ClassEditRow::Primary, candidate.primary.clone()),
+                            (ClassEditRow::Secondary, candidate.secondary.clone()),
+                        ];
+                        for ((row, weapon), camo) in weapons.iter().zip(&mut candidate.camos) {
+                            if !camo.is_empty()
+                                && !camo_names(&catalog, *row, weapon).contains(camo)
+                            {
                                 camo.clear();
                             }
                         }
@@ -431,7 +439,7 @@ pub(crate) fn route(
                     for menu in ["class_picker", "class_categories", "class_games"] {
                         menus.write(UiMenuRequest::Close(menu.into()));
                     }
-                    let has_camo = !camo_names(&catalog, slot.row_value(row)).is_empty();
+                    let has_camo = !camo_names(&catalog, row, slot.row_value(row)).is_empty();
                     if !state.attachments
                         && !state.camo
                         && matches!(row, ClassEditRow::Primary | ClassEditRow::Secondary)
@@ -550,7 +558,7 @@ pub(crate) fn route(
                     "camo",
                     "MENU_CAMO_CAPS",
                     "Camouflage",
-                    !camo_names(&catalog, weapon).is_empty(),
+                    !camo_names(&catalog, row, weapon).is_empty(),
                 ),
             ] {
                 dvars.set(

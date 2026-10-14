@@ -64,6 +64,20 @@ impl ClassEditRow {
         })
     }
 
+    pub fn host_slot(self) -> asset_game::CacHostSlot {
+        use asset_game::CacHostSlot;
+        match self {
+            Self::Primary => CacHostSlot::Primary,
+            Self::Secondary => CacHostSlot::Secondary,
+            Self::Lethal => CacHostSlot::Lethal,
+            Self::Tactical => CacHostSlot::Tactical,
+            Self::Perk1 => CacHostSlot::Perk1,
+            Self::Perk2 => CacHostSlot::Perk2,
+            Self::Perk3 => CacHostSlot::Perk3,
+            Self::Deathstreak => CacHostSlot::Deathstreak,
+        }
+    }
+
     pub fn as_u8(self) -> u8 {
         self as u8
     }
@@ -260,9 +274,18 @@ impl ClassLoadoutCatalog {
         if rows.is_empty() {
             return self;
         }
+        // MW2's class editor offers no "none" and not every perk of a slot in
+        // its perk table (Dead Man's Hand is cut): only what its class script
+        // plays as picked.
         let of_slot = |slot: asset_game::CacPerkSlot| -> Vec<String> {
+            let host = match slot {
+                asset_game::CacPerkSlot::Perk1 => asset_game::CacHostSlot::Perk1,
+                asset_game::CacPerkSlot::Perk2 => asset_game::CacHostSlot::Perk2,
+                asset_game::CacPerkSlot::Perk3 => asset_game::CacHostSlot::Perk3,
+                asset_game::CacPerkSlot::Deathstreak => asset_game::CacHostSlot::Deathstreak,
+            };
             rows.iter()
-                .filter(|row| row.reference == NO_PERK || row.slot == slot)
+                .filter(|row| row.slot == slot && asset_game::mw2_accepts(host, &row.reference))
                 .map(|row| row.reference.clone())
                 .collect()
         };
@@ -352,6 +375,12 @@ impl ClassLoadoutCatalog {
 
     pub fn uses_categories(row: ClassEditRow) -> bool {
         row.perk_slot().is_none()
+    }
+
+    /// Whether the weapon in this row can carry a camouflage: not an MW2
+    /// secondary, which MW2 always plays plain.
+    pub fn takes_camo(row: ClassEditRow, weapon: &str) -> bool {
+        asset_game::mw2_takes_camo(row.host_slot(), weapon)
     }
 
     pub fn attachments(&self, row: ClassEditRow, weapon: &str) -> &[String] {
@@ -528,6 +557,36 @@ impl ClassSlotState {
         }
     }
 
+    /// Moves each field MW2's class rules refuse to what MW2 plays in its
+    /// place, and clears an MW2 secondary's camouflage, so the class shows
+    /// what the player gets. A class saved before the editor kept to those
+    /// rules can hold Dead Man's Hand, a "none" perk or deathstreak, or the
+    /// gold Desert Eagle. Returns one line per change.
+    pub fn settle_mw2_rules(&mut self) -> Vec<String> {
+        let mut changes = Vec::new();
+        for row in ClassEditRow::ALL {
+            let stored = self.row_value(row).to_owned();
+            if let Some(settled) = asset_game::mw2_settled_field(row.host_slot(), &stored) {
+                let stored = if stored.is_empty() { "none" } else { &stored };
+                changes.push(format!("{} {stored} -> {settled}", row.label()));
+                self.set_row(row, settled);
+            }
+        }
+        for (at, row) in [(0, ClassEditRow::Primary), (1, ClassEditRow::Secondary)] {
+            if !self.camos[at].is_empty()
+                && !ClassLoadoutCatalog::takes_camo(row, self.row_value(row))
+            {
+                changes.push(format!(
+                    "{} camouflage {} -> none",
+                    row.label(),
+                    self.camos[at]
+                ));
+                self.camos[at].clear();
+            }
+        }
+        changes
+    }
+
     pub fn loadout_rules(&self) -> asset_game::LoadoutRules {
         asset_game::LoadoutRules::for_class(&self.perk1)
     }
@@ -572,17 +631,7 @@ impl ClassPickerFolder {
 }
 
 fn cac_roster(row: ClassEditRow) -> &'static [&'static str] {
-    use asset_game::CacHostSlot;
-    asset_game::cac_host_roster(match row {
-        ClassEditRow::Primary => CacHostSlot::Primary,
-        ClassEditRow::Secondary => CacHostSlot::Secondary,
-        ClassEditRow::Lethal => CacHostSlot::Lethal,
-        ClassEditRow::Tactical => CacHostSlot::Tactical,
-        ClassEditRow::Perk1 => CacHostSlot::Perk1,
-        ClassEditRow::Perk2 => CacHostSlot::Perk2,
-        ClassEditRow::Perk3 => CacHostSlot::Perk3,
-        ClassEditRow::Deathstreak => CacHostSlot::Deathstreak,
-    })
+    asset_game::cac_host_roster(row.host_slot())
 }
 
 pub fn picker_icon_stems() -> Vec<String> {

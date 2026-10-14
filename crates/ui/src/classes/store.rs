@@ -113,8 +113,16 @@ impl SessionClassStore {
                 slots.push(available[slots.len() % available.len()].clone());
             }
         }
+        let slots = slots
+            .iter()
+            .map(|slot| {
+                let mut slot = ClassSlotState::from_host_slot(slot);
+                slot.settle_mw2_rules();
+                slot
+            })
+            .collect();
         Self {
-            slots: slots.iter().map(ClassSlotState::from_host_slot).collect(),
+            slots,
             equipped: None,
             selected: 0,
         }
@@ -296,9 +304,21 @@ pub(crate) fn load_class_store(
     };
     match std::fs::read_to_string(&path) {
         Ok(text) => match decode_slots(&text) {
-            Some(slots) => {
+            Some(mut slots) => {
                 diag::info!(Ui, "classes: {} read from {}", slots.len(), path.display());
+                // What the file holds, so a class moved to MW2's rules below
+                // is written back.
                 file.written = Some(encode_slots(&slots));
+                for (index, slot) in slots.iter_mut().enumerate() {
+                    for change in slot.settle_mw2_rules() {
+                        diag::info!(
+                            Ui,
+                            "classes: class {} `{}`: {change} (what MW2 plays)",
+                            index + 1,
+                            slot.name
+                        );
+                    }
+                }
                 store.slots = slots;
                 for slot in &mut store.slots {
                     slot.lock_reason = catalog.validate_class(slot).err();
