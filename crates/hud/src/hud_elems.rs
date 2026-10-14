@@ -7,10 +7,10 @@ use frame::UiPlaySound;
 use hud_iw4::{
     HE_TYPE_MATERIAL, HE_TYPE_PLAYERNAME, HE_TYPE_TENTHS_TIMER_DOWN, HE_TYPE_TENTHS_TIMER_STATIC,
     HE_TYPE_TENTHS_TIMER_UP, HE_TYPE_TEXT, HE_TYPE_TIMER_DOWN, HE_TYPE_TIMER_STATIC,
-    HE_TYPE_TIMER_UP, HE_TYPE_VALUE, HE_TYPE_WAYPOINT, HudElem, KEY_UNBOUND,
-    WAYPOINT_CONSTANT_SIZE, WAYPOINT_HIDE_OFFSCREEN, copy_in_use_prefix, hud_elem_glow_color,
-    hud_elem_placement, hud_elem_screen_align, hudelem_font_ui_enum, hudelem_text_scale,
-    lerp_hud_colors, replace_directive, ui_get_font_handle, unbound_directive,
+    HE_TYPE_TIMER_UP, HE_TYPE_VALUE, HE_TYPE_WAYPOINT, HudElem, WAYPOINT_CONSTANT_SIZE,
+    WAYPOINT_HIDE_OFFSCREEN, copy_in_use_prefix, hud_elem_glow_color, hud_elem_placement,
+    hud_elem_screen_align, hudelem_font_ui_enum, hudelem_text_scale, lerp_hud_colors,
+    replace_directive, ui_get_font_handle,
 };
 use net::{CEntity, CEntityRuntime, FrameClock, LocalPresentClient, PresentedSnapshot};
 use sim::{ClientLifecycle, SnapshotMeta};
@@ -90,20 +90,6 @@ fn player_name(meta: &SnapshotMeta, value: f32) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn resolve_directive(
-    command: &str,
-    strings: &PreparedLocalizedStrings,
-    input: &frame::HudInputView,
-) -> Option<String> {
-    if matches!(command, "+activate" | "+usereload")
-        && let Some(letter) = input.use_key.as_deref()
-    {
-        return Some(letter.to_owned());
-    }
-    let unbound = strings.0.text(KEY_UNBOUND)?;
-    Some(unbound_directive(unbound, command))
-}
-
 fn hud_string(
     meta: &SnapshotMeta,
     strings: &PreparedLocalizedStrings,
@@ -121,7 +107,7 @@ fn hud_string(
         return String::new();
     };
     replace_directive(&text, |cmd| {
-        resolve_directive(cmd, strings, input).unwrap_or_default()
+        crate::key_prompt::placeholder_text(Some(input), Some(&strings.0), cmd)
     })
 }
 

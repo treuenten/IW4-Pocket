@@ -86,11 +86,10 @@ pub(crate) fn update(
         if ps.cursor_hint <= 0 {
             return Ok(None);
         }
-        let bind = input
-            .use_key
-            .as_deref()
-            .or_else(|| strings.as_ref()?.0.text(hud_iw4::KEY_UNBOUND))
-            .ok_or_else(|| "KEY_UNBOUND localization missing".to_owned())?;
+        // MW2 fills a hint's &&1 with the keys bound to +activate.
+        let localize = strings.as_ref().map(|s| &s.0);
+        let bind = crate::key_prompt::placeholder_text(Some(&input), localize, "+activate");
+        let bind = bind.as_str();
         if ps.cursor_hint <= 4 {
             if ps.cursor_hint_string < 0 {
                 return Ok(None);
@@ -105,16 +104,8 @@ pub(crate) fn update(
                     })?;
             let localized = crate::hudelem::resolve_hud_text(strings, raw)
                 .ok_or_else(|| format!("missing {raw}"))?;
-            let unbound = strings
-                .0
-                .text(hud_iw4::KEY_UNBOUND)
-                .ok_or_else(|| "KEY_UNBOUND localization missing".to_owned())?;
             let hint = hud_iw4::replace_directive(&localized, |cmd| {
-                if matches!(cmd, "+activate" | "+usereload") {
-                    bind.to_owned()
-                } else {
-                    hud_iw4::unbound_directive(unbound, cmd)
-                }
+                crate::key_prompt::placeholder_text(Some(&input), localize, cmd)
             })
             .replace("&&1", bind);
             return Ok(Some((hint, raw.to_owned(), None)));

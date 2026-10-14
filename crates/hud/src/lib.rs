@@ -14,6 +14,7 @@ mod hud_elems;
 mod hudelem;
 mod images;
 mod iris;
+mod key_prompt;
 mod killcam_skip;
 mod killfeed;
 mod mantle_hint;

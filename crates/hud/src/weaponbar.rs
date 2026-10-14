@@ -76,6 +76,7 @@ struct WeaponbarExprHost<'a> {
     weapons: Option<&'a BoundWeapons<'a>>,
     ps: Option<&'a PlayerState>,
     input: Option<&'a frame::HudInputView>,
+    localize: Option<&'a asset_game::LocalizeCatalog>,
     ms: i32,
     cg_time: i32,
     fov: f32,
@@ -105,18 +106,13 @@ impl WeaponbarExprHost<'_> {
 }
 
 impl ExprHost for WeaponbarExprHost<'_> {
-    fn binding_label(&self, command: &str) -> Option<&str> {
-        let keys = &self.input?.binding_keys;
-        // MW2 treats +activate and +usereload as one button, and a layout binds
-        // only one of them (the controller layouts bind +usereload), so a menu
-        // text naming the other still gets that button.
-        keys.get(command)
-            .or_else(|| match command {
-                "+activate" => keys.get("+usereload"),
-                "+usereload" => keys.get("+activate"),
-                _ => None,
-            })
-            .map(String::as_str)
+    fn binding_label(&self, command: &str) -> Option<String> {
+        let input = self.input?;
+        Some(crate::key_prompt::placeholder_text(
+            Some(input),
+            self.localize,
+            command,
+        ))
     }
 
     fn ui_active(&self) -> Result<i32, ExprError> {
@@ -764,6 +760,7 @@ pub(crate) fn update_weaponbar(
         weapons: weapons.as_ref(),
         ps: Some(ps),
         input: client_input.input.as_deref(),
+        localize: strings.as_ref().map(|s| &s.0),
         ms: milliseconds() as i32,
         cg_time: cg_clock.time(),
         fov: client_input.settings.fov,

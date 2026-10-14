@@ -101,30 +101,10 @@ impl SplashExprHost<'_> {
         String::from(key)
     }
 
-    fn key_for(&self, command: &str) -> String {
-        let bound = self.input.and_then(|input| {
-            if matches!(command, "+activate" | "+usereload") {
-                return input.use_key.clone();
-            }
-            let slot = command
-                .strip_prefix("+actionslot ")?
-                .trim()
-                .parse::<usize>()
-                .ok()?
-                .checked_sub(1)?;
-            input.action_slot_keys.get(slot)?.clone()
-        });
-        bound.unwrap_or_else(|| {
-            let unbound = self
-                .localize
-                .and_then(|t| t.text(hud_iw4::KEY_UNBOUND))
-                .unwrap_or(hud_iw4::KEY_UNBOUND);
-            hud_iw4::unbound_directive(unbound, command)
-        })
-    }
-
     fn cell_text(&self, cell: &str, optional_number: i32) -> String {
-        let translated = hud_iw4::replace_directive(&self.loc(cell), |cmd| self.key_for(cmd));
+        let translated = hud_iw4::replace_directive(&self.loc(cell), |cmd| {
+            crate::key_prompt::placeholder_text(self.input, self.localize, cmd)
+        });
         splash_replace_optional(&translated, optional_number)
     }
 }

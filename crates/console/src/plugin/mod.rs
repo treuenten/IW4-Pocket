@@ -564,13 +564,7 @@ fn publish_client_action_input(
         return;
     }
     physical.prompts = Some(prompts);
-    let mut labels: Vec<_> = binds
-        .iter()
-        .filter(|(button, _)| button.is_pad() == devices.pad_prompts)
-        .collect();
-    labels.sort_by_key(|(button, _)| host_keynum(*button));
-    hud_input.binding_keys.clear();
-    hud_input.use_key = None;
+    hud_input.binding_keys = binds.prompt_keys(devices.pad_prompts, devices.style);
     hud_input.action_slot_keys = [None, None, None, None];
     // A menu backs out on the pad's east button (drive_menus_with_pad).
     hud_input.menu_back_key = devices.pad_prompts.then(|| {
@@ -578,20 +572,7 @@ fn publish_client_action_input(
             .prompt(devices.style)
             .to_owned()
     });
-    for (button, id) in labels {
-        let label = match button {
-            BindButton::Pad(button) => button.prompt(devices.style).to_owned(),
-            _ => crate::binds::display_button(button).to_uppercase(),
-        };
-        if let Some(command) = binds.binding_name(button) {
-            hud_input
-                .binding_keys
-                .entry(command.to_owned())
-                .or_insert_with(|| label.clone());
-            if matches!(command, "+activate" | "+usereload") && hud_input.use_key.is_none() {
-                hud_input.use_key = Some(label.clone());
-            }
-        }
+    for (_, id, label) in binds.prompt_labels(devices.pad_prompts, devices.style) {
         for index in 0..4 {
             if id == 15 + index as u32 * 2 && hud_input.action_slot_keys[index].is_none() {
                 hud_input.action_slot_keys[index] = Some(label.clone());
