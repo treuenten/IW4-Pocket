@@ -1326,11 +1326,32 @@ fn admit(
             id: logical.request.instance.id,
             policy: logical.request.admission,
             priority: f32::from_bits(logical.request.instance.priority.load(Ordering::Acquire)),
+            virtual_voice: logical.slot.is_none()
+                && logical.request.instance.status() == InstanceStatus::Virtual
+                && crate::admission::silent_loops_free_channel(),
         })
         .collect();
     let victims = match crate::admission::plan(&policy, &occupants) {
         Ok(victims) => victims,
         Err(reason) => {
+            if reason == AdmissionFailure::Concurrency
+                && crate::diagnostics::enabled()
+                && let Some(channel) = policy.channel
+            {
+                let on_channel = occupants.iter().filter(|occupant| {
+                    occupant
+                        .policy
+                        .channel
+                        .is_some_and(|old| old.key == channel.key)
+                });
+                crate::diagnostics::emit(format!(
+                    "audio diag: channel full channel={} maximum={} occupants={} virtual={}",
+                    channel.key.id,
+                    channel.maximum,
+                    on_channel.clone().count(),
+                    on_channel.filter(|occupant| occupant.virtual_voice).count()
+                ));
+            }
             reject(&request.instance, rejections, reason);
             return;
         }

@@ -238,6 +238,9 @@ pub fn valid_file_setting(name: &str, value: &str) -> bool {
         "IW4L_BOT_RESERVE_AMMO" => matches!(value, "0" | "1"),
         // 0 lets the Chopper Gunner's camera pitch and roll with the helicopter.
         "IW4L_GUNNER_STEADY" => matches!(value, "0" | "1"),
+        // 0 counts a loop nobody can hear against its sound channel's voice
+        // limit again, as before 15 Oct (on by default).
+        "IW4L_SILENT_LOOPS_FREE_CHANNEL" => matches!(value, "0" | "1"),
         // Free each exact-colour shader's compiled data (naga IR) once its
         // pipelines are built, instead of keeping it for the whole map (off by
         // default; Apple only).
