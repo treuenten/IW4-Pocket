@@ -244,14 +244,26 @@ impl ViewmodelController {
             WeaponAnimSlot::Fire
             | WeaponAnimSlot::AdsFire
             | WeaponAnimSlot::LastShot
-            | WeaponAnimSlot::AdsLastShot
-            | WeaponAnimSlot::HoldFire => {
+            | WeaponAnimSlot::AdsLastShot => {
                 let timer = self.weapon.fire_time_ms;
                 (
                     WeaponState::Firing,
                     if timer > 0 { Some(timer) } else { None },
                 )
             }
+            // The offhand prepare (grenade pull-pin, C4 and claymore hold,
+            // Tactical Insertion ignite) lasts holdFireTime in the weapon state
+            // machine, and ANIM_RATE_TABLE scales its clip to that time. Timed
+            // with fireTime, the Semtex pull-pin played 1.7 times too fast and
+            // left the screen empty before the throw.
+            WeaponAnimSlot::HoldFire => (
+                WeaponState::Firing,
+                positive_ms(self.weapon.hold_fire_time_ms),
+            ),
+            WeaponAnimSlot::Detonate => (
+                WeaponState::Firing,
+                positive_ms(self.weapon.detonate_time_ms),
+            ),
             WeaponAnimSlot::FirstRaise => (
                 WeaponState::Raising {
                     first: true,
@@ -628,4 +640,60 @@ impl ViewmodelController {
 
 fn positive_ms(ms: i32) -> Option<i32> {
     (ms > 0).then_some(ms)
+}
+
+#[cfg(test)]
+mod slot_timer_tests {
+    use super::*;
+
+    /// MW2's Semtex: fireTime 360, holdFireTime 600 (common_mp.ff).
+    fn semtex() -> ViewmodelController {
+        let mut weapon = WeaponAnimations::empty("semtex");
+        weapon.fire_time_ms = 360;
+        weapon.hold_fire_time_ms = 600;
+        ViewmodelController::new(weapon)
+    }
+
+    #[test]
+    fn hold_fire_runs_for_hold_fire_time() {
+        let controller = semtex();
+        assert_eq!(
+            controller.state_and_timer_for_slot(WeaponAnimSlot::HoldFire),
+            (WeaponState::Firing, Some(600))
+        );
+        assert_eq!(
+            controller.state_and_timer_for_slot(WeaponAnimSlot::Fire),
+            (WeaponState::Firing, Some(360))
+        );
+        // The 867 ms pull-pin plays 1.44x, not 2.4x.
+        assert!((playback_rate(867, 600) - 867.0 / 600.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hold_fire_without_a_hold_time_plays_native() {
+        let mut weapon = WeaponAnimations::empty("throwingknife");
+        weapon.fire_time_ms = 550;
+        let controller = ViewmodelController::new(weapon);
+        assert_eq!(
+            controller.state_and_timer_for_slot(WeaponAnimSlot::HoldFire),
+            (WeaponState::Firing, None)
+        );
+    }
+
+    #[test]
+    fn detonate_is_a_dispatchable_native_slot() {
+        let index = asset_iw4::size::weap_anim::DETONATE;
+        assert_eq!(
+            WeaponAnimSlot::from_index(index),
+            Some(WeaponAnimSlot::Detonate)
+        );
+        assert!(slot_uses_native_rate(index));
+        assert!(dispatch_slots().any(|slot| slot == index));
+        let mut c4 = WeaponAnimations::empty("c4");
+        c4.detonate_time_ms = 500;
+        assert_eq!(
+            ViewmodelController::new(c4).state_and_timer_for_slot(WeaponAnimSlot::Detonate),
+            (WeaponState::Firing, Some(500))
+        );
+    }
 }

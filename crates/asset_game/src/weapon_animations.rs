@@ -41,6 +41,7 @@ pub enum WeaponAnimSlot {
     EmptyIdle = weap_anim::EMPTY_IDLE as u8,
     Fire = weap_anim::FIRE as u8,
     HoldFire = weap_anim::HOLD_FIRE as u8,
+    Detonate = weap_anim::DETONATE as u8,
     LastShot = weap_anim::LASTSHOT as u8,
     Rechamber = weap_anim::RECHAMBER as u8,
     Melee = weap_anim::MELEE as u8,
@@ -81,6 +82,7 @@ impl WeaponAnimSlot {
             weap_anim::EMPTY_IDLE => Self::EmptyIdle,
             weap_anim::FIRE => Self::Fire,
             weap_anim::HOLD_FIRE => Self::HoldFire,
+            weap_anim::DETONATE => Self::Detonate,
             weap_anim::LASTSHOT => Self::LastShot,
             weap_anim::RECHAMBER => Self::Rechamber,
             weap_anim::MELEE => Self::Melee,
@@ -118,6 +120,13 @@ pub struct WeaponAnimations {
     pub name: String,
 
     pub fire_time_ms: i32,
+
+    pub detonate_time_ms: i32,
+
+    /// holdFireTime: how long the offhand prepare (grenade pull-pin, C4 and
+    /// claymore hold, Tactical Insertion ignite) lasts; its clip is stretched
+    /// to this time.
+    pub hold_fire_time_ms: i32,
 
     pub melee_time_ms: i32,
 
@@ -163,6 +172,7 @@ impl std::fmt::Debug for WeaponAnimations {
         f.debug_struct("WeaponAnimations")
             .field("name", &self.name)
             .field("fire_time_ms", &self.fire_time_ms)
+            .field("hold_fire_time_ms", &self.hold_fire_time_ms)
             .field("raise_time_ms", &self.raise_time_ms)
             .field("sprint_loop_time_ms", &self.sprint_loop_time_ms)
             .field("ads_overlay", &self.ads_overlay)
@@ -176,6 +186,8 @@ impl WeaponAnimations {
         Self {
             name: name.into(),
             fire_time_ms: 0,
+            detonate_time_ms: 0,
+            hold_fire_time_ms: 0,
             melee_time_ms: 0,
             melee_charge_time_ms: 0,
             raise_time_ms: 0,
@@ -272,6 +284,8 @@ impl WeaponAnimations {
         Self {
             name,
             fire_time_ms: 0,
+            detonate_time_ms: 0,
+            hold_fire_time_ms: 0,
             melee_time_ms: 0,
             melee_charge_time_ms: 0,
             raise_time_ms: 0,
@@ -303,6 +317,8 @@ impl WeaponAnimations {
             self.alternate_drop_time_ms = facts.alternate_drop_time_ms;
             self.melee_time_ms = facts.melee_time_ms;
             self.melee_charge_time_ms = facts.melee_charge_time_ms;
+            self.detonate_time_ms = facts.detonate_time_ms;
+            self.hold_fire_time_ms = facts.hold_fire_time_ms;
         }
         let (fire_time_ms, raise_time_ms) = registry.timers_of(index);
         let (drop_time_ms, quick_drop_time_ms, quick_raise_time_ms) =

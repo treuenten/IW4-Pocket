@@ -841,6 +841,7 @@ mod model_handle_tests {
             coll_lod: 0,
             coll_surfs: Vec::new(),
             movement_brushes: Vec::new(),
+            phys: None,
             mount_tag: None,
             lod: None,
             lod_smc: None,
