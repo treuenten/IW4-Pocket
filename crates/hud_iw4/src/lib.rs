@@ -23,6 +23,7 @@ mod playercard;
 mod render_commands;
 mod replace_directive;
 mod scorebar;
+mod scoreboard;
 mod scrplace;
 mod set_2d;
 mod splash;
@@ -207,6 +208,11 @@ pub use scorebar::{
     scorebar_clock_forecolor, scorebar_cycle_slot, scorebar_ffa_standing, scorebar_ffa_status,
     scorebar_fill_cap_x, scorebar_gametype_loc_key, scorebar_status_forecolor,
     scorebar_status_from_vis, scorebar_status_loc_key, scorebar_track_frac,
+};
+pub use scoreboard::{
+    SCOREBOARD_HEADER_MARGIN, SCOREBOARD_HEADER_SCALE, SCORES_COLOR_ENEMY_TEAM,
+    SCORES_COLOR_MY_PARTY, SCORES_COLOR_MY_TEAM, SCORES_COLOR_SPECTATOR, SCORES_ROW_ALPHA,
+    scoreboard_header_fit, scoreboard_row_color,
 };
 pub use scrplace::{
     ALIGN_CENTER, ALIGN_CENTER_SAFE, ALIGN_FULLSCREEN, ALIGN_NOSCALE, ALIGN_SUB, ALIGN_TO_VIRTUAL,
