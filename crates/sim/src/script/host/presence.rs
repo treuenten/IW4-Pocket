@@ -109,19 +109,18 @@ pub(crate) fn settled(world: &mut World) -> FrameWorld<'_> {
 }
 
 /// Where each placed entity wants its collision: pose, visibility and
-/// solidity by presence. A later entity with the same presence wins, as a
-/// map collected in entity order would have it.
+/// solidity, sorted by presence with one row per presence. A later entity
+/// with the same presence wins, as a map collected in entity order would
+/// have it.
 ///
 /// Every script trace settles collision first (`settled`), so this runs many
 /// times a tick over every placed entity. The field symbols are resolved once
-/// per call (a string lookup in the program's symbol table) and each entity's
-/// fields are found once; the values are the same `object_field` reads.
-fn settle_wanted(
-    runtime: &mut Runtime,
-) -> BTreeMap<ScriptModelId, ([f32; 3], [f32; 3], bool, bool)> {
-    let mut wanted = BTreeMap::new();
+/// per call (a string lookup in the program's symbol table), each entity's
+/// fields are found once, and the rows go in a vector rather than a map
+/// built node by node; the values are the same `object_field` reads.
+fn settle_wanted(runtime: &mut Runtime) -> Vec<(ScriptModelId, SettledPose)> {
     if !runtime.entities.values().any(|e| e.presence.is_some()) {
-        return wanted;
+        return Vec::new();
     }
     // Resolved in the order the per-entity reads asked for them, so a missing
     // symbol gets the same dynamic id.
@@ -133,22 +132,46 @@ fn settle_wanted(
         Some(Value::Vector(v)) => *v,
         _ => [0.0; 3],
     };
-    for (object, entity) in &runtime.entities {
-        let Some(presence) = entity.presence else {
-            continue;
-        };
-        let fields = runtime.objects.get(object);
-        wanted.insert(
-            presence,
-            (
-                vector(fields, origin_field),
-                vector(fields, angles_field),
-                entity.hidden,
-                entity.solid,
-            ),
-        );
+    let mut placed: Vec<(ScriptModelId, SettledPose)> = runtime
+        .entities
+        .iter()
+        .filter_map(|(object, entity)| {
+            let presence = entity.presence?;
+            let fields = runtime.objects.get(object);
+            Some((
+                presence,
+                (
+                    vector(fields, origin_field),
+                    vector(fields, angles_field),
+                    entity.hidden,
+                    entity.solid,
+                ),
+            ))
+        })
+        .collect();
+    // A stable sort keeps a shared presence's entities in entity order; the
+    // last of them stays.
+    placed.sort_by_key(|(presence, _)| *presence);
+    let mut wanted: Vec<(ScriptModelId, SettledPose)> = Vec::with_capacity(placed.len());
+    for row in placed {
+        match wanted.last_mut() {
+            Some(last) if last.0 == row.0 => *last = row,
+            _ => wanted.push(row),
+        }
     }
     wanted
+}
+
+type SettledPose = ([f32; 3], [f32; 3], bool, bool);
+
+fn settled_pose(
+    wanted: &[(ScriptModelId, SettledPose)],
+    id: ScriptModelId,
+) -> Option<&SettledPose> {
+    wanted
+        .binary_search_by_key(&id, |(presence, _)| *presence)
+        .ok()
+        .map(|at| &wanted[at].1)
 }
 
 /// `settle_wanted` as it was written before: two `object_field` reads by name
@@ -198,8 +221,10 @@ pub(crate) fn settle_collision(world: &mut World) {
         .collect();
     let mut frame = FrameWorld::from_world(world);
     for row in frame.entity_collision_capabilities_mut() {
-        let Some(&(origin, angles, hidden, solid)) =
-            row.owner.script_model().and_then(|id| wanted.get(&id))
+        let Some(&(origin, angles, hidden, solid)) = row
+            .owner
+            .script_model()
+            .and_then(|id| settled_pose(&wanted, id))
         else {
             continue;
         };
@@ -760,7 +785,20 @@ mod settle_tests {
             let mut once = by_name.clone();
             let expected = settle_wanted_by_name(&mut by_name);
             assert!(!expected.is_empty());
-            assert_eq!(settle_wanted(&mut once), expected, "symbols {symbols:?}");
+            let wanted = settle_wanted(&mut once);
+            assert_eq!(
+                wanted.iter().cloned().collect::<BTreeMap<_, _>>(),
+                expected,
+                "symbols {symbols:?}"
+            );
+            assert!(wanted.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            for id in (95..115).map(ScriptModelId) {
+                assert_eq!(
+                    settled_pose(&wanted, id),
+                    expected.get(&id),
+                    "presence {id:?}"
+                );
+            }
             assert_eq!(once.dynamic_symbols, by_name.dynamic_symbols);
         }
     }
