@@ -219,7 +219,10 @@ pub struct WeaponLockView {
 }
 
 pub trait ExprHost {
-    fn binding_label(&self, _command: &str) -> Option<&str> {
+    /// The text a menu item's `[{command}]` placeholder is replaced with (the
+    /// keys bound to the command, or "Unbound"); None leaves the placeholder
+    /// as it is, for hosts that don't know the bindings.
+    fn binding_label(&self, _command: &str) -> Option<String> {
         None
     }
 

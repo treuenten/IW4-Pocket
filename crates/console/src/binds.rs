@@ -414,6 +414,43 @@ impl KeyBinds {
         self.get(button).and_then(command_name)
     }
 
+    /// The buttons bound on one device (a controller's, or the keyboard's and
+    /// mouse's), in key order, with the name a prompt gives each.
+    pub fn prompt_labels(
+        &self,
+        pad: bool,
+        style: frame::PromptStyle,
+    ) -> Vec<(BindButton, u32, String)> {
+        let mut labels: Vec<_> = self
+            .iter()
+            .filter(|(button, _)| button.is_pad() == pad)
+            .map(|(button, id)| (button, id, prompt_label(button, style)))
+            .collect();
+        labels.sort_by_key(|(button, _, _)| host_keynum(*button));
+        labels
+    }
+
+    /// What MW2's key-binding lookup finds for a prompt on one device: the
+    /// names of the keys bound to each command, in key order, each name once
+    /// (both shift keys are one SHIFT).
+    pub fn prompt_keys(
+        &self,
+        pad: bool,
+        style: frame::PromptStyle,
+    ) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut keys = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for (_, id, label) in self.prompt_labels(pad, style) {
+            let Some(command) = command_name(id) else {
+                continue;
+            };
+            let names = keys.entry(command.to_owned()).or_default();
+            if !names.contains(&label) {
+                names.push(label);
+            }
+        }
+        keys
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (BindButton, u32)> + '_ {
         self.map.iter().map(|(b, id)| (*b, *id))
     }
@@ -482,6 +519,15 @@ impl KeyBinds {
     }
 }
 
+/// A button's name in a prompt: a controller's in the prompt style in use, a
+/// key's or mouse button's in capitals.
+pub fn prompt_label(button: BindButton, style: frame::PromptStyle) -> String {
+    match button {
+        BindButton::Pad(button) => button.prompt(style).to_owned(),
+        _ => display_button(button).to_uppercase(),
+    }
+}
+
 pub(crate) fn pulse_wheel_binding(
     binds: &KeyBinds,
     client: &mut ClientInput,
@@ -494,4 +540,70 @@ pub(crate) fn pulse_wheel_binding(
     client.keys[key_num].binding = id;
     key_event(client, key_num, true, now_msec, frame_msec);
     key_event(client, key_num, false, now_msec, frame_msec);
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use frame::PromptStyle;
+
+    fn keys(binds: &KeyBinds, pad: bool, style: PromptStyle, command: &str) -> Vec<String> {
+        binds
+            .prompt_keys(pad, style)
+            .get(command)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_controller_names_its_buttons_in_the_style_in_use() {
+        let mut binds = KeyBinds::default();
+        binds.apply_defaults();
+        for (command, xbox, playstation) in [
+            ("weapnext", "Y", "△"),
+            ("+usereload", "X", "□"),
+            ("+actionslot 4", "D-RIGHT", "D-RIGHT"),
+            ("+attack", "RT", "R2"),
+            ("+frag", "RB", "R1"),
+        ] {
+            assert_eq!(keys(&binds, true, PromptStyle::Xbox, command), [xbox]);
+            assert_eq!(
+                keys(&binds, true, PromptStyle::PlayStation, command),
+                [playstation]
+            );
+        }
+        // The controller layouts bind the use button as +usereload only.
+        assert!(keys(&binds, true, PromptStyle::Xbox, "+activate").is_empty());
+    }
+
+    #[test]
+    fn the_keyboard_names_its_keys_in_capitals() {
+        let mut binds = KeyBinds::default();
+        binds.apply_defaults();
+        assert_eq!(
+            keys(&binds, false, PromptStyle::Xbox, "weapnext"),
+            ["MOUSE3"]
+        );
+        assert_eq!(keys(&binds, false, PromptStyle::Xbox, "+activate"), ["E"]);
+        assert_eq!(
+            keys(&binds, false, PromptStyle::Xbox, "+actionslot 4"),
+            ["4"]
+        );
+        assert_eq!(keys(&binds, false, PromptStyle::Xbox, "+frag"), ["F"]);
+    }
+
+    #[test]
+    fn every_key_on_a_command_is_listed_once_in_key_order() {
+        let mut binds = KeyBinds::default();
+        binds.apply_defaults();
+        let _ = binds.apply_script("bind 1 weapnext; bind SHIFT +holdbreath");
+        assert_eq!(
+            keys(&binds, false, PromptStyle::Xbox, "weapnext"),
+            ["1", "MOUSE3"]
+        );
+        assert_eq!(
+            keys(&binds, false, PromptStyle::Xbox, "+holdbreath"),
+            ["SHIFT"]
+        );
+    }
 }

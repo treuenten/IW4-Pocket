@@ -371,8 +371,11 @@ impl Default for HostClassLoadouts {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct HudInputView {
-    pub use_key: Option<String>,
-    pub binding_keys: std::collections::BTreeMap<String, String>,
+    /// The keys bound to each command (as the bind table spells it), named
+    /// for the device the prompts name: the keyboard and mouse, or a
+    /// controller's buttons (the touch controls are one). In key order, one
+    /// name per key.
+    pub binding_keys: std::collections::BTreeMap<String, Vec<String>>,
     pub console_open: bool,
     pub script_menu_open: bool,
     pub action_slot_keys: [Option<String>; 4],

@@ -4,9 +4,9 @@ use asset_game::MenuCatalog;
 use assets::PreparedLocalizedStrings;
 use bevy::prelude::*;
 use hud_iw4::{
-    CG_OWNERDRAW_MANTLE, HINT_MANTLE_MATERIAL, KEY_UNBOUND, PLATFORM_MANTLE,
-    default_mp_key_binding, draw_mantle_hint_layout, draw_mantle_hint_visible, hint_replace_bind,
-    normalized_text_scale, ui_get_font_handle, ui_text_height, unbound_directive,
+    CG_OWNERDRAW_MANTLE, HINT_MANTLE_MATERIAL, PLATFORM_MANTLE, default_mp_key_binding,
+    draw_mantle_hint_layout, draw_mantle_hint_visible, hint_replace_bind, normalized_text_scale,
+    ui_get_font_handle, ui_text_height,
 };
 use net::{LocalPresentClient, PresentedSnapshot};
 
@@ -33,25 +33,22 @@ fn hide(pass: &mut HudTessPass) {
 /// controller's or the touch controls' button while on one), as the engine
 /// fills [{+gostand}] in PLATFORM_MANTLE; the keyboard default only when
 /// nothing is bound.
-fn bind_letter(
-    strings: &PreparedLocalizedStrings,
-    input: Option<&frame::HudInputView>,
-) -> Option<String> {
+fn bind_letter(strings: &PreparedLocalizedStrings, input: Option<&frame::HudInputView>) -> String {
+    let localize = Some(&strings.0);
     if let Some(bound) = input.and_then(|input| {
         ["+gostand", "+moveup"]
             .iter()
-            .find_map(|command| input.binding_keys.get(*command))
+            .find_map(|command| crate::key_prompt::bound_key_text(input, localize, command))
     }) {
-        return Some(bound.clone());
+        return bound;
     }
     if let Some(letter) = default_mp_key_binding("+gostand") {
-        return Some(letter.to_owned());
+        return letter.to_owned();
     }
     if let Some(letter) = default_mp_key_binding("+moveup") {
-        return Some(letter.to_owned());
+        return letter.to_owned();
     }
-    let unbound = strings.0.text(KEY_UNBOUND)?;
-    Some(unbound_directive(unbound, "+gostand"))
+    crate::key_prompt::unbound_text(localize).to_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -111,13 +108,7 @@ pub(crate) fn update_mantle_hint(
         hide(&mut pass);
         return;
     };
-    let Some(bind) = bind_letter(strings, input.as_deref()) else {
-        gaps.raise(GapCause::LocalizedRowMissing {
-            key: KEY_UNBOUND.to_owned(),
-        });
-        hide(&mut pass);
-        return;
-    };
+    let bind = bind_letter(strings, input.as_deref());
     let text = hint_replace_bind(template, &bind);
 
     let font_name = ui_get_font_handle(

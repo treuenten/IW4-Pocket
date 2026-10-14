@@ -68,11 +68,13 @@ pub(crate) fn update(
     let Some(font) = catalog.font(font_name) else {
         return;
     };
+    // MW2 names the first of these commands that has a key.
+    let localize = strings.as_ref().map(|s| &s.0);
     let binding = ["+holdbreath", "+melee_breath", "+breath_sprint"]
         .iter()
-        .find_map(|cmd| input.binding_keys.get(*cmd))
-        .map(String::as_str)
-        .unwrap_or("UNBOUND");
+        .find_map(|cmd| crate::key_prompt::bound_key_text(&input, localize, cmd))
+        .unwrap_or_else(|| crate::key_prompt::unbound_text(localize).to_owned());
+    let binding = binding.as_str();
     let template = strings
         .as_ref()
         .and_then(|s| s.0.text("PLATFORM_HOLD_BREATH"));

@@ -424,10 +424,11 @@ fn paint_text(
             break;
         };
         let end = start + 2 + end;
+        // MW2's item text painter writes the key names in place of the whole
+        // placeholder, brackets included.
         if let Some(label) = host.binding_label(&resolved.text[start + 2..end]) {
-            let replacement = format!("[{label}]");
-            resolved.text.replace_range(start..end + 2, &replacement);
-            at = start + replacement.len();
+            resolved.text.replace_range(start..end + 2, &label);
+            at = start + label.len();
         } else {
             at = end + 2;
         }

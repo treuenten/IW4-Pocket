@@ -193,8 +193,8 @@ pub use render_commands::{
     GfxCmdView, GfxCmdWalk, GfxCmdWalkRefuse, GfxRenderCommandBuf, walk_render_commands,
 };
 pub use replace_directive::{
-    KEY_UNBOUND, default_mp_key_binding, hudelem_default_text_scale, replace_directive,
-    unbound_directive,
+    KEY_OR, KEY_UNBOUND, binding_text, default_mp_key_binding, hudelem_default_text_scale,
+    placeholder_command, replace_directive, use_button_alias,
 };
 pub use scorebar::{
     SCOREBAR_BACKDROP, SCOREBAR_BACKDROP_IMAGE, SCOREBAR_BOTTOM_BG, SCOREBAR_BOTTOM_CAP,
