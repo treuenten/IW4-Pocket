@@ -125,6 +125,25 @@ pub(crate) fn settle_collision(world: &mut World) {
             (presence, (origin, angles, hidden, solid))
         })
         .collect();
+    let turrets: Vec<_> = runtime
+        .engine
+        .turrets
+        .iter()
+        .filter_map(|(object, turret)| {
+            Some((
+                *object,
+                runtime.entities.get(object)?.presence?,
+                turret.clone(),
+            ))
+        })
+        .collect();
+    let rotations: BTreeMap<_, _> = turrets
+        .into_iter()
+        .map(|(object, presence, turret)| {
+            let base = vector(&mut runtime, object, "angles");
+            (presence, turret.model_rotations(base))
+        })
+        .collect();
     let mut frame = FrameWorld::from_world(world);
     for row in frame.entity_collision_capabilities_mut() {
         let Some(&(origin, angles, hidden, solid)) =
@@ -134,6 +153,11 @@ pub(crate) fn settle_collision(world: &mut World) {
         };
         row.hidden = hidden;
         row.solid = solid;
+        if let Some(rotations) = row.owner.script_model().and_then(|id| rotations.get(&id))
+            && let Some(dobj) = row.dobj.as_mut()
+        {
+            dobj.set_tag_rotations(rotations.clone());
+        }
         let settled = row
             .followed_pose
             .is_some_and(|(at, facing)| near(at, origin) && near_angles(facing, angles));

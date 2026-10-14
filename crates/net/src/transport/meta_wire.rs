@@ -2644,6 +2644,14 @@ fn encode_entity_dobjs(
             out.put_u8(u8::from(model.ignore_collision));
         }
         out.put_u32(state.pose_revision);
+        debug_assert!(state.tag_rotations.len() <= u16::MAX as usize);
+        out.put_u16(state.tag_rotations.len() as u16);
+        for rotation in &state.tag_rotations {
+            put_text(out, &rotation.tag);
+            for angle in rotation.angles {
+                out.put_f32(angle);
+            }
+        }
         put_optional_part_bits(out, state.requested_parts);
         for word in state.hide_part_bits.words() {
             out.put_u32(*word);
@@ -2706,6 +2714,19 @@ fn decode_entity_dobjs(
             });
         }
         let pose_revision = input.get_u32()?;
+        let rotation_count = input.get_u16()? as usize;
+        if rotation_count > anim_iw4::PartBits::CAPACITY {
+            return Err(WireError::Malformed("too many tag rotations"));
+        }
+        let mut tag_rotations = Vec::with_capacity(rotation_count);
+        for _ in 0..rotation_count {
+            let tag = get_text(input)?;
+            let angles = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+            if tag.is_empty() || !angles.iter().all(|angle| angle.is_finite()) {
+                return Err(WireError::Malformed("invalid tag rotation"));
+            }
+            tag_rotations.push(xmodel_runtime::TagRotation { tag, angles });
+        }
         let requested_parts = get_optional_part_bits(input)?;
         let mut hide_words = [0u32; anim_iw4::PartBits::WORDS];
         for word in &mut hide_words {
@@ -2767,6 +2788,7 @@ fn decode_entity_dobjs(
                     models,
                 },
                 pose_revision,
+                tag_rotations,
                 tree,
                 requested_parts,
                 hide_part_bits: xmodel_runtime::HidePartBits::from_words(hide_words),
@@ -3169,6 +3191,37 @@ fn decode_objectives(input: &mut WireReader<'_>) -> Result<sim::ObjectiveMatch, 
         state.vehicle_targets.push(target);
     }
     Ok(state)
+}
+
+#[cfg(test)]
+mod entity_dobj_wire_tests {
+    use super::*;
+
+    #[test]
+    fn a_turret_aim_round_trips_with_its_model() {
+        let mut state = xmodel_runtime::DObjSemanticState::bind_pose("sentry_minigun".into(), 3, 9);
+        state.tag_rotations = vec![
+            xmodel_runtime::TagRotation {
+                tag: "tag_aim".into(),
+                angles: [4.5, -60.0, 0.0],
+            },
+            xmodel_runtime::TagRotation {
+                tag: "tag_aim_animated".into(),
+                angles: [4.5, -60.0, 0.0],
+            },
+        ];
+        let rows = vec![(
+            sim::AuthorityModelOwner::ScriptModel(sim::ScriptModelId::from_wire(1_073_741_840)),
+            state,
+        )];
+        let mut out = WireWriter::new();
+        encode_entity_dobjs(&mut out, &rows);
+        let bytes = out.finish();
+        let mut input = WireReader::new(&bytes);
+        let decoded = decode_entity_dobjs(&mut input).expect("decodes");
+        assert!(input.is_empty());
+        assert_eq!(decoded, rows);
+    }
 }
 
 #[cfg(test)]

@@ -376,6 +376,20 @@ impl AuthorityDObjState {
         self.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
     }
 
+    /// Bone controllers the game sets on this model (a turret's aim), shared by
+    /// its collision, its tags and the clients that draw it.
+    pub fn set_tag_rotations(&mut self, rotations: Vec<xmodel_runtime::TagRotation>) {
+        if self.semantic_state.tag_rotations == rotations {
+            return;
+        }
+        self.pose_request.tag_rotations = rotations.clone();
+        self.semantic_state.tag_rotations = rotations;
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        self.semantic_state.pose_revision = self.pose_revision;
+        self.materialized_pose_revision = None;
+        self.current_collision = None;
+    }
+
     pub fn set_attachments(&mut self, attachments: &[(&str, &str)]) {
         let mut models = vec![xmodel_runtime::DObjModelDescriptor {
             model: self.current_model.clone(),
