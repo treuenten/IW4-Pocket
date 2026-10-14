@@ -356,6 +356,10 @@ pub struct HudInputView {
     pub console_open: bool,
     pub script_menu_open: bool,
     pub action_slot_keys: [Option<String>; 4],
+    /// The controller button that backs out of a menu, named in the prompt
+    /// style in use, while the prompts name a controller's buttons; None on
+    /// the keyboard and mouse.
+    pub menu_back_key: Option<String>,
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]

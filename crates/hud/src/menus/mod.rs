@@ -239,6 +239,10 @@ pub(crate) fn update_script_menus(
                 .snapshot()
                 .and_then(|snap| snap.meta.for_client(local.0))
                 .is_some_and(|meta| meta.radar_blocked),
+        menu_back_key: input
+            .hud_input
+            .as_ref()
+            .and_then(|view| view.menu_back_key.clone()),
     };
 
     let mut runner = Runner {

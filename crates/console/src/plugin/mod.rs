@@ -570,6 +570,12 @@ fn publish_client_action_input(
     hud_input.binding_keys.clear();
     hud_input.use_key = None;
     hud_input.action_slot_keys = [None, None, None, None];
+    // A menu backs out on the pad's east button (drive_menus_with_pad).
+    hud_input.menu_back_key = devices.pad_prompts.then(|| {
+        crate::binds::PadButton::East
+            .prompt(devices.style)
+            .to_owned()
+    });
     for (button, id) in labels {
         let label = match button {
             BindButton::Pad(button) => button.prompt(devices.style).to_owned(),

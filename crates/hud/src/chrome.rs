@@ -410,6 +410,13 @@ fn paint_text(
             return;
         }
     };
+    // MW2's PC string names the keyboard's key ("BACK ^0- ^3ESC^7"); on a
+    // controller the menus back out on its east button.
+    if resolved.loc_key.eq_ignore_ascii_case(PLATFORM_BACK_CAPS)
+        && let Some(label) = host.menu_back_label()
+    {
+        resolved.text = resolved.text.replace("ESC", label);
+    }
     let mut at = 0;
     while let Some(start) = resolved.text[at..].find("[{") {
         let start = start + at;
@@ -715,6 +722,8 @@ pub(crate) fn push_owner_pic(
         layer: 1,
     });
 }
+
+const PLATFORM_BACK_CAPS: &str = "PLATFORM_BACK_CAPS";
 
 struct ResolvedText {
     text: String,
