@@ -2186,6 +2186,14 @@ fn encode_corpse_pool(out: &mut WireWriter, pool: &PlayerCorpsePool) {
         out.put_i32(slot.spawn_time_ms);
         out.put_u32(slot.shield.map_or(0, |shield| shield.weapon));
         out.put_u8(u8::from(slot.shield.is_some_and(|shield| shield.on_back)));
+        out.put_i32(slot.client_state_team);
+        match slot.ffa_team {
+            None => out.put_u8(0),
+            Some(team) => {
+                out.put_u8(1);
+                out.put_u8(team);
+            }
+        }
     }
 }
 
@@ -2221,6 +2229,12 @@ fn decode_corpse_pool(input: &mut WireReader<'_>) -> Result<PlayerCorpsePool, Wi
                     ground_entity_num: input.get_i32()?,
                     spawn_time_ms: input.get_i32()?,
                     shield: decode_corpse_shield(input)?,
+                    client_state_team: input.get_i32()?,
+                    ffa_team: match input.get_u8()? {
+                        0 => None,
+                        1 => Some(input.get_u8()?),
+                        _ => return Err(WireError::Malformed("bad corpse ffa_team tag")),
+                    },
                 };
             }
             _ => return Err(WireError::Malformed("bad corpse slot tag")),
@@ -3162,7 +3176,7 @@ mod corpse_pool_wire_tests {
     use super::*;
 
     #[test]
-    fn a_corpse_pool_round_trips_with_each_body_spawn_time_and_shield() {
+    fn a_corpse_pool_round_trips_with_each_body_spawn_time_shield_and_uniform() {
         let mut pool = PlayerCorpsePool {
             spawn_ring: 3,
             ..PlayerCorpsePool::default()
@@ -3192,12 +3206,15 @@ mod corpse_pool_wire_tests {
                 weapon: 41,
                 on_back: true,
             }),
+            client_state_team: 2,
+            ffa_team: None,
         };
         pool.slots[2] = PlayerCorpseSlot {
             occupied: true,
             entnum: 1002,
             victim: ClientId(5),
             spawn_time_ms: 23_000,
+            ffa_team: Some(1),
             ..PlayerCorpseSlot::default()
         };
         let mut out = WireWriter::new();
@@ -3209,5 +3226,7 @@ mod corpse_pool_wire_tests {
         assert_eq!(decoded, pool);
         assert_eq!(decoded.slots[1].spawn_time_ms, 22_350);
         assert_eq!(decoded.slots[2].shield, None);
+        assert_eq!(decoded.slots[1].client_state_team, 2);
+        assert_eq!(decoded.slots[2].ffa_team, Some(1));
     }
 }
