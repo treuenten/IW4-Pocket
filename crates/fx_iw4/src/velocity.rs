@@ -6,11 +6,12 @@ use crate::integrate::sample_vel_graph_at_age;
 /// Milliseconds to seconds: a graph's speeds are in units a millisecond.
 pub const FX_VEL_AT_TIME_SCALE: f64 = 1000.0;
 
-/// The effect motion fixes of IP-129, IP-089 and IP-114 (`IW4L_FX_MOTION`, on
-/// unless 0): an element's velocity is read at the speed it really moves, a
-/// model-physics piece turns about its middle and tips onto a face when it
-/// lands, and a glass shard leaves at its piece's own speed. Off restores the
-/// old behaviour of each, for comparing runs.
+/// The effect motion fixes of IP-129, IP-089, IP-114 and IP-148
+/// (`IW4L_FX_MOTION`, on unless 0): an element's velocity is read at the speed
+/// it really moves, a model-physics piece turns about its middle and tips onto
+/// a face when it lands, a glass shard leaves at its piece's own speed, and an
+/// element moves from its birth rather than from its effect's last update.
+/// Off restores the old behaviour of each, for comparing runs.
 static MOTION_FIX: AtomicBool = AtomicBool::new(true);
 
 /// Set once at startup, before an effect plays.
@@ -131,10 +132,10 @@ mod tests {
 
     use super::*;
     use crate::FxElemVec3Range;
-    use alloc::vec;
-    use alloc::vec::Vec;
     use crate::flags::FX_ELEM_VEL_WORLD;
     use crate::integrate::integrate_velocity_graph;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
