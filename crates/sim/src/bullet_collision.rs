@@ -670,7 +670,7 @@ impl AuthorityDObjState {
             .pose
             .bone_names
             .iter()
-            .position(|name| name == tag)
+            .position(|name| name.eq_ignore_ascii_case(tag))
     }
 
     pub fn tag_world_matrix(&self, tag: &str) -> Option<glam::Mat4> {

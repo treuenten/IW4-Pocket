@@ -1309,11 +1309,13 @@ fn apply_entity_links(world: &mut World) {
             _ => [0.0; 3],
         };
         let (base, base_angles) = (field(&mut runtime, "origin"), field(&mut runtime, "angles"));
-        let axis = math_iw4::angles_to_axis(base_angles);
-        let offset = link.tag_offset.unwrap_or([0.0; 3]);
-        let local = std::array::from_fn(|i| offset[i] + link.origin[i]);
-        let (child_axis, origin) =
-            math_iw4::matrix_multiply43(math_iw4::angles_to_axis(link.angles), local, axis, base);
+        let (child_axis, origin) = linked_pose(
+            base,
+            base_angles,
+            link.tag_offset.unwrap_or([0.0; 3]),
+            link.origin,
+            link.angles,
+        );
         runtime.set_object_field(id, "origin", Value::Vector(origin));
         runtime.set_object_field(
             id,
@@ -1321,6 +1323,43 @@ fn apply_entity_links(world: &mut World) {
             Value::Vector(math_iw4::axis_to_angles(child_axis)),
         );
     }
+}
+
+/// The pose a link gives its child: the link's offset and angles in the parent's frame, moved
+/// out to the linked tag's offset on the parent's model.
+pub(crate) fn linked_pose(
+    parent_origin: [f32; 3],
+    parent_angles: [f32; 3],
+    tag_offset: [f32; 3],
+    link_origin: [f32; 3],
+    link_angles: [f32; 3],
+) -> ([[f32; 3]; 3], [f32; 3]) {
+    let local = std::array::from_fn(|i| tag_offset[i] + link_origin[i]);
+    math_iw4::matrix_multiply43(
+        math_iw4::angles_to_axis(link_angles),
+        local,
+        math_iw4::angles_to_axis(parent_angles),
+        parent_origin,
+    )
+}
+
+/// The link offset that keeps a child where it stands: its position measured from the linked
+/// tag rather than from the parent's origin, which `linked_pose` would add a second time.
+pub(crate) fn link_offset_keeping(
+    child_origin: [f32; 3],
+    parent_origin: [f32; 3],
+    parent_angles: [f32; 3],
+    tag_offset: [f32; 3],
+) -> [f32; 3] {
+    let axis = math_iw4::angles_to_axis(parent_angles);
+    let tag: [f32; 3] = std::array::from_fn(|i| {
+        parent_origin[i] + (0..3).map(|k| axis[k][i] * tag_offset[k]).sum::<f32>()
+    });
+    std::array::from_fn(|i| {
+        (0..3)
+            .map(|k| (child_origin[k] - tag[k]) * axis[i][k])
+            .sum()
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1432,6 +1471,31 @@ mod tests {
             BodyMotion::Rigid { body, .. } => body,
             BodyMotion::Piece { .. } => panic!("not a rigid body"),
         }
+    }
+
+    #[test]
+    fn a_child_linked_to_a_tag_without_an_offset_stays_where_it_is() {
+        // A taxi turned to face north-east with its roof-light tag 70 units up and 16 back,
+        // and the light spawned on that tag: it must stay on the roof, not twice as high.
+        let (parent, angles, tag) = (
+            [-3188.5, -2554.4, 256.0],
+            [0.0, 41.0, 0.0],
+            [-16.0, 0.0, 70.0],
+        );
+        let (_, at_tag) = linked_pose(parent, angles, tag, [0.0; 3], [0.0; 3]);
+        let offset = link_offset_keeping(at_tag, parent, angles, tag);
+        assert!(offset.iter().all(|v| v.abs() < 1e-3), "{offset:?}");
+        let (_, placed) = linked_pose(parent, angles, tag, offset, [0.0; 3]);
+        assert!(Vec3::from(placed).distance(Vec3::from(at_tag)) < 1e-3);
+
+        // Anywhere else near the parent it keeps its place as well.
+        let child = [-3150.0, -2500.0, 300.0];
+        let offset = link_offset_keeping(child, parent, angles, tag);
+        let (_, placed) = linked_pose(parent, angles, tag, offset, [0.0; 3]);
+        assert!(
+            Vec3::from(placed).distance(Vec3::from(child)) < 1e-3,
+            "{placed:?}"
+        );
     }
 
     #[test]

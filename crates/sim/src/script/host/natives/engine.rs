@@ -1181,17 +1181,23 @@ fn register_motion(registry: &mut NativeRegistry) {
         let tag = optional(args, 1, string)?
             .filter(|tag| !tag.is_empty() && !tag.eq_ignore_ascii_case("tag_origin"))
             .map(Arc::<str>::from);
+        let tag_offset = match tag.as_deref() {
+            None => Some(ZERO),
+            Some(tag) => super::super::presence::link_tag_offset(world, parent, tag),
+        };
         let (origin, angles) = match optional(args, 2, vector)? {
             Some(offset) => (offset, optional(args, 3, vector)?.unwrap_or(ZERO)),
             None => {
-                let parent_axis = math_iw4::angles_to_axis(vector_field(world, parent, "angles"));
-                let delta = sub(
-                    vector_field(world, id, "origin"),
-                    vector_field(world, parent, "origin"),
-                );
+                let parent_angles = vector_field(world, parent, "angles");
+                let parent_axis = math_iw4::angles_to_axis(parent_angles);
                 let child_axis = math_iw4::angles_to_axis(vector_field(world, id, "angles"));
                 (
-                    std::array::from_fn(|i| dot(delta, parent_axis[i])),
+                    super::super::mechanics::link_offset_keeping(
+                        vector_field(world, id, "origin"),
+                        vector_field(world, parent, "origin"),
+                        parent_angles,
+                        tag_offset.unwrap_or(ZERO),
+                    ),
                     math_iw4::axis_to_angles(math_iw4::matrix_multiply(
                         child_axis,
                         transpose(parent_axis),
@@ -1199,7 +1205,6 @@ fn register_motion(registry: &mut NativeRegistry) {
                 )
             }
         };
-        let tag_offset = tag.is_none().then_some(ZERO);
         runtime(world).entities.get_mut(&id).unwrap().linked_to =
             Some(super::super::entities::Link {
                 parent,
