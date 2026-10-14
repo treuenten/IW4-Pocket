@@ -279,6 +279,38 @@ pub fn play_pellet_segment(
     );
 }
 
+/// The surface sound of a bullet impact (`bullet_small_concrete` and so on),
+/// played at the impact as MW2 does alongside the impact effect. A segment
+/// that hit nothing (zero normal) has none.
+pub fn bullet_impact_sound(
+    weapons: Option<&BoundWeapons<'_>>,
+    weapon: u32,
+    origin: [f32; 3],
+    normal: [f32; 3],
+    surf_type: u8,
+    surface_flags: u32,
+) -> Option<audio::AliasCommand> {
+    if normal == [0.0, 0.0, 0.0] {
+        return None;
+    }
+    let weapons = weapons?;
+    let namespace = weapons
+        .registry()
+        .component_namespace_of(weapon, asset_game::WeaponComponent::Sound)
+        .filter(|namespace| *namespace == asset_core::AssetNamespace::Iw4)?;
+    let impact_type = weapons.row(weapon)?.event_facts()?.impact_type;
+    let exit = surface_flags & FX_IMPACT_EXIT_SURFACE_FLAG != 0;
+    let (alias, fallback) = audio::bullet_impact_alias(impact_type, exit, surf_type)?;
+    Some(audio::AliasCommand::Play(audio::PlayAlias {
+        event: None,
+        namespace,
+        alias: alias.to_owned(),
+        fallback: (fallback != alias).then(|| fallback.to_owned()),
+        origin_inches: Some(origin),
+        snd_ent: Some(fx_iw4::FX_ENTITYNUM_WORLD),
+    }))
+}
+
 pub fn play_impact_table_cell(
     impact_type: i32,
     origin: [f32; 3],

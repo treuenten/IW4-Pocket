@@ -33,9 +33,9 @@ use render_fx::{
 };
 
 use render_fx::combat::{
-    IDENTITY_AXIS, explosion_fx_names, log_combat_fx_gaps, missile_bolt_target,
-    play_pellet_segment, play_shell_eject, sync_combat_dump, try_play_weapon_fx_at_origin,
-    try_play_weapon_fx_bolted,
+    IDENTITY_AXIS, bullet_impact_sound, explosion_fx_names, log_combat_fx_gaps,
+    missile_bolt_target, play_pellet_segment, play_shell_eject, sync_combat_dump,
+    try_play_weapon_fx_at_origin, try_play_weapon_fx_bolted,
 };
 use render_fx::fire_weapon_fx_should_client_trace;
 use render_fx::system::stamp_fx_camera_origin;
@@ -3194,12 +3194,13 @@ fn drain_bullet_hit_fx(
     tracers: Option<Res<PreparedTracers>>,
     mut tracer_world: ResMut<TracerWorld>,
     mut gate: ResMut<TracerDrawGate>,
-    (local, generation, timeline, mut occurrences, verdicts): (
+    (local, generation, timeline, mut occurrences, verdicts, mut impact_sounds): (
         Res<LocalPresentClient>,
         Res<frame::WorldGeneration>,
         Res<net::EntityEventCursor>,
         ResMut<PresentedFireFx>,
         Res<net::FireVerdictState>,
+        MessageWriter<audio::AliasCommand>,
     ),
     mut host: ResMut<HostFxSystem>,
     mut cursor: ResMut<FxJournalCursor>,
@@ -3278,6 +3279,16 @@ fn drain_bullet_hit_fx(
             fx_world.view().as_ref().map(|s| s as &dyn FxScene),
         );
         host.0.spawn_mark_entity = previous_mark_entity;
+        if let Some(sound) = bullet_impact_sound(
+            bound.as_ref(),
+            payload.weapon,
+            payload.origin,
+            payload.direction,
+            payload.surf_type,
+            payload.surface_flags,
+        ) {
+            impact_sounds.write(sound);
+        }
     }
 }
 
@@ -3294,13 +3305,14 @@ fn drain_pellet_fx(
     tracers: Option<Res<PreparedTracers>>,
     mut tracer_world: ResMut<TracerWorld>,
     mut gate: ResMut<TracerDrawGate>,
-    (local, generation, timeline, mut occurrences, verdicts, mut dyn_ent_hits): (
+    (local, generation, timeline, mut occurrences, verdicts, mut dyn_ent_hits, mut impact_sounds): (
         Res<LocalPresentClient>,
         Res<frame::WorldGeneration>,
         Res<net::EntityEventCursor>,
         ResMut<PresentedFireFx>,
         Res<net::FireVerdictState>,
         MessageWriter<crate::adapters::anim::dyn_ent_wake::DynEntPelletHit>,
+        MessageWriter<audio::AliasCommand>,
     ),
     mut host: ResMut<HostFxSystem>,
     mut cursor: ResMut<FxJournalCursor>,
@@ -3376,6 +3388,16 @@ fn drain_pellet_fx(
             &mut combat,
             fx_world.view().as_ref().map(|s| s as &dyn FxScene),
         );
+        if let Some(sound) = bullet_impact_sound(
+            bound.as_ref(),
+            record.weapon,
+            record.end,
+            record.normal,
+            record.surf_type,
+            record.surface_flags,
+        ) {
+            impact_sounds.write(sound);
+        }
     }
 }
 

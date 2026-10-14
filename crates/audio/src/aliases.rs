@@ -357,3 +357,106 @@ pub(crate) fn match_ui_alias(
         _ => namespace_alias(alias),
     }
 }
+
+/// The surface sound sets a bullet impact plays from, one per row of the
+/// impact effect table (`fx_iw4::impact_table_row`): MW2 names them
+/// `<set>_<surface>` (`bullet_small_concrete`, `bulletspray_small_exit_wood`),
+/// one alias per surface type, and the weapon's impact type picks the set.
+/// Grenade, rocket and dud impacts are explosions with their own sounds.
+const BULLET_IMPACT_SETS: [&str; 10] = [
+    "bullet_small",
+    "bullet_small_exit",
+    "bullet_large",
+    "bullet_large_exit",
+    "bullet_explode",
+    "bulletspray_small",
+    "bulletspray_small_exit",
+    "bulletspray_large",
+    "bullet_ap",
+    "bullet_ap_exit",
+];
+
+static BULLET_IMPACT_ALIASES: LazyLock<[[&'static str; SURF_N]; 10]> = LazyLock::new(|| {
+    BULLET_IMPACT_SETS
+        .map(|set| SURFACE_TYPE_NAMES.map(|surface| leak_str(format!("{set}_{surface}"))))
+});
+
+fn bullet_impact_set(impact_type: i32, exit: bool) -> Option<usize> {
+    Some(match (impact_type, exit) {
+        (1, false) => 0,
+        (1, true) => 1,
+        (2, false) => 2,
+        (2, true) => 3,
+        (4, _) => 4,
+        (5, false) => 5,
+        (5, true) => 6,
+        (6, _) => 7,
+        (3, false) => 8,
+        (3, true) => 9,
+        _ => return None,
+    })
+}
+
+/// The alias a bullet impact plays on a surface, for the weapon's impact type
+/// (`weapon_iw4` order: 1 small, 2 large, 3 armour-piercing, 4 explosive,
+/// 5 shotgun, 6 explosive shotgun), and the set's `_default` alias for a
+/// surface the set has no sound for (MW2 has no `bullet_small_snow`). `exit`
+/// is the far side of a wall the bullet went through.
+pub fn bullet_impact_alias(
+    impact_type: i32,
+    exit: bool,
+    surface: u8,
+) -> Option<(&'static str, &'static str)> {
+    let set = bullet_impact_set(impact_type, exit)?;
+    let aliases = &BULLET_IMPACT_ALIASES[set];
+    Some((*aliases.get(usize::from(surface))?, aliases[0]))
+}
+
+#[cfg(test)]
+mod bullet_impact_tests {
+    use super::bullet_impact_alias;
+
+    #[test]
+    fn each_impact_type_names_its_surface_set() {
+        assert_eq!(
+            bullet_impact_alias(1, false, 5),
+            Some(("bullet_small_concrete", "bullet_small_default"))
+        );
+        assert_eq!(
+            bullet_impact_alias(1, true, 21),
+            Some(("bullet_small_exit_wood", "bullet_small_exit_default"))
+        );
+        assert_eq!(
+            bullet_impact_alias(2, false, 13),
+            Some(("bullet_large_metal", "bullet_large_default"))
+        );
+        assert_eq!(
+            bullet_impact_alias(3, true, 6),
+            Some(("bullet_ap_exit_dirt", "bullet_ap_exit_default"))
+        );
+        assert_eq!(
+            bullet_impact_alias(4, true, 7),
+            Some(("bullet_explode_flesh", "bullet_explode_default"))
+        );
+        assert_eq!(
+            bullet_impact_alias(5, false, 9),
+            Some(("bulletspray_small_glass", "bulletspray_small_default"))
+        );
+        assert_eq!(
+            bullet_impact_alias(6, false, 22),
+            Some(("bulletspray_large_asphalt", "bulletspray_large_default"))
+        );
+        assert_eq!(
+            bullet_impact_alias(1, false, 30),
+            Some(("bullet_small_slush", "bullet_small_default"))
+        );
+    }
+
+    #[test]
+    fn explosions_and_unknown_surfaces_have_no_bullet_impact() {
+        for impact_type in [0, 7, 8, 9, 10, 11] {
+            assert_eq!(bullet_impact_alias(impact_type, false, 5), None);
+        }
+        assert_eq!(bullet_impact_alias(1, false, 31), None);
+    }
+}
