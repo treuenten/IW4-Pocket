@@ -437,6 +437,7 @@ impl WeaponCatalog {
                 projectile_speed_relative_up: 0,
                 refuses_pickup: false,
                 projectile_activate_dist: geometry.projectile_activate_dist,
+                projectile_lifetime_ms: lifetime_ms(geometry.projectile_lifetime),
                 projectile_explosion_type: geometry.projectile_explosion_type,
                 parallel_bounce: geometry.parallel_bounce,
                 perpendicular_bounce: geometry.perpendicular_bounce,
@@ -455,5 +456,38 @@ impl WeaponCatalog {
                 no_dual_wield: geometry.no_dual_wield,
             },
         });
+    }
+}
+
+/// `projLifetime` (seconds) as whole ms, truncated as the engine converts it when a
+/// rocket is fired. A weapon with none (0, or not a number) has no lifetime.
+fn lifetime_ms(seconds: f32) -> i32 {
+    if seconds.is_finite() && seconds > 0.0 {
+        (seconds * 1000.0) as i32
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lifetime_ms;
+
+    #[test]
+    fn rocket_lifetimes_are_whole_ms() {
+        // remotemissile_projectile_mp, rpg_mp, cobra_ffar_mp, harrier_missile_mp
+        assert_eq!(lifetime_ms(12.0), 12_000);
+        assert_eq!(lifetime_ms(7.0), 7_000);
+        assert_eq!(lifetime_ms(5.0), 5_000);
+        assert_eq!(lifetime_ms(200.0), 200_000);
+        assert_eq!(lifetime_ms(0.0125), 12);
+    }
+
+    #[test]
+    fn no_lifetime_is_zero() {
+        assert_eq!(lifetime_ms(0.0), 0);
+        assert_eq!(lifetime_ms(-3.0), 0);
+        assert_eq!(lifetime_ms(f32::NAN), 0);
+        assert_eq!(lifetime_ms(f32::INFINITY), 0);
     }
 }

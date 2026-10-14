@@ -245,6 +245,7 @@ fn hash_equipment(h: &mut Digest, rows: &[crate::EquipmentRuntimeFacts]) {
         h.i32(row.projectile_speed_relative_up);
         h.bool(row.refuses_pickup);
         h.i32(row.projectile_activate_dist);
+        h.i32(row.projectile_lifetime_ms);
         h.i32(row.projectile_explosion_type);
         h.i32(row.weap_type);
         h.i32(row.weap_class);

@@ -1301,6 +1301,8 @@ pub struct WeaponGeometry {
     pub projectile_speed_forward: i32,
 
     pub projectile_activate_dist: i32,
+    /// `projLifetime`, seconds: a rocket explodes when it has flown this long.
+    pub projectile_lifetime: f32,
 
     pub projectile_explosion_type: i32,
 
