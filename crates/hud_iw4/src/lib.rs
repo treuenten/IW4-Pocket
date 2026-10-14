@@ -13,6 +13,7 @@ mod flashbang;
 pub mod font;
 pub mod fov;
 mod gamemsg;
+mod grain_overlay;
 mod hudelem;
 mod iris;
 mod mantle_hint;
@@ -127,6 +128,7 @@ pub use gamemsg::{
     killicon_em_size, killicon_stretch_uv, killicon_virtual_size, obituary_is_headshot,
     obituary_mod, obituary_mod_killicon, pack_obituary_event_parm,
 };
+pub use grain_overlay::{GRAIN_OVERLAY_TECHSET, grain_overlay_st};
 pub use hudelem::{
     ALIGN_SCREEN_HORZ_SHIFT, GAME_HUDELEM_ARCHIVED, GAME_HUDELEM_CAPACITY, GAME_HUDELEM_STRIDE,
     GameHudElem, HE_TYPE_CLOCK_DOWN, HE_TYPE_CLOCK_UP, HE_TYPE_FREE, HE_TYPE_MATERIAL,

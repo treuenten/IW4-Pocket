@@ -364,6 +364,8 @@ pub struct MenuCatalog {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HudMaterialPlan {
     pub texture_atlas: [u8; 2],
+    /// The material's technique set, e.g. `2d` or `grain_overlay`.
+    pub technique_set: Option<String>,
     pub technique_slots: Option<u64>,
     pub state_bits_entry: Option<[u8; asset_iw4::size::TECHNIQUE_SLOT_COUNT]>,
     pub state_rows: Vec<[u32; 2]>,
@@ -507,7 +509,16 @@ impl MenuCatalog {
         }
         self.material_state_bits.extend(other.material_state_bits);
         self.material_srgb_reads.extend(other.material_srgb_reads);
-        self.material_2d_plans.extend(other.material_2d_plans);
+        for (name, plan) in other.material_2d_plans {
+            // A zone that only names a material (patch_mp's `,ac130_overlay_grain`
+            // is a reference with no textures and no technique set) does not
+            // replace the plan of the zone that defined it.
+            let reference_only = plan.textures.is_empty() && plan.technique_set.is_none();
+            if reference_only && self.material_2d_plans.contains_key(&name) {
+                continue;
+            }
+            self.material_2d_plans.insert(name, plan);
+        }
         for (name, image) in other.material_images {
             self.material_images.insert(name, image);
         }
@@ -897,6 +908,10 @@ impl MenuSink {
             .technique_set
             .and_then(|field| self.material_technique_set(s, field));
         let technique_slots = technique_set.map(|set| set.technique_slots);
+        let technique_set_name = technique_set
+            .and_then(|set| set.name)
+            .and_then(|name| s.cstr(name).ok())
+            .map(|name| name.trim_start_matches(',').to_ascii_lowercase());
         if geometry.state_bits_count > 0 {
             self.catalog.material_state_bits.insert(
                 key.clone(),
@@ -938,6 +953,7 @@ impl MenuSink {
             key.clone(),
             HudMaterialPlan {
                 texture_atlas: geometry.texture_atlas,
+                technique_set: technique_set_name,
                 technique_slots,
                 state_bits_entry: geometry.state_bits_entry,
                 state_rows: bits,
@@ -1749,5 +1765,66 @@ impl AssetLinkSink for MenuSink {
             },
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod material_plan_merge_tests {
+    use super::*;
+
+    #[test]
+    fn a_zone_that_only_names_a_material_keeps_its_definition() {
+        let mut catalog = MenuCatalog::default();
+        let mut common = MenuCatalog::default();
+        common.material_2d_plans.insert(
+            "ac130_overlay_grain".into(),
+            defined_plan(Some("grain_overlay")),
+        );
+        catalog.absorb(common);
+        // patch_mp names it again as a bare reference.
+        let mut patch = MenuCatalog::default();
+        patch
+            .material_2d_plans
+            .insert("ac130_overlay_grain".into(), HudMaterialPlan::default());
+        catalog.absorb(patch);
+        let plan = &catalog.material_2d_plans["ac130_overlay_grain"];
+        assert_eq!(plan.technique_set.as_deref(), Some("grain_overlay"));
+        assert_eq!(plan.textures.len(), 1);
+    }
+
+    #[test]
+    fn a_later_zone_that_redefines_a_material_replaces_it() {
+        let mut catalog = MenuCatalog::default();
+        let mut first = MenuCatalog::default();
+        first
+            .material_2d_plans
+            .insert("hud_icon".into(), defined_plan(Some("2d")));
+        catalog.absorb(first);
+        let mut second = MenuCatalog::default();
+        second
+            .material_2d_plans
+            .insert("hud_icon".into(), defined_plan(Some("2d_add")));
+        catalog.absorb(second);
+        assert_eq!(
+            catalog.material_2d_plans["hud_icon"]
+                .technique_set
+                .as_deref(),
+            Some("2d_add")
+        );
+    }
+
+    fn defined_plan(technique_set: Option<&str>) -> HudMaterialPlan {
+        HudMaterialPlan {
+            technique_set: technique_set.map(str::to_owned),
+            textures: vec![HudMaterialTextureBinding {
+                name_hash: 0xa0ab_1041,
+                name_start: b'c',
+                name_end: b'p',
+                sampler_state: 0x02,
+                semantic: 0,
+                image: Some("ac130_overlay_grain".into()),
+            }],
+            ..HudMaterialPlan::default()
+        }
     }
 }

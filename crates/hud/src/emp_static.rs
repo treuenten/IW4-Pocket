@@ -1,6 +1,6 @@
 use asset_game::MenuCatalog;
 use bevy::prelude::*;
-use net::{LocalPresentClient, PresentedSnapshot};
+use net::{FrameClock, LocalPresentClient, PresentedSnapshot};
 use playerstate_iw4::other_flags;
 
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate};
@@ -18,6 +18,7 @@ pub(crate) fn update(
     catalog: Option<Res<MenuCatalog>>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
+    cg_clock: Res<FrameClock>,
     view: Option<Res<frame::ViewSubject>>,
     mut pass: ResMut<HudTessPass>,
     mut hud_images: ResMut<HudImages>,
@@ -60,6 +61,12 @@ pub(crate) fn update(
     {
         return;
     }
+    // A grain_overlay background (MW2 uses ac130_overlay_grain) moves its noise every frame.
+    let [s0, t0, s1, t1] = hud_images.stretch_pic_st(
+        crate::images::HUD_CHROME_NAMESPACE,
+        &item.background,
+        cg_clock.time(),
+    );
     let list = Draw2dList {
         cmds: vec![Draw2dCmd {
             material_namespace: crate::images::HUD_CHROME_NAMESPACE,
@@ -67,10 +74,10 @@ pub(crate) fn update(
             y: rect.y,
             w: rect.w,
             h: rect.h,
-            s0: 0.0,
-            t0: 0.0,
-            s1: 1.0,
-            t1: 1.0,
+            s0,
+            t0,
+            s1,
+            t1,
             color: item.fore_color,
             material: item.background.clone(),
             op: Draw2dOp::StretchPic,
