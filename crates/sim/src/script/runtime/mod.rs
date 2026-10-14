@@ -122,6 +122,7 @@ fn frame(
         stack_base,
         receiver,
         locals,
+        endons: false,
     }
 }
 
@@ -1038,6 +1039,7 @@ fn instruction(
             let name = event_name(pop(thread)?)?;
             let receiver = event_receiver(pop(thread)?)?;
             let frame = thread.frames.len() - 1;
+            thread.frames[frame].endons = true;
             world.resource_mut::<Runtime>().waiters.push(Waiter {
                 receiver,
                 name,
@@ -1049,10 +1051,16 @@ fn instruction(
             let value = pop(thread)?;
             let depth = thread.frames.len() - 1;
             let serial = thread.serial;
-            world.resource_mut::<Runtime>().waiters.retain(|w| {
-                w.thread != serial
-                    || !matches!(w.kind, WaiterKind::Endon { frame } if frame >= depth)
-            });
+            // Deeper frames cleared their endons when they returned or were
+            // unwound, so only an endon this call ran can be left at `depth`
+            // or above; without one there is nothing to clear and no reason
+            // to walk every waiter of every thread on each return.
+            if thread.frames.last().is_some_and(|frame| frame.endons) {
+                world.resource_mut::<Runtime>().waiters.retain(|w| {
+                    w.thread != serial
+                        || !matches!(w.kind, WaiterKind::Endon { frame } if frame >= depth)
+                });
+            }
             let frame = thread
                 .frames
                 .pop()
@@ -1361,8 +1369,7 @@ fn run_ready(world: &mut World, program: &Program, now: i64) {
         let Some(entity) = find_thread(world, serial) else {
             continue;
         };
-        let receivers = entity_receivers(world, world.get::<Thread>(entity).unwrap());
-        if any_deleted(world, &receivers) {
+        if waits_on_deleted(world, serial) {
             kill(world, entity, serial);
             continue;
         }
@@ -1628,7 +1635,19 @@ fn copy_value(world: &mut World, value: Value) -> Result<Value, String> {
     copy(world, value, 0, &mut 100_000)
 }
 
+/// Deleting a waited-on object ends the thread; a thread whose self is
+/// deleted keeps running. `any_deleted(entity_receivers(..))` without the
+/// copy of the receivers it made for every thread it resumed.
+fn waits_on_deleted(world: &World, serial: u64) -> bool {
+    let runtime = world.resource::<Runtime>();
+    runtime.waiters.iter().any(|w| {
+        w.thread == serial
+            && matches!(w.receiver, Value::Object(id) if runtime.dead.contains(&id) || !runtime.objects.contains_key(&id))
+    })
+}
+
 /// Deleting a waited-on object ends the thread; a thread whose self is deleted keeps running.
+#[cfg(test)]
 fn entity_receivers(world: &World, thread: &Thread) -> Vec<Value> {
     world
         .resource::<Runtime>()
@@ -1653,6 +1672,7 @@ fn threads_waiting_on_deleted(world: &World) -> std::collections::HashSet<u64> {
         .collect()
 }
 
+#[cfg(test)]
 fn any_deleted(world: &World, receivers: &[Value]) -> bool {
     let runtime = world.resource::<Runtime>();
     receivers.iter().any(|value| {
@@ -1751,4 +1771,175 @@ fn collect_heap(world: &mut World) {
     runtime.objects.retain(|id, _| marks.objects.contains(id));
     runtime.dead.retain(|id| marks.objects.contains(id));
     runtime.arrays.retain(|id, _| marks.arrays.contains(id));
+}
+
+#[cfg(test)]
+mod endon_return_tests {
+    use super::*;
+
+    /// Runs module `test`'s `main` on level for `ticks` authority ticks and
+    /// returns what the script wrote to `level.log`.
+    fn run(source: &str, ticks: u32) -> String {
+        let mut sources = BTreeMap::new();
+        sources.insert("test".to_owned(), source.to_owned());
+        let program = Program::load(&sources, &["test"], &crate::script::Catalog::iw4())
+            .expect("test script compiles");
+        let mut sim = crate::SimWorld::default();
+        sim.install_gsc_program(
+            program,
+            crate::script::NativeRegistry::default(),
+            crate::script::LevelData {
+                entities: Vec::new(),
+                tables: BTreeMap::new(),
+                keys: BTreeMap::new(),
+                schemas: BTreeMap::new(),
+                player_data_defaults: None,
+            },
+        )
+        .expect("install");
+        sim.start_gsc("test::main", Value::level(), Vec::new())
+            .expect("start");
+        for tick in 1..=ticks {
+            crate::try_step(
+                &mut sim,
+                crate::Tick(tick),
+                &crate::TickInput::default(),
+                crate::MATCH_TICK_MS as i32,
+                crate::StepReason::AuthorityFrame,
+            )
+            .expect("step");
+        }
+        let mut frame = sim.frame();
+        let mut runtime = frame.ecs().resource_mut::<Runtime>();
+        match runtime.object_field(0, "log") {
+            Value::String(log) => log.to_string(),
+            other => panic!("level.log is {other:?}"),
+        }
+    }
+
+    /// A call that ran no endon returns without clearing anything: the
+    /// thread's own endon still ends it. An endon a call ran is cleared when
+    /// that call returns: its event no longer ends the thread.
+    #[test]
+    fn a_return_clears_only_the_endons_its_call_ran() {
+        let log = run(
+            r#"
+main()
+{
+    level.log = "";
+    level thread outer();
+    level thread nested();
+    level thread signals();
+}
+
+plain()
+{
+    level.log = level.log + "p;";
+}
+
+outer()
+{
+    self endon("kill_outer");
+    plain();
+    plain();
+    level.log = level.log + "outer_waits;";
+    wait 0.5;
+    level.log = level.log + "outer_survived;";
+}
+
+guarded(i)
+{
+    self endon("stop_inner");
+    level.log = level.log + "g" + i + ";";
+}
+
+nested()
+{
+    self endon("stop_nested");
+    for (i = 0; i < 3; i++)
+    {
+        guarded(i);
+        wait 0.15;
+    }
+    level.log = level.log + "nested_done;";
+    wait 0.5;
+    level.log = level.log + "nested_survived;";
+}
+
+signals()
+{
+    wait 0.2;
+    level notify("stop_inner");
+    level notify("kill_outer");
+    level.log = level.log + "signalled;";
+    wait 0.4;
+    level notify("stop_nested");
+    level.log = level.log + "stopped;";
+}
+"#,
+            40,
+        );
+        assert_eq!(
+            log,
+            "p;p;outer_waits;g0;g1;signalled;g2;nested_done;stopped;"
+        );
+    }
+}
+
+#[cfg(test)]
+mod waits_on_deleted_tests {
+    use super::*;
+
+    fn waiter(thread: u64, receiver: Value, kind: WaiterKind) -> Waiter {
+        Waiter {
+            receiver,
+            name: Arc::from("death"),
+            thread,
+            kind,
+        }
+    }
+
+    /// Live, deleted (dead) and vanished receivers, a receiver that is not an
+    /// object, and threads with none, one or several waiters: the scan finds
+    /// what the copied receivers found.
+    #[test]
+    fn the_scan_finds_what_the_copied_receivers_did() {
+        let mut world = World::new();
+        let mut runtime = Runtime::default();
+        for id in [0, 1, 2, 3] {
+            runtime.objects.insert(id, BTreeMap::new());
+        }
+        runtime.dead.insert(2);
+        let endon = || WaiterKind::Endon { frame: 0 };
+        runtime.waiters = vec![
+            waiter(10, Value::Object(1), endon()),
+            waiter(11, Value::Object(1), endon()),
+            waiter(
+                11,
+                Value::Object(2),
+                WaiterKind::Waittill { outputs: vec![] },
+            ),
+            waiter(12, Value::Object(9), endon()),
+            waiter(13, Value::Int(4), endon()),
+            waiter(14, Value::Object(3), endon()),
+            waiter(14, Value::Object(0), WaiterKind::Match { values: vec![] }),
+            waiter(15, Value::Object(2), endon()),
+        ];
+        world.insert_resource(runtime);
+        let mut found = Vec::new();
+        for serial in 9..=16 {
+            let thread = Thread {
+                serial,
+                frames: Vec::new(),
+                stack: Vec::new(),
+                state: ThreadState::Queued,
+            };
+            let copied = any_deleted(&world, &entity_receivers(&world, &thread));
+            assert_eq!(waits_on_deleted(&world, serial), copied, "thread {serial}");
+            if copied {
+                found.push(serial);
+            }
+        }
+        assert_eq!(found, [11, 12, 15]);
+    }
 }
