@@ -23,6 +23,22 @@ fn main() {
         git(&root, &["describe", "--always", "--dirty", "--tags"]),
     );
     emit("IW4L_BUILD_GIT_DIRTY", git_dirty(&root));
+    emit(
+        "IW4L_BUILD_GIT_BRANCH",
+        git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+    );
+    emit(
+        "IW4L_BUILD_GIT_DATE",
+        git(
+            &root,
+            &[
+                "log",
+                "-1",
+                "--format=%cd",
+                "--date=format-local:%d %b %H:%M",
+            ],
+        ),
+    );
     // A dirty flag says the tree differed from the revision; it does not say
     // whether two dirty runs differed from it in the *same* way. This does:
     // the same patch hash on two runs means the same uncommitted diff. Empty

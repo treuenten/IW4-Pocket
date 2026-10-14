@@ -1,5 +1,6 @@
 pub mod args;
 pub mod bench;
+mod build_watermark;
 mod frame_owner;
 mod frame_pace;
 mod health;

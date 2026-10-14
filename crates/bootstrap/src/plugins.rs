@@ -59,6 +59,8 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
     crate::render_scale::register(app);
     // iOS: no auto-lock while a map loads or a match runs.
     crate::idle_timer::register(app);
+    // Internal builds: which commit is running, on the main menu.
+    crate::build_watermark::register(app);
     // Render setup can finish after Startup, so watch for the resource.
     app.add_systems(
         First,
