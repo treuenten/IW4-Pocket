@@ -549,6 +549,12 @@ fn generate_fx_transaction(
         cam_tf.translation.to_array(),
         *laser_dvars,
     );
+    let frustum_planes = scene_view
+        .as_ref()
+        .map(|view| view.frustum_planes.to_vec())
+        .unwrap_or_default();
+    let frame = host.0.frame_stamp;
+    host.0.marks.note_drawn(frame, &frustum_planes);
     host.0.generate_world_mark_verts();
     if let (Some(scene), Some(models)) = (fx_world.scene(), mark_models.as_deref()) {
         super::entity_mark::generate(
@@ -565,10 +571,6 @@ fn generate_fx_transaction(
         &mut host.0,
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),
     );
-    let frustum_planes = scene_view
-        .as_ref()
-        .map(|view| view.frustum_planes.to_vec())
-        .unwrap_or_default();
     let (out, verts_gaps) = build_fx_verts(
         &mut host.0,
         &catalog.0,
