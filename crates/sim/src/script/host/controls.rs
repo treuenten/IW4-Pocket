@@ -475,3 +475,9 @@ pub(crate) fn action_slot_command(world: &mut World, client: u32, slot: u8) {
     let command = format!("+actionslot {}", u32::from(slot) + 1);
     raise_commands(world, client, |bound| bound == command);
 }
+
+/// A command that is not a button, run by the player ("weapnext"): raises
+/// what notifyOnPlayerCommand bound to it.
+pub(crate) fn named_player_command(world: &mut World, client: u32, command: &str) {
+    raise_commands(world, client, |bound| bound == command);
+}
