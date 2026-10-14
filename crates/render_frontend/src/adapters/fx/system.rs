@@ -2251,6 +2251,16 @@ fn publish_weapon_fire(
     }
 }
 
+/// The first flash an entity's gun plays is logged once per process.
+static ENTITY_GUN_FLASH_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a fire event's entity is a gun that is not a soldier's (a turret, a
+/// vehicle's gun), whose flash plays at the muzzle the server fired from.
+fn entity_gun_flashes_at_muzzle(number: i32, gunner: Option<i32>) -> bool {
+    !(0..playerstate_iw4::PLAYER_CORPSE_ENTITY_BASE).contains(&number) && gunner != Some(number)
+}
+
 fn drain_weapon_fire_fx(
     mut pending: MessageReader<WeaponFireFx>,
     identities: Query<&CEntity>,
@@ -2330,6 +2340,17 @@ fn drain_weapon_fire_fx(
         } else {
             remote_bolts.and_then(|bolts| bolts.brass)
         };
+        // A sentry's or a helicopter's gun has no soldier's hands to bolt to: its
+        // world flash plays where the server fired from, along the shot. The gun
+        // the local player is linked to as its gunner shows none.
+        let gunner = presented
+            .snapshot()
+            .and_then(|snapshot| snapshot.meta.for_client(local.0))
+            .and_then(|meta| meta.linked_weapon_view)
+            .map(|view| view.entity_num);
+        let entity_gun = flash_target.is_none()
+            && !player_view
+            && entity_gun_flashes_at_muzzle(fire.event.payload.number, gunner);
         if let Some(catalog) = catalog.as_deref() {
             elem_infos.0.sync(&catalog.0);
             let mut muzzle_played = cursor.muzzle_played;
@@ -2343,15 +2364,39 @@ fn drain_weapon_fire_fx(
                 msec,
                 &verdicts,
             ) {
-                if try_play_weapon_fx_bolted(
-                    &mut host.0,
-                    &catalog.0,
-                    &mut elem_infos.0,
-                    muzzle_name,
-                    flash_target,
-                    &mut muzzle_played,
-                    fx_world.view().as_ref().map(|s| s as &dyn FxScene),
-                ) {
+                let played = if entity_gun {
+                    let played = try_play_weapon_fx_at_origin(
+                        &mut host.0,
+                        &catalog.0,
+                        &mut elem_infos.0,
+                        muzzle_name,
+                        fire.event.payload.origin,
+                        math_iw4::angles_to_axis(fire.event.payload.direction),
+                        &mut muzzle_played,
+                        fx_world.view().as_ref().map(|s| s as &dyn FxScene),
+                    );
+                    if !ENTITY_GUN_FLASH_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        diag::info!(
+                            World,
+                            "fx: entity gun flash `{}` for entity {} played={played} tracer={}",
+                            muzzle_name.map_or("none", |name| name.name),
+                            fire.event.payload.number,
+                            combat_fx.map_or("none", |fx| fx.tracer.edge_kind())
+                        );
+                    }
+                    played
+                } else {
+                    try_play_weapon_fx_bolted(
+                        &mut host.0,
+                        &catalog.0,
+                        &mut elem_infos.0,
+                        muzzle_name,
+                        flash_target,
+                        &mut muzzle_played,
+                        fx_world.view().as_ref().map(|s| s as &dyn FxScene),
+                    )
+                };
+                if played {
                     occurrences.presented(&fire.event, FireFxOccurrence::Muzzle, msec);
                     cursor.muzzle_bolted = cursor.muzzle_bolted.saturating_add(1);
                 } else {
