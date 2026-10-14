@@ -21,6 +21,18 @@ impl WeaponCatalog {
         }
         self.vehicle_accel
             .insert(name.clone(), stream.vehicle_accel());
+        let engine = stream.vehicle_engine();
+        let alias = |ptr: Option<Ptr>| ptr.and_then(|ptr| read_name(stream, ptr));
+        let sounds = VehicleEngineSounds {
+            idle_low: alias(engine.idle_low),
+            idle_high: alias(engine.idle_high),
+            engine_low: alias(engine.engine_low),
+            engine_high: alias(engine.engine_high),
+            speed: engine.speed,
+        };
+        if sounds != VehicleEngineSounds::default() {
+            self.vehicle_engine.insert(name.clone(), sounds);
+        }
         let (icons, size) = stream.vehicle_compass();
         self.vehicle_compass
             .insert(name, (icons.map(str::to_owned), size));

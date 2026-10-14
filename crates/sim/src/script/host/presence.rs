@@ -499,9 +499,31 @@ fn present_model(frame: &mut FrameWorld, want: &Wanted) {
 }
 
 const UNPRESENTED_LOOP_OWNER: u32 = 0x2000_0000;
+// A vehicle's engine loops get owners of their own, one per layer (idle,
+// engine), so they play beside a script loop on the same vehicle.
+const ENGINE_LOOP_OWNER: u32 = 0x4000_0000;
+
+fn engine_loop_owner(object: u64, layer: u32) -> ScriptModelId {
+    ScriptModelId::from_wire(ENGINE_LOOP_OWNER | (layer << 28) | (object as u32 & 0x0fff_ffff))
+}
 
 fn publish_loop_sounds(world: &mut World) {
+    let engines = super::vehicles::engine_loops(world.resource::<Runtime>());
     let mut runtime = world.resource_mut::<Runtime>();
+    let engines: Vec<(ScriptModelId, Arc<str>, Arc<str>, u8, [f32; 3], Option<u32>)> = engines
+        .into_iter()
+        .map(|(object, layer, rest, moving, fraction)| {
+            let number = runtime.entities.get(&object).map_or(-1, |e| e.number);
+            (
+                engine_loop_owner(object, layer),
+                Arc::from(rest),
+                Arc::from(moving),
+                fraction,
+                vector(&mut runtime, object, "origin"),
+                u32::try_from(number).ok(),
+            )
+        })
+        .collect();
     let speaking: Vec<(u64, Option<ScriptModelId>, Arc<str>, i32)> = runtime
         .entities
         .iter()
@@ -522,7 +544,7 @@ fn publish_loop_sounds(world: &mut World) {
         })
         .collect();
     let mut frame = FrameWorld::from_world(world);
-    let rows = placed
+    let mut rows: Vec<_> = placed
         .into_iter()
         .map(
             |(owner, alias, origin, snd_ent)| crate::world_objects::DestructibleLoopSound {
@@ -530,9 +552,26 @@ fn publish_loop_sounds(world: &mut World) {
                 owner,
                 alias_index: frame.sound_alias_index(&alias),
                 origin,
+                blend: None,
             },
         )
         .collect();
+    rows.extend(
+        engines
+            .into_iter()
+            .map(|(owner, rest, moving, fraction, origin, snd_ent)| {
+                crate::world_objects::DestructibleLoopSound {
+                    snd_ent,
+                    owner,
+                    alias_index: frame.sound_alias_index(&rest),
+                    origin,
+                    blend: (moving != rest).then(|| crate::world_objects::LoopBlend {
+                        toward: frame.sound_alias_index(&moving),
+                        fraction,
+                    }),
+                }
+            }),
+    );
     frame.world_objects_mut().set_destructible_loop_sounds(rows);
 }
 

@@ -1157,7 +1157,7 @@ fn follow_xmodel_ptr(
         }))
 }
 
-fn follow_snd_alias_custom(s: &mut ZoneStream<'_>, slot: Ptr) -> Result<Option<Ptr>> {
+pub(super) fn follow_snd_alias_custom(s: &mut ZoneStream<'_>, slot: Ptr) -> Result<Option<Ptr>> {
     match s.ptr_at(slot, 0)? {
         ZonePtr::Null => Ok(None),
         ZonePtr::Offset(q) => {

@@ -693,6 +693,17 @@ pub struct ClipMapGeometry {
     pub dyn_ent_defs: [Option<Ptr>; 2],
 }
 
+/// A vehicle's engine loops: the idle and engine sound pairs and the speed
+/// (inches a second) at which the pairs reach their moving end.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VehicleEngineGeometry {
+    pub idle_low: Option<Ptr>,
+    pub idle_high: Option<Ptr>,
+    pub engine_low: Option<Ptr>,
+    pub engine_high: Option<Ptr>,
+    pub speed: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysPresetGeometry {
     pub header: Ptr,
@@ -1423,6 +1434,7 @@ pub struct ZoneStream<'a> {
     vehicle: Option<(Option<Ptr>, Option<Ptr>)>,
     vehicle_compass: ([[u8; 128]; 2], [i32; 2]),
     vehicle_accel: f32,
+    vehicle_engine: VehicleEngineGeometry,
     latest_material: Option<MaterialGeometry>,
     latest_image: Option<GfxImageGeometry>,
     latest_technique_set: Option<TechniqueSetGeometry>,
@@ -1529,6 +1541,7 @@ impl<'a> ZoneStream<'a> {
             vehicle: None,
             vehicle_compass: ([[0; 128]; 2], [0; 2]),
             vehicle_accel: 0.0,
+            vehicle_engine: VehicleEngineGeometry::default(),
             latest_material: None,
             latest_image: None,
             latest_technique_set: None,
@@ -2126,6 +2139,14 @@ impl<'a> ZoneStream<'a> {
 
     pub(crate) fn record_vehicle_accel(&mut self, accel: f32) {
         self.vehicle_accel = accel;
+    }
+
+    pub(crate) fn record_vehicle_engine(&mut self, engine: VehicleEngineGeometry) {
+        self.vehicle_engine = engine;
+    }
+
+    pub fn vehicle_engine(&self) -> VehicleEngineGeometry {
+        self.vehicle_engine
     }
 
     pub fn vehicle_accel(&self) -> f32 {

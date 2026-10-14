@@ -400,6 +400,20 @@ pub fn apply_prepared_match(
                 .vehicle_compass()
                 .map(|(name, icons, size)| (name.to_owned(), (icons.clone(), size))),
         );
+        content.set_vehicle_engine_sounds(weapons.registry().vehicle_engine_sounds().map(
+            |(name, sounds)| {
+                (
+                    name.to_owned(),
+                    sim::VehicleEngineSounds {
+                        idle_low: sounds.idle_low.clone(),
+                        idle_high: sounds.idle_high.clone(),
+                        engine_low: sounds.engine_low.clone(),
+                        engine_high: sounds.engine_high.clone(),
+                        speed: sounds.speed,
+                    },
+                )
+            },
+        ));
         install_team_voice_prefixes(&mut content, catalog.as_deref(), identity.as_deref(), &zone);
         install_shocks(&mut content, catalog.as_deref(), &map_shocks);
         let mut primary = Vec::new();
