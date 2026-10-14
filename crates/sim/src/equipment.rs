@@ -446,6 +446,49 @@ pub(crate) fn drop_live_grenade(
     )
 }
 
+/// The grenade Martyrdom drops: MW2's `perk_grenadeDeath` dvar, "Name of the
+/// grenade weapon to drop" (iw4mp 0x46b70a registers it with this default).
+pub const MARTYRDOM_GRENADE: &str = "frag_grenade_short_mp";
+
+/// Martyrdom, the second half of MW2's player_die grenade step (iw4mp
+/// 0x526519): a player with the engine perk `specialty_grenadepulldeath` who
+/// dies of anything but MOD_SUICIDE drops a live `perk_grenadeDeath` grenade
+/// with that weapon's whole fuse, owned by the dead player and let go of like
+/// a held one: 40 units above the feet, tossed up to 160 units/s along each
+/// axis. Returns whether one was spawned.
+pub(crate) fn drop_martyrdom_grenade(
+    world: &mut FrameWorld,
+    id: ClientId,
+    means_of_death: &str,
+    tick: Tick,
+) -> bool {
+    if !world
+        .player(id)
+        .is_some_and(|ps| martyrdom_drops(ps, means_of_death))
+    {
+        return false;
+    }
+    let Some(weapon) = world.weapon_index_by_script_name(MARTYRDOM_GRENADE) else {
+        diag::warn!(Sim, "martyrdom: {MARTYRDOM_GRENADE} is not loaded");
+        return false;
+    };
+    let Some(fuse_ms) = world.equipment_facts_for(weapon).map(|f| f.fuse_time_ms) else {
+        return false;
+    };
+    let dropped = drop_live_grenade(world, id, weapon, fuse_ms, tick);
+    diag::info!(
+        Sim,
+        "martyrdom: client {} dropped {MARTYRDOM_GRENADE} fuse={fuse_ms}ms spawned={dropped}",
+        id.0
+    );
+    dropped
+}
+
+/// iw4mp 0x526519: `if (mod != MOD_SUICIDE && ps.perks[0] & grenadepulldeath)`.
+fn martyrdom_drops(ps: &playerstate_iw4::PlayerState, means_of_death: &str) -> bool {
+    means_of_death != "MOD_SUICIDE" && ps.perks[0] & playerstate_iw4::PERK_GRENADEPULLDEATH != 0
+}
+
 /// `IW4L_HELD_GRENADE_DROP=1`: a player killed while holding a live grenade
 /// (cooking a frag, or between pulling the pin and letting go) drops it, as
 /// MW2's player_die does, and it goes off when its fuse runs out. Off by
@@ -1973,6 +2016,27 @@ mod tests {
         let (detonate, _) =
             grenade_deadlines(&flash, GrenadeLaunchKind::Dropped { fuse_left_ms: 1500 }, 0);
         assert_eq!(detonate, Some(1500));
+    }
+
+    #[test]
+    fn martyrdom_drops_on_any_death_but_a_suicide() {
+        let mut ps = playerstate_iw4::PlayerState::ZERO;
+        assert!(!martyrdom_drops(&ps, "MOD_RIFLE_BULLET"));
+        ps.perks[0] = playerstate_iw4::PERK_GRENADEPULLDEATH;
+        for means in [
+            "MOD_RIFLE_BULLET",
+            "MOD_HEAD_SHOT",
+            "MOD_MELEE",
+            "MOD_GRENADE_SPLASH",
+            "MOD_FALLING",
+            "",
+        ] {
+            assert!(martyrdom_drops(&ps, means), "{means}");
+        }
+        assert!(!martyrdom_drops(&ps, "MOD_SUICIDE"));
+        // Last Stand's bit is a different perk.
+        ps.perks[0] = playerstate_iw4::PERK_PISTOLDEATH;
+        assert!(!martyrdom_drops(&ps, "MOD_RIFLE_BULLET"));
     }
 
     #[test]

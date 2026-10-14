@@ -994,9 +994,16 @@ fn apply_action(
 
             ActionOutcome::Applied
         }
-        ClientAction::UseCopycat { .. } | ClientAction::SpawnClient { .. } => {
-            ActionOutcome::Refused
+        ClientAction::UseCopycat { .. } => {
+            // The client ran "weapnext" while dead or in the killcam. MW2
+            // notifies the scripts of a bound command whenever the player runs
+            // it: Copycat's prompt waits on notifyOnPlayerCommand("use_copycat",
+            // "weapnext") (_killcam.gsc waitCopyCatButton).
+            crate::script::named_player_command(world.ecs(), id.0, "weapnext");
+
+            ActionOutcome::Accepted
         }
+        ClientAction::SpawnClient { .. } => ActionOutcome::Refused,
         ClientAction::ActionSlot {
             request_id: _,
             slot,

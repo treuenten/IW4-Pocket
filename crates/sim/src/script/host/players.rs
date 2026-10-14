@@ -206,7 +206,7 @@ fn suicide_with(world: &mut World, tick: crate::Tick, client: u32, weapon: u32) 
     {
         return;
     }
-    crate::script_player::kill(&mut frame, tick, id, Some(id), None);
+    crate::script_player::kill(&mut frame, tick, id, Some(id), None, "MOD_SUICIDE");
     let me = player_object(world, client);
     let weapon = match weapon {
         0 => "none".to_owned(),
