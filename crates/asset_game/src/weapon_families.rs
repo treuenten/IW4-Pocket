@@ -351,6 +351,22 @@ fn infinity_slot(
     }
 }
 
+/// Whether a family of MW2's (`iw4`) weapon table is one MW2's class editor
+/// offers. Its weapon table also lists weapons no class could hold (the gold
+/// Desert Eagle), which MW2's class script swaps for the default class's.
+/// Other games' families reach that script as stand-ins, so they are not
+/// judged here.
+fn mw2_class_offers(namespace: AssetNamespace, slot: FamilySlot, base: &str) -> bool {
+    let slot = match slot {
+        FamilySlot::Primary => crate::CacHostSlot::Primary,
+        FamilySlot::Secondary => crate::CacHostSlot::Secondary,
+        FamilySlot::Lethal => crate::CacHostSlot::Lethal,
+        FamilySlot::Tactical => crate::CacHostSlot::Tactical,
+        FamilySlot::Other => return false,
+    };
+    namespace != AssetNamespace::Iw4 || crate::mw2_accepts(slot, &format!("{base}_mp"))
+}
+
 fn offhand_slot(offhand: Option<crate::CacOffhandBucket>) -> FamilySlot {
     match offhand {
         Some(crate::CacOffhandBucket::Lethal) => FamilySlot::Lethal,
@@ -473,6 +489,12 @@ impl WeaponFamilies {
                 Some(_) if slot == FamilySlot::Other => self
                     .excluded
                     .push((key.asset_key(), format!("`{group}` is not a class slot"))),
+                Some(_) if !mw2_class_offers(namespace, slot, &key.base) => self.excluded.push((
+                    key.asset_key(),
+                    "not in MW2's class editor; its class script plays the default class's \
+                     weapon in its place"
+                        .to_owned(),
+                )),
                 Some(_) => {}
             }
             self.by_key.insert(key.clone(), self.families.len());
