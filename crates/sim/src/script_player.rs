@@ -153,6 +153,20 @@ pub(crate) enum Inflictor {
 }
 
 pub(crate) const IDFLAGS_RADIUS: i32 = 1;
+const IDFLAGS_NO_KNOCKBACK: i32 = 4;
+const IDFLAGS_SHIELD_EXPLOSIVE_SPLASH: i32 = 0x80;
+
+/// The iDFlags a blast's damage reaches the damage script with. A blast the
+/// victim's riot shield softened (on the "shield" hit location) carries
+/// MW2's shield explosive splash flag: G_RadiusDamage hands it to
+/// Callback_PlayerDamage directly with flags 0x85.
+pub(crate) fn radius_flags(hitloc: u8) -> i32 {
+    if hitloc == crate::shield::HITLOC {
+        IDFLAGS_RADIUS | IDFLAGS_NO_KNOCKBACK | IDFLAGS_SHIELD_EXPLOSIVE_SPLASH
+    } else {
+        IDFLAGS_RADIUS
+    }
+}
 
 fn means_of_death(world: &FrameWorld, intent: &DamageAttempt) -> &'static str {
     means(
@@ -222,7 +236,11 @@ pub(crate) fn damage(
         victim: intent.target,
         attacker: Some(intent.attacker),
         amount,
-        flags: if splash { IDFLAGS_RADIUS } else { 0 },
+        flags: if splash {
+            radius_flags(intent.hitloc)
+        } else {
+            0
+        },
         means: means_of_death(world, intent),
         weapon: intent.weapon,
         point: intent.inflictor_origin.unwrap_or(victim_origin),
