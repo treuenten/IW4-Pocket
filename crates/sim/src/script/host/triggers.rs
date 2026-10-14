@@ -223,19 +223,16 @@ pub(crate) struct TriggerBlast {
     pub cone: Option<([f32; 3], f32)>,
 }
 
-fn damage_bounds(
-    runtime: &mut Runtime,
+/// An entity's bounds about its origin: a radius trigger's cylinder, a map
+/// trigger's hulls, or its brush model (a care package's being its cloned
+/// crate collision). None for anything else.
+pub(crate) fn local_bounds(
+    entity: &super::entities::ScriptEntity,
     frame: &FrameWorld,
-    object: u64,
 ) -> Option<([f32; 3], [f32; 3])> {
-    let entity = runtime.entities.get(&object)?;
-    let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
-    let Value::Vector(origin) = runtime.object_field(object, "origin") else {
-        return None;
-    };
-    let (mins, maxs) = if let Some((radius, height)) = cylinder {
-        ([-radius, -radius, 0.0], [radius, radius, height])
-    } else if let Some(model) = trigger_model {
+    if let Some((radius, height)) = entity.cylinder {
+        Some(([-radius, -radius, 0.0], [radius, radius, height]))
+    } else if let Some(model) = entity.trigger_model {
         let hulls = frame.clip_cmodels().triggers.get(model as usize)?;
         let mut mins = [f32::INFINITY; 3];
         let mut maxs = [f32::NEG_INFINITY; 3];
@@ -245,10 +242,21 @@ fn damage_bounds(
                 maxs[i] = maxs[i].max(hull.mid[i] + hull.half[i]);
             }
         }
-        (mins, maxs)
+        Some((mins, maxs))
     } else {
-        let model = frame.clip_cmodels().models.get(brush? as usize)?;
-        (model.mins, model.maxs)
+        let model = frame.clip_cmodels().models.get(entity.brush? as usize)?;
+        Some((model.mins, model.maxs))
+    }
+}
+
+fn damage_bounds(
+    runtime: &mut Runtime,
+    frame: &FrameWorld,
+    object: u64,
+) -> Option<([f32; 3], [f32; 3])> {
+    let (mins, maxs) = local_bounds(runtime.entities.get(&object)?, frame)?;
+    let Value::Vector(origin) = runtime.object_field(object, "origin") else {
+        return None;
     };
     let mins = std::array::from_fn(|i| mins[i] + origin[i]);
     let maxs = std::array::from_fn(|i| maxs[i] + origin[i]);
@@ -604,24 +612,44 @@ pub(crate) enum PressTarget {
     Touched,
 }
 
+/// How the usable select_usables chose stands against a dropped weapon in
+/// reach.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum UsableRank {
+    /// A map use trigger with a hint whose volume holds the player.
+    InTrigger,
+    /// A script usable with a hint (a care package, a sentry to pick up), at
+    /// its item::use_score.
+    Scored(f32),
+    /// Anything else.
+    Behind,
+}
+
 /// What the one cursor hint offers, and so what a press made under it acts
-/// on. `item` is a dropped weapon in reach, `usable` the usable
-/// select_usables chose, and `in_hinted_trigger` whether that usable is a
-/// map use trigger with a hint whose volume holds the player.
+/// on. `item` is the use score of a dropped weapon in reach, `usable` the
+/// usable select_usables chose and how it ranks. Both are in the player's
+/// sight, or the usable is a use trigger he stands in: Player_GetUseList
+/// drops anything else before it ranks.
 ///
-/// Such a trigger comes before the weapon. A player standing in a bomb site
-/// or on a planted bomb is offered the plant or defuse, however many guns lie
-/// there: in MW2 guns dropped on Search and Destroy and Sabotage sites are
-/// routine and never stop a plant or a defuse, and pickup by Use works away
-/// from the site. No MW2 script makes that choice, so this order is inferred
-/// from MW2 gameplay, not read from code. Anywhere else the weapon comes
-/// first, as the HUD always had it, and script model usables (care packages,
-/// a sentry to pick up) keep that order.
-pub(crate) fn use_offer(item: bool, usable: Option<u64>, in_hinted_trigger: bool) -> PressTarget {
+/// The engine's Player_GetUseList (MW2 has it; its CoD4 and Black Ops
+/// versions are decompiled) puts dropped weapons and usables in one list and
+/// offers the best item::use_score. A map use trigger the player stands in
+/// comes before any dropped weapon: a touched trigger_use_touch scores -256,
+/// and a dropped weapon never scores below 0. So a player standing in a bomb
+/// site or on a planted bomb is offered the plant or defuse, however many
+/// guns lie there. A script usable such as a care package gets no bonus in
+/// the CoD4 code: it is offered over a weapon when the player looks at it
+/// more directly or is nearer to it. So a crate among dropped guns is
+/// captured by looking at it, and a gun beside it picked up by looking at
+/// the gun. Anything else ranks behind the weapon.
+pub(crate) fn use_offer(item: Option<f32>, usable: Option<(u64, UsableRank)>) -> PressTarget {
     match usable {
-        Some(usable) if in_hinted_trigger => PressTarget::Usable(usable),
-        _ if item => PressTarget::Item,
-        Some(usable) => PressTarget::Usable(usable),
+        Some((usable, UsableRank::InTrigger)) => PressTarget::Usable(usable),
+        Some((usable, UsableRank::Scored(score))) if item.is_none_or(|item| score < item) => {
+            PressTarget::Usable(usable)
+        }
+        _ if item.is_some() => PressTarget::Item,
+        Some((usable, _)) => PressTarget::Usable(usable),
         None => PressTarget::Touched,
     }
 }
@@ -632,7 +660,7 @@ pub(crate) fn use_offer(item: bool, usable: Option<u64>, in_hinted_trigger: bool
 /// weapon swap on the same press leaves the player holding the empty
 /// briefcase. The press follows the hint shown when it came (`cursor_hint`,
 /// set last frame). select_usables chose that hint with use_offer, so a
-/// weapon hint here means no use trigger outranked it.
+/// weapon hint here means no usable outranked it.
 fn press_target(cursor_hint: i32, selected: Option<u64>) -> PressTarget {
     if crate::item::hints_item(cursor_hint) {
         PressTarget::Item
@@ -1127,20 +1155,50 @@ mod press_tests {
 
     #[test]
     fn a_site_the_player_stands_in_outranks_a_gun() {
-        let (site, crate_model) = (42, 77);
-        let gun = true;
-        assert_eq!(use_offer(gun, Some(site), true), PressTarget::Usable(site));
-        assert_eq!(
-            use_offer(false, Some(site), true),
-            PressTarget::Usable(site)
-        );
-        assert_eq!(use_offer(gun, Some(crate_model), false), PressTarget::Item);
-        assert_eq!(use_offer(gun, None, false), PressTarget::Item);
-        assert_eq!(
-            use_offer(false, Some(crate_model), false),
-            PressTarget::Usable(crate_model)
-        );
-        assert_eq!(use_offer(false, None, false), PressTarget::Touched);
+        let site = Some((42, UsableRank::InTrigger));
+        let gun = Some(-400.0);
+        assert_eq!(use_offer(gun, site), PressTarget::Usable(42));
+        assert_eq!(use_offer(None, site), PressTarget::Usable(42));
+        let outside = Some((42, UsableRank::Behind));
+        assert_eq!(use_offer(gun, outside), PressTarget::Item);
+        assert_eq!(use_offer(None, outside), PressTarget::Usable(42));
+        assert_eq!(use_offer(gun, None), PressTarget::Item);
+        assert_eq!(use_offer(None, None), PressTarget::Touched);
+    }
+
+    #[test]
+    fn a_crate_and_a_gun_go_by_where_the_player_looks() {
+        // Standing on a walkway 78 units east of a care package, eye 57
+        // units above its middle, with a dropped gun at his feet.
+        let eye = [1265.0, -276.0, 390.0];
+        let crate_middle = [1187.0, -276.0, 333.0];
+        let gun = [1265.0, -276.0, 320.0];
+        let view = |yaw: f32, pitch: f32| {
+            let (yaw, pitch) = (yaw.to_radians(), pitch.to_radians());
+            [
+                pitch.cos() * yaw.cos(),
+                pitch.cos() * yaw.sin(),
+                -pitch.sin(),
+            ]
+        };
+        let offer = |forward| {
+            let crate_score = crate::item::use_score(eye, forward, crate_middle);
+            let gun_score = crate::item::use_score(eye, forward, gun);
+            use_offer(Some(gun_score), Some((77, UsableRank::Scored(crate_score))))
+        };
+        assert_eq!(offer(view(180.0, 35.0)), PressTarget::Usable(77));
+        assert_eq!(offer(view(0.0, 75.0)), PressTarget::Item);
+        let crate_alone = Some((77, UsableRank::Scored(97.0)));
+        assert_eq!(use_offer(None, crate_alone), PressTarget::Usable(77));
+    }
+
+    #[test]
+    fn the_use_score_is_distance_plus_how_far_off_the_view() {
+        let eye = [0.0; 3];
+        let ahead = [1.0, 0.0, 0.0];
+        assert_eq!(crate::item::use_score(eye, ahead, [50.0, 0.0, 0.0]), 50.0);
+        assert_eq!(crate::item::use_score(eye, ahead, [0.0, 50.0, 0.0]), 178.0);
+        assert_eq!(crate::item::use_score(eye, ahead, [-50.0, 0.0, 0.0]), 306.0);
     }
 
     #[test]
