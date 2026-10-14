@@ -116,6 +116,16 @@ pub(crate) fn magic_bullet(
     launched.ok_or_else(|| format!("weapon {weapon} launched no projectile"))
 }
 
+/// When a rocket fired at `time_ms` explodes in the air if it has hit nothing:
+/// after its weapon's lifetime (`projLifetime`), and never later than the 60 s
+/// every rocket is given. MW2 makes this the rocket's next think, which explodes
+/// it as a grenade's fuse does: a Predator missile 12 s after launch, an RPG or a
+/// Stinger after 7 s. A weapon without a lifetime keeps only the silent cleanup.
+pub(crate) fn rocket_lifetime_deadline(time_ms: i32, lifetime_ms: i32) -> Option<i32> {
+    (lifetime_ms > 0)
+        .then(|| time_ms.saturating_add(lifetime_ms.min(crate::equipment::ROCKET_CLEANUP_MS)))
+}
+
 fn fire_missile(
     world: &mut FrameWorld,
     tick: crate::Tick,
@@ -198,7 +208,7 @@ fn fire_missile(
         entnum,
         launch_time: time_ms + fire_grenade_no_draw_ms(raw_speed),
         spawn_time_ms: time_ms,
-        detonate_at_ms: None,
+        detonate_at_ms: rocket_lifetime_deadline(time_ms, facts.projectile_lifetime_ms),
         cleanup_at_ms: time_ms.saturating_add(crate::equipment::ROCKET_CLEANUP_MS),
         travel_distance: 0.0,
         live: true,
@@ -209,4 +219,32 @@ fn fire_missile(
     };
     world.push_projectile(projectile);
     Some(projectile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rocket_lifetime_deadline;
+    use crate::equipment::ROCKET_CLEANUP_MS;
+
+    #[test]
+    fn a_rocket_explodes_when_its_lifetime_runs_out() {
+        // remotemissile_projectile_mp has a 12 s lifetime, rpg_mp 7 s.
+        assert_eq!(rocket_lifetime_deadline(5_000, 12_000), Some(17_000));
+        assert_eq!(rocket_lifetime_deadline(5_000, 7_000), Some(12_000));
+    }
+
+    #[test]
+    fn a_lifetime_is_capped_at_the_rocket_cleanup() {
+        // harrier_missile_mp has 200 s; it goes off with the 60 s cap, not silently.
+        assert_eq!(
+            rocket_lifetime_deadline(5_000, 200_000),
+            Some(5_000 + ROCKET_CLEANUP_MS)
+        );
+    }
+
+    #[test]
+    fn a_rocket_without_a_lifetime_only_gets_cleaned_up() {
+        assert_eq!(rocket_lifetime_deadline(5_000, 0), None);
+        assert_eq!(rocket_lifetime_deadline(5_000, -1), None);
+    }
 }

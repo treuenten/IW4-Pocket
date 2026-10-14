@@ -38,6 +38,8 @@ pub struct EquipmentRuntimeFacts {
     pub projectile_speed_relative_up: i32,
     pub refuses_pickup: bool,
     pub projectile_activate_dist: i32,
+    /// A rocket explodes this long after launch (`projLifetime`); 0 for none.
+    pub projectile_lifetime_ms: i32,
     pub projectile_explosion_type: i32,
     pub weap_type: i32,
     pub weap_class: i32,

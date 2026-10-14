@@ -39,6 +39,7 @@ pub(super) fn equipment(
         projectile_speed_relative_up: f.projectile_speed_relative_up,
         refuses_pickup: f.refuses_pickup,
         projectile_activate_dist: f.projectile_activate_dist,
+        projectile_lifetime_ms: f.projectile_lifetime_ms,
         projectile_explosion_type: f.projectile_explosion_type,
         weap_type: f.weap_type,
         weap_class: f.weap_class,

@@ -634,6 +634,9 @@ pub(super) fn merge_body_facts(dst: &mut WeaponBodyFacts, src: WeaponBodyFacts) 
     if dst.projectile_activate_dist == 0 {
         dst.projectile_activate_dist = src.projectile_activate_dist;
     }
+    if dst.projectile_lifetime_ms == 0 {
+        dst.projectile_lifetime_ms = src.projectile_lifetime_ms;
+    }
     if dst.projectile_explosion_type == 0 {
         dst.projectile_explosion_type = src.projectile_explosion_type;
     }

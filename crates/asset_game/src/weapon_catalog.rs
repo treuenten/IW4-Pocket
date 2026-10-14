@@ -312,6 +312,9 @@ pub(crate) struct WeaponBodyFacts {
     pub projectile_speed_relative_up: i32,
     pub refuses_pickup: bool,
     pub projectile_activate_dist: i32,
+    /// A rocket's `projLifetime` in ms (0 when the weapon has none): it explodes
+    /// when it has flown this long.
+    pub projectile_lifetime_ms: i32,
     pub projectile_explosion_type: i32,
     pub parallel_bounce: Option<[f32; 31]>,
     pub perpendicular_bounce: Option<[f32; 31]>,
