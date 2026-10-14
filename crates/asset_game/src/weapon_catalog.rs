@@ -1205,6 +1205,18 @@ impl WeaponCombatFx {
     }
 }
 
+/// A vehicle's engine loops (`idleLowSnd`, `idleHighSnd`, `engineLowSnd`,
+/// `engineHighSnd`) and `engineSndSpeed`, the speed in inches a second at
+/// which the loops reach their moving end.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VehicleEngineSounds {
+    pub idle_low: Option<String>,
+    pub idle_high: Option<String>,
+    pub engine_low: Option<String>,
+    pub engine_high: Option<String>,
+    pub speed: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WeaponCatalog {
     entries: Vec<CatalogWeapon>,
@@ -1214,6 +1226,7 @@ pub struct WeaponCatalog {
     vehicle_turrets: HashMap<String, String>,
     vehicle_compass: HashMap<String, ([String; 2], [i32; 2])>,
     vehicle_accel: HashMap<String, f32>,
+    vehicle_engine: HashMap<String, VehicleEngineSounds>,
 }
 
 fn fpv_model_edge(
@@ -1577,6 +1590,7 @@ pub struct WeaponRegistry {
     vehicle_turrets: HashMap<String, String>,
     vehicle_compass: HashMap<String, ([String; 2], [i32; 2])>,
     vehicle_accel: HashMap<String, f32>,
+    vehicle_engine: HashMap<String, VehicleEngineSounds>,
 
     revision: u64,
 }
@@ -2031,6 +2045,9 @@ impl WeaponBuild {
             .vehicle_accel
             .extend(std::mem::take(&mut other.registry.vehicle_accel));
         self.registry
+            .vehicle_engine
+            .extend(std::mem::take(&mut other.registry.vehicle_engine));
+        self.registry
             .vehicle_turrets
             .extend(std::mem::take(&mut other.registry.vehicle_turrets));
         if other.registry.is_empty() {
@@ -2044,6 +2061,7 @@ impl WeaponBuild {
             other.registry.vehicle_turrets = std::mem::take(&mut self.registry.vehicle_turrets);
             other.registry.vehicle_compass = std::mem::take(&mut self.registry.vehicle_compass);
             other.registry.vehicle_accel = std::mem::take(&mut self.registry.vehicle_accel);
+            other.registry.vehicle_engine = std::mem::take(&mut self.registry.vehicle_engine);
             *self = other;
             return;
         }

@@ -6,6 +6,7 @@ impl WeaponCatalog {
         build.registry.vehicle_turrets = self.vehicle_turrets;
         build.registry.vehicle_compass = self.vehicle_compass;
         build.registry.vehicle_accel = self.vehicle_accel;
+        build.registry.vehicle_engine = self.vehicle_engine;
         build
     }
 }
@@ -469,6 +470,7 @@ impl WeaponBuild {
             vehicle_turrets: HashMap::new(),
             vehicle_compass: HashMap::new(),
             vehicle_accel: HashMap::new(),
+            vehicle_engine: HashMap::new(),
             revision: mint_weapon_revision(),
         };
         registry.rebuild_name_maps();

@@ -13,6 +13,12 @@ impl WeaponRegistry {
             .map(|(name, accel)| (name.as_str(), *accel))
     }
 
+    pub fn vehicle_engine_sounds(&self) -> impl Iterator<Item = (&str, &VehicleEngineSounds)> {
+        self.vehicle_engine
+            .iter()
+            .map(|(name, sounds)| (name.as_str(), sounds))
+    }
+
     pub fn vehicle_turrets(&self) -> Vec<(String, String)> {
         self.vehicle_turrets
             .iter()

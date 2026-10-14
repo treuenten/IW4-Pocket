@@ -171,8 +171,9 @@ pub use world_objects::{
     DestructibleLoopSound, GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP,
     GLASS_DAMAGE_TO_DESTROY, GLASS_DAMAGE_TO_WEAKEN, GLASS_FRACTURE_PROFILE_VERSION,
     GLASS_MELEE_DAMAGE, GLASS_PROJECTILE_PANE_HOPS, GlassBreakRecord, GlassCause, GlassPaneBasis,
-    GlassPieceId, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, MISSILE_GLASS_SHATTER_VEL,
-    WorldObjectSnapshot, WorldObjectState, glass_blast_integer_damage,
+    GlassPieceId, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, LoopBlend,
+    MISSILE_GLASS_SHATTER_VEL, VehicleEngineSounds, WorldObjectSnapshot, WorldObjectState,
+    glass_blast_integer_damage,
 };
 
 mod scene_effects;

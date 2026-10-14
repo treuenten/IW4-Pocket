@@ -2,7 +2,7 @@ use asset_iw4::size as sz;
 
 use super::{AssetLinkSink, asset_ptr_at, follow_name};
 use crate::asset_type::AssetType;
-use crate::zone::{Ptr, Result, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
+use crate::zone::{Ptr, Result, VehicleEngineGeometry, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
 
 pub(super) fn load_vehicle(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink) -> Result<()> {
     let p = s.alloc_load(4, s.layout(sz::VEHICLE_DEF, 1008))?;
@@ -35,11 +35,23 @@ pub(super) fn load_vehicle(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink
             s.i32_at(p, s.layout(484, 556))?,
         ],
     );
+    // idleLowSnd, idleHighSnd, engineLowSnd, engineHighSnd and engineSndSpeed:
+    // the engine loops a vehicle plays by its speed.
+    let mut engine = [None; 4];
+    for (index, (field, wide)) in [(488, 560), (492, 568), (496, 576), (500, 584)]
+        .into_iter()
+        .enumerate()
+    {
+        engine[index] = super::weapon::follow_snd_alias_custom(s, p.at(s.layout(field, wide)))?;
+    }
+    s.record_vehicle_engine(VehicleEngineGeometry {
+        idle_low: engine[0],
+        idle_high: engine[1],
+        engine_low: engine[2],
+        engine_high: engine[3],
+        speed: s.f32_at(p, s.layout(504, 592))?,
+    });
     for (field, wide) in [
-        (488, 560),
-        (492, 568),
-        (496, 576),
-        (500, 584),
         (508, 600),
         (516, 616),
         (520, 624),

@@ -20,9 +20,9 @@ mod space;
 mod start;
 
 pub use aliases::{
-    StepGait, footstep_aliases, gear_alias, gear_rattle_alias, land_aliases, quiet_surface_alias,
-    select_cg_fire_alias, select_fire_alias, step_prefix, surface_alias_candidates,
-    world_surface_alias,
+    StepGait, bullet_impact_alias, footstep_aliases, gear_alias, gear_rattle_alias, land_aliases,
+    quiet_surface_alias, select_cg_fire_alias, select_fire_alias, step_prefix,
+    surface_alias_candidates, world_surface_alias,
 };
 pub use ambient::{MapAmbientBooted, SoundIwd};
 pub use clip_store::{ClipPath, ClipPathCost, ClipPrepCost, ClipStore, clip_prep_cost};
@@ -45,6 +45,7 @@ pub use start::{
 mod destructible_loops;
 mod match_set;
 mod match_voices;
+mod projectile_loops;
 
 mod weapon_lock;
 

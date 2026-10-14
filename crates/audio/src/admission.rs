@@ -24,10 +24,23 @@ pub enum AdmissionFailure {
     OutputUnavailable,
 }
 
+/// `IW4L_SILENT_LOOPS_FREE_CHANNEL=0` goes back to counting a silent loop
+/// against its channel's voice limit, as before (on by default).
+pub(crate) fn silent_loops_free_channel() -> bool {
+    static FREE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FREE.get_or_init(|| {
+        std::env::var("IW4L_SILENT_LOOPS_FREE_CHANNEL").map_or(true, |value| value != "0")
+    })
+}
+
 pub(crate) struct Occupant {
     pub id: u64,
     pub policy: AdmissionPolicy,
     pub priority: f32,
+    /// Not being mixed: a loop out of earshot or past the voice budget. It
+    /// still answers to the one-sound-per-entity rule of a restricted
+    /// channel, but holds none of the channel's voices.
+    pub virtual_voice: bool,
 }
 
 pub(crate) fn plan(
@@ -96,10 +109,17 @@ pub(crate) fn plan(
         }
     }
     if let Some(channel) = request.channel {
+        // A channel's `maxvoices` (soundaliases/channels.def) counts the
+        // voices playing on it. A loop nobody can hear (a map emitter out of
+        // range) plays on no voice, so it does not fill the channel: Favela's
+        // fifty-odd "auto" emitters would otherwise refuse every other "auto"
+        // sound on the map, the Predator's rocket loop and glass breaks among
+        // them.
         let remaining = occupants
             .iter()
             .filter(|occupant| {
                 same_bank(occupant)
+                    && !occupant.virtual_voice
                     && occupant
                         .policy
                         .channel
@@ -112,4 +132,46 @@ pub(crate) fn plan(
         }
     }
     Ok(victims.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auto_channel(maximum: i32) -> Option<ChannelRule> {
+        Some(ChannelRule {
+            key: asset_audio::ChannelKey {
+                namespace: asset_core::AssetNamespace::Iw4,
+                id: 3,
+            },
+            maximum,
+            restricted: false,
+        })
+    }
+
+    fn occupant(id: u64, virtual_voice: bool) -> Occupant {
+        Occupant {
+            id,
+            policy: AdmissionPolicy {
+                channel: auto_channel(2),
+                emitter: Some(id as u32),
+                ..AdmissionPolicy::default()
+            },
+            priority: 0.0,
+            virtual_voice,
+        }
+    }
+
+    #[test]
+    fn loops_out_of_earshot_leave_the_channel_free() {
+        let request = AdmissionPolicy {
+            channel: auto_channel(2),
+            emitter: Some(99),
+            ..AdmissionPolicy::default()
+        };
+        let silent: Vec<_> = (0..40).map(|id| occupant(id, true)).collect();
+        assert_eq!(plan(&request, &silent), Ok(Vec::new()));
+        let playing = [occupant(1, false), occupant(2, false), occupant(3, true)];
+        assert_eq!(plan(&request, &playing), Err(AdmissionFailure::Concurrency));
+    }
 }

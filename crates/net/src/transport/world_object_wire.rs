@@ -1,7 +1,7 @@
 use super::wire::{WireError, WireReader, WireWriter};
 use sim::{
     DestructibleLoopSound, GlassCause, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed,
-    ScriptModelId, WorldObjectSnapshot,
+    LoopBlend, ScriptModelId, WorldObjectSnapshot,
 };
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -23,7 +23,7 @@ pub(super) fn encode_sync(
     let content_changed;
     if full {
         content_changed = true;
-        out.put_u8(4);
+        out.put_u8(6);
         encode_world_object_full(&mut out, current);
     } else if world_object_delta(baseline, current).is_empty()
         && baseline.destructible_loop_sounds == current.destructible_loop_sounds
@@ -32,7 +32,7 @@ pub(super) fn encode_sync(
         out.put_u8(0);
     } else {
         content_changed = true;
-        out.put_u8(3);
+        out.put_u8(5);
         encode_world_object_delta(&mut out, baseline, current);
     }
     EncodedWorldObjects {
@@ -144,13 +144,23 @@ fn encode_destructible_loop_sounds(out: &mut WireWriter, rows: &[DestructibleLoo
         for v in row.origin {
             out.put_f32(v);
         }
+        match row.blend {
+            None => out.put_u8(0),
+            Some(blend) => {
+                out.put_u8(1);
+                out.put_u8(blend.toward);
+                out.put_u8(blend.fraction);
+            }
+        }
     }
 }
 
 fn decode_destructible_loop_sounds(
     input: &mut WireReader<'_>,
-    with_entity: bool,
+    tag: u8,
 ) -> Result<Vec<DestructibleLoopSound>, WireError> {
+    let with_entity = tag >= 3;
+    let with_blend = tag >= 5;
     let count = input.get_u16()? as usize;
     let mut rows = Vec::with_capacity(count.min(256));
     for _ in 0..count {
@@ -169,11 +179,24 @@ fn decode_destructible_loop_sounds(
         for v in &mut origin {
             *v = input.get_f32()?;
         }
+        let blend = if with_blend {
+            match input.get_u8()? {
+                0 => None,
+                1 => Some(LoopBlend {
+                    toward: input.get_u8()?,
+                    fraction: input.get_u8()?,
+                }),
+                _ => return Err(WireError::Malformed("invalid loop sound blend")),
+            }
+        } else {
+            None
+        };
         rows.push(DestructibleLoopSound {
             snd_ent,
             owner,
             alias_index,
             origin,
+            blend,
         });
     }
     Ok(rows)
@@ -205,7 +228,7 @@ fn decode_world_object_sync(input: &mut WireReader<'_>) -> Result<WorldObjectUpd
     let tag = input.get_u8()?;
     let change = match tag {
         0 => WorldObjectChange::Unchanged,
-        1 | 3 => {
+        1 | 3 | 5 => {
             let glass_changed = input.get_u16()? as usize;
             let mut glass = PairDelta::<u32, GlassPieceSnapshot>::default();
             for _ in 0..glass_changed {
@@ -217,20 +240,20 @@ fn decode_world_object_sync(input: &mut WireReader<'_>) -> Result<WorldObjectUpd
             for _ in 0..glass_removed {
                 glass.removed.push(input.get_u32()?);
             }
-            let destructible_loop_sounds = decode_destructible_loop_sounds(input, tag >= 3)?;
+            let destructible_loop_sounds = decode_destructible_loop_sounds(input, tag)?;
 
             WorldObjectChange::Delta {
                 glass,
                 loops: destructible_loop_sounds,
             }
         }
-        2 | 4 => {
+        2 | 4 | 6 => {
             let glass_count = input.get_u16()? as usize;
             let mut glass_pieces = Vec::with_capacity(glass_count.min(4096));
             for _ in 0..glass_count {
                 glass_pieces.push((input.get_u32()?, decode_glass_piece_snapshot(input)?));
             }
-            let destructible_loop_sounds = decode_destructible_loop_sounds(input, tag >= 3)?;
+            let destructible_loop_sounds = decode_destructible_loop_sounds(input, tag)?;
             WorldObjectChange::Full {
                 glass: glass_pieces,
                 loops: destructible_loop_sounds,

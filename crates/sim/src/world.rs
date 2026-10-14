@@ -812,6 +812,10 @@ impl SimState {
         self.content.vehicle_accel().get(name).copied()
     }
 
+    pub fn vehicle_engine_sounds(&self, name: &str) -> Option<&crate::VehicleEngineSounds> {
+        self.content.vehicle_engine().get(name)
+    }
+
     pub fn vehicle_turret_weapon(&self, vehicle: &str) -> Option<u32> {
         let path = self.content.vehicle_turrets().get(vehicle)?;
         self.weapon_index_by_script_name(path.rsplit('/').next().unwrap_or(path))

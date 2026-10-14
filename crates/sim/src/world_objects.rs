@@ -42,6 +42,63 @@ pub struct DestructibleLoopSound {
     pub owner: ScriptModelId,
     pub alias_index: u8,
     pub origin: [f32; 3],
+    /// A vehicle engine layer, blended toward another alias by speed.
+    pub blend: Option<LoopBlend>,
+}
+
+/// One loop blended between two aliases of the same sound: its volume and
+/// pitch go from the row's alias (`fraction` 0) to `toward` (`fraction` 255).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoopBlend {
+    pub toward: u8,
+    pub fraction: u8,
+}
+
+/// A vehicle definition's engine loops (`idleLowSnd`, `idleHighSnd`,
+/// `engineLowSnd`, `engineHighSnd`) and `engineSndSpeed` in inches a second.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VehicleEngineSounds {
+    pub idle_low: Option<String>,
+    pub idle_high: Option<String>,
+    pub engine_low: Option<String>,
+    pub engine_high: Option<String>,
+    pub speed: f32,
+}
+
+impl VehicleEngineSounds {
+    /// The two loops a vehicle plays at `speed`, each as (alias at rest,
+    /// alias at `engineSndSpeed` and above, blend fraction).
+    ///
+    /// MW2's data pairs them this way: every vehicle's idle loop is loud at
+    /// its `High` alias and faint (or silent) at its `Low` one, its engine
+    /// loop the other way round, and the pitch of `idleHigh` always equals
+    /// that of `engineLow` and `idleLow` that of `engineHigh` (cobra 0.95 and
+    /// 1.10, Pave Low 0.95 and 1.10, Harrier 1.00 and 1.15; the SP truck's
+    /// `idleLow` and `engineLow` are both silent). So at rest the idle loop
+    /// plays from `idleHigh` with the engine loop at `engineLow`, and as the
+    /// vehicle reaches `engineSndSpeed` the idle loop fades to `idleLow` while
+    /// the engine loop rises to `engineHigh`, both at the same pitch.
+    pub fn layers(&self, speed: f32) -> Vec<(&str, &str, u8)> {
+        let fraction = if self.speed > 0.0 {
+            (speed / self.speed).clamp(0.0, 1.0)
+        } else if speed > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+        let fraction = (fraction * 255.0).round() as u8;
+        [
+            (self.idle_high.as_deref(), self.idle_low.as_deref()),
+            (self.engine_low.as_deref(), self.engine_high.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|pair| match pair {
+            (Some(rest), Some(moving)) => Some((rest, moving, fraction)),
+            (Some(only), None) | (None, Some(only)) => Some((only, only, fraction)),
+            (None, None) => None,
+        })
+        .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -474,4 +531,51 @@ fn remove_key<K: Copy + PartialEq, V>(table: &mut Vec<(K, V)>, id: K) {
 
 fn sort_pairs<K: Copy + Ord, V>(table: &mut [(K, V)]) {
     table.sort_by(|(a, _), (b, _)| a.cmp(b));
+}
+
+#[cfg(test)]
+mod engine_sound_tests {
+    use super::VehicleEngineSounds;
+
+    fn cobra() -> VehicleEngineSounds {
+        VehicleEngineSounds {
+            idle_low: Some("cobra_idle_low".into()),
+            idle_high: Some("cobra_idle_high".into()),
+            engine_low: Some("cobra_engine_low".into()),
+            engine_high: Some("cobra_engine_high".into()),
+            speed: 352.0,
+        }
+    }
+
+    #[test]
+    fn a_hovering_vehicle_idles_and_a_fast_one_drives() {
+        assert_eq!(
+            cobra().layers(0.0),
+            vec![
+                ("cobra_idle_high", "cobra_idle_low", 0),
+                ("cobra_engine_low", "cobra_engine_high", 0),
+            ]
+        );
+        assert_eq!(
+            cobra().layers(1056.0),
+            vec![
+                ("cobra_idle_high", "cobra_idle_low", 255),
+                ("cobra_engine_low", "cobra_engine_high", 255),
+            ]
+        );
+        assert_eq!(cobra().layers(176.0)[0].2, 128);
+    }
+
+    #[test]
+    fn a_missing_alias_keeps_its_partner_and_no_sounds_mean_no_layers() {
+        let mut half = cobra();
+        half.idle_low = None;
+        half.engine_low = None;
+        half.engine_high = None;
+        assert_eq!(
+            half.layers(100.0),
+            vec![("cobra_idle_high", "cobra_idle_high", 72)]
+        );
+        assert!(VehicleEngineSounds::default().layers(500.0).is_empty());
+    }
 }

@@ -58,6 +58,7 @@ pub(crate) struct Heli {
     on_target: bool,
     gunner: Option<u32>,
     next_fire_ms: i32,
+    engine: Option<crate::VehicleEngineSounds>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,8 +135,36 @@ impl Default for Heli {
             on_target: false,
             gunner: None,
             next_fire_ms: 0,
+            engine: None,
         }
     }
+}
+
+/// A vehicle's engine loops this tick: (vehicle, layer, alias at rest, alias
+/// at speed, blend fraction), from its definition's engine sounds and how
+/// fast it is moving.
+pub(super) fn engine_loops(runtime: &Runtime) -> Vec<(u64, u32, String, String, u8)> {
+    let mut rows = Vec::new();
+    for (&id, heli) in &runtime.vehicles {
+        if !runtime.live(&id) {
+            continue;
+        }
+        let Some(engine) = &heli.engine else {
+            continue;
+        };
+        let speed = glam::Vec3::from_array(heli.velocity).length();
+        for (layer, (rest, moving, fraction)) in engine.layers(speed).into_iter().enumerate() {
+            rows.push((
+                id,
+                layer as u32,
+                rest.to_owned(),
+                moving.to_owned(),
+                fraction,
+            ));
+        }
+    }
+    rows.sort_unstable_by_key(|(id, layer, ..)| (*id, *layer));
+    rows
 }
 
 fn heli<'a>(world: &'a mut World, receiver: &Value) -> Result<&'a mut Heli, String> {
@@ -559,6 +588,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = frame.vehicle_turret_weapon(&definition);
         let compass = frame.vehicle_compass(&definition).cloned();
         let def_accel = frame.vehicle_accel(&definition).unwrap_or(0.0);
+        let engine = frame.vehicle_engine_sounds(&definition).cloned();
         spawn_vehicle(
             world,
             "script_vehicle",
@@ -570,6 +600,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 weapon,
                 compass,
                 def_accel,
+                engine,
                 ..Default::default()
             }),
         )
@@ -584,6 +615,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = frame.vehicle_turret_weapon(&definition);
         let compass = frame.vehicle_compass(&definition).cloned();
         let def_accel = frame.vehicle_accel(&definition).unwrap_or(0.0);
+        let engine = frame.vehicle_engine_sounds(&definition).cloned();
         let vehicle = spawn_vehicle(
             world,
             "script_vehicle",
@@ -594,6 +626,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 weapon,
                 compass,
                 def_accel,
+                engine,
                 ..Default::default()
             }),
         )?;
@@ -618,6 +651,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = frame.vehicle_turret_weapon(&vehicle);
         let compass = frame.vehicle_compass(&vehicle).cloned();
         let def_accel = frame.vehicle_accel(&vehicle).unwrap_or(0.0);
+        let engine = frame.vehicle_engine_sounds(&vehicle).cloned();
         spawn_vehicle(
             world,
             "script_vehicle",
@@ -629,6 +663,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 compass,
                 weapon,
                 def_accel,
+                engine,
                 ..Heli::default()
             }),
         )
