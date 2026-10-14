@@ -167,6 +167,12 @@ pub struct MenuItem {
     /// fills the width, instead of leaving bands at the sides. Opt-in: the
     /// original menus have no such flag.
     pub cover: bool,
+    /// A strip that scrolls sideways and repeats (the main menu's clouds,
+    /// 1708 wide and moving 854 a minute) is drawn again a whole width to
+    /// either side wherever the screen reaches past it. Its rect covers a
+    /// 16:9 screen at every point of the scroll, but on a wider one each end
+    /// came into view for a few seconds a minute. Opt-in, like `cover`.
+    pub wrap_x: bool,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
