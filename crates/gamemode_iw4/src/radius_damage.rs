@@ -23,7 +23,9 @@ pub fn radius_damage_amount(inner: f32, outer: f32, radius: f32, dist: f32, vis_
         return 0;
     }
     let falloff = outer + (1.0 - dist / radius) * (inner - outer);
-    libm::roundf(falloff * vis_scale) as i32
+    // MW2 cuts the fraction off (its float-to-int routine truncates); rounding to the
+    // nearest could add a point.
+    (falloff * vis_scale) as i32
 }
 
 pub const G_CAN_DAMAGE_CONTENTS_MASK: u32 = 0x802011;
@@ -172,6 +174,13 @@ mod tests {
         assert_eq!(protect([0.0, 0.0, 50.0]), 0.0);
         // 45 degrees up and straight ahead is inside the 120-degree arc.
         assert_eq!(protect([50.0, 0.0, 50.0]), 0.55);
+    }
+
+    #[test]
+    fn blast_damage_drops_the_fraction() {
+        // 64 of 256 units out: 50 + 0.75 * 150 = 162.5, which MW2 makes 162.
+        assert_eq!(radius_damage_amount(200.0, 50.0, 256.0, 64.0, 1.0), 162);
+        assert_eq!(radius_damage_amount(200.0, 50.0, 256.0, 0.0, 1.0), 200);
     }
 
     #[test]
