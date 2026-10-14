@@ -309,11 +309,31 @@ pub enum ViewSubject {
         viewer: u32,
         focus: Option<u32>,
     },
+    /// A spectator following another player live: drawn from that player's
+    /// eyes like a killcam seat, but it is not a killcam, so the HUD stays.
+    Follow {
+        viewer: u32,
+        focus: Option<u32>,
+    },
 }
 
 impl ViewSubject {
     pub fn in_killcam(self) -> bool {
         matches!(self, Self::Seat { .. })
+    }
+
+    /// The client whose eyes the view is drawn from: the focus of a killcam
+    /// seat or of a followed player, otherwise `local`.
+    pub fn eyes(self, local: u32) -> u32 {
+        match self {
+            Self::Seat {
+                focus: Some(focus), ..
+            }
+            | Self::Follow {
+                focus: Some(focus), ..
+            } => focus,
+            _ => local,
+        }
     }
 }
 

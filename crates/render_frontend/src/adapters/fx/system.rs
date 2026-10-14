@@ -2147,12 +2147,7 @@ fn publish_weapon_fire(
         .as_deref()
         .and_then(|weapons| weapons.for_event(fire.event.world).ok());
     pending.write(WeaponFireFx(*fire));
-    let eyes = match *view {
-        ViewSubject::Seat {
-            focus: Some(focus), ..
-        } => i32::try_from(focus).unwrap_or(0),
-        _ => i32::try_from(local.0.0).unwrap_or(0),
-    };
+    let eyes = i32::try_from(view.eyes(local.0.0)).unwrap_or(0);
     let player = if view.in_killcam() {
         presented.player(local.0)
     } else {
@@ -2291,12 +2286,7 @@ fn drain_weapon_fire_fx(
             .as_ref()
             .and_then(|weapons| weapons.registry().combat_fx_of(fire.event.payload.weapon));
 
-        let eyes = match *view {
-            ViewSubject::Seat {
-                focus: Some(focus), ..
-            } => i32::try_from(focus).unwrap_or(0),
-            _ => i32::try_from(local.0.0).unwrap_or(0),
-        };
+        let eyes = i32::try_from(view.eyes(local.0.0)).unwrap_or(0);
         let gate = PlayerDrawGate {
             eyes_entity_num: eyes,
             other_flags: presented
@@ -2428,8 +2418,8 @@ fn drain_weapon_fire_fx(
                 .and_then(|weapon| weapon.event_facts())
                 .is_some_and(|facts| facts.hides_fire_ping())
         });
-        let from_player = (0..playerstate_iw4::PLAYER_CORPSE_ENTITY_BASE)
-            .contains(&fire.event.payload.number);
+        let from_player =
+            (0..playerstate_iw4::PLAYER_CORPSE_ENTITY_BASE).contains(&fire.event.payload.number);
         if fire.event.payload.number != local_number
             && from_player
             && !player_view
@@ -3399,12 +3389,7 @@ fn melee_blood(
     let Some(catalog) = catalog else {
         return;
     };
-    let eyes = match *view {
-        ViewSubject::Seat {
-            focus: Some(focus), ..
-        } => i32::try_from(focus).unwrap_or(0),
-        _ => i32::try_from(local.0.0).unwrap_or(0),
-    };
+    let eyes = i32::try_from(view.eyes(local.0.0)).unwrap_or(0);
     let gate = PlayerDrawGate {
         eyes_entity_num: eyes,
         other_flags: presented

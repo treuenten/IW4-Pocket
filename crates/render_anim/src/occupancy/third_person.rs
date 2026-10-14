@@ -26,6 +26,14 @@ pub fn presented_is_third_person(
     if remote_missile_link(presented, local).is_some() {
         return true;
     }
+    // A live follow is drawn from the followed player's eyes. The cameras that
+    // would take a third-person view of them (a gunner's linked weapon view, a
+    // missile) belong to their own client and are not carried to a spectator,
+    // and the death-cam camera has no view for a live seat, so it stays first
+    // person.
+    if ps.is_live_follow() {
+        return false;
+    }
     is_third_person_view(ThirdPersonViewInputs {
         pm_type: ps.pm_type,
         other_flags: ps.other_flags,

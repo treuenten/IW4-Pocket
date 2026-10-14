@@ -418,6 +418,7 @@ impl RemoteProxy {
 
 fn same_presentation_epoch(a: &PlayerState, b: &PlayerState) -> bool {
     a.is_live_frame() == b.is_live_frame()
+        && a.is_live_follow() == b.is_live_follow()
         && a.kill_cam_client_num == b.kill_cam_client_num
         && (a.e_flags & playerstate_iw4::eflags::TELEPORT)
             == (b.e_flags & playerstate_iw4::eflags::TELEPORT)

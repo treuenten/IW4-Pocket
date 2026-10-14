@@ -519,7 +519,7 @@ fn glass_viewer_is_archived(snap: Option<&sim::Snapshot>, local: Option<sim::Cli
     };
     snap.players
         .iter()
-        .any(|(id, ps)| *id == local && !ps.is_live_frame())
+        .any(|(id, ps)| *id == local && ps.is_seat_frame())
 }
 
 fn glass_presentation_now(msec_now: i32, as_of_ms: i32, archived: bool) -> i32 {
