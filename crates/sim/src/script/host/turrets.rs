@@ -11,6 +11,7 @@ use bevy_ecs::prelude::World;
 use glam::Vec3;
 
 const TURN_RATE_DEG_PER_S: f32 = 360.0;
+const SCAN_RATE_DEG_PER_S: f32 = 30.0;
 const ON_TARGET_DEGREES: f32 = 2.0;
 const DEFAULT_RANGE: f32 = 4096.0;
 const MUZZLE_HEIGHT: f32 = 40.0;
@@ -29,12 +30,51 @@ pub(crate) struct Turret {
     firing: bool,
     on_target: bool,
     aim: [f32; 3],
+    aim_initialized: bool,
+    scan_direction: f32,
     arcs: [f32; 4],
     drop_pitch: f32,
     convergence: [f32; 2],
     minimap: bool,
     minigun: bool,
     mode_change_wait: f32,
+}
+
+/// The bones a turret aims with. `tag_aim_animated` carries the gun, barrels
+/// and `tag_flash`; `tag_aim` is the separate branch a player using the turret
+/// is placed by. Both take the same angles, as the game's turret controller
+/// sets them each frame.
+const AIM_TAGS: [&str; 2] = ["tag_aim", "tag_aim_animated"];
+
+impl Turret {
+    /// The gun's pose on its base: the firing direction as pitch and yaw in the
+    /// turret's own frame. A carried turret shows its bind pose.
+    pub(super) fn model_rotations(&self, base: [f32; 3]) -> Vec<xmodel_runtime::TagRotation> {
+        if !self.aim_initialized || self.carried {
+            return Vec::new();
+        }
+        let angles = aim_angles_on_base(self.aim, base);
+        AIM_TAGS
+            .iter()
+            .map(|tag| xmodel_runtime::TagRotation {
+                tag: (*tag).into(),
+                angles,
+            })
+            .collect()
+    }
+}
+
+/// A world firing direction as (pitch, yaw, 0) relative to a base's angles.
+fn aim_angles_on_base(aim: [f32; 3], base: [f32; 3]) -> [f32; 3] {
+    let axis = math_iw4::angles_to_axis(base);
+    let aim = Vec3::from_array(aim);
+    let local = axis.map(|axis| aim.dot(Vec3::from_array(axis)));
+    let angles = math_iw4::vect_to_angles(local);
+    [
+        math_iw4::angle_subtract(angles[0], 0.0),
+        math_iw4::angle_subtract(angles[1], 0.0),
+        0.0,
+    ]
 }
 
 fn turret_of(world: &World, receiver: &Value) -> Result<u64, String> {
@@ -134,6 +174,8 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 firing: false,
                 on_target: false,
                 aim: [1.0, 0.0, 0.0],
+                aim_initialized: false,
+                scan_direction: 1.0,
                 arcs: [180.0, 180.0, 90.0, 90.0],
                 drop_pitch: 0.0,
                 convergence: [0.0; 2],
@@ -435,6 +477,11 @@ pub(crate) fn advance(world: &mut World) {
             continue;
         }
         let mut turret = world.resource::<Runtime>().engine.turrets[&object].clone();
+        let base = field_vector(world, object, "angles");
+        if !turret.aim_initialized || turret.carried {
+            turret.aim = math_iw4::angles_to_axis(base)[0];
+            turret.aim_initialized = true;
+        }
         let from = muzzle(world, object);
         let active = !turret.carried && &*turret.mode != "sentry_offline";
         let found = if active {
@@ -462,6 +509,9 @@ pub(crate) fn advance(world: &mut World) {
             None => {
                 turret.target = None;
                 turret.on_target = false;
+                if active && &*turret.mode == "sentry" {
+                    scan(&mut turret, base);
+                }
             }
         }
         turret.firing = turret.on_target && turret.fire_enabled;
@@ -484,6 +534,29 @@ pub(crate) fn advance(world: &mut World) {
             );
         }
     }
+}
+
+/// An idle sentry sweeps its gun left and right within its arcs, at most 90
+/// degrees either side of where it was placed facing.
+fn scan(turret: &mut Turret, base: [f32; 3]) {
+    let yaw = aim_angles_on_base(turret.aim, base)[1];
+    let left = turret.arcs[0].min(90.0);
+    let right = turret.arcs[1].min(90.0);
+    let step = SCAN_RATE_DEG_PER_S * crate::MATCH_TICK_MS as f32 * 0.001;
+    let next = yaw + turret.scan_direction * step;
+    if next >= left {
+        turret.scan_direction = -1.0;
+    } else if next <= -right {
+        turret.scan_direction = 1.0;
+    }
+    let wanted =
+        math_iw4::angles_to_axis([base[0], base[1] + next.clamp(-right, left), base[2]])[0];
+    turret.aim = super::guidance::turn_toward(
+        Vec3::from_array(turret.aim),
+        Vec3::from_array(wanted),
+        step.to_radians(),
+    )
+    .to_array();
 }
 
 fn shoot(world: &mut World, object: u64) {
@@ -643,7 +716,31 @@ pub(crate) fn fire_bullet(
 
 #[cfg(test)]
 mod turret_tests {
-    use super::{turret_hostile, turret_may_target};
+    use super::{aim_angles_on_base, turret_hostile, turret_may_target};
+
+    fn near(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.01)
+    }
+
+    #[test]
+    fn a_turret_aims_relative_to_how_it_was_placed() {
+        // Placed facing north (yaw 90): a target to the west is 90 degrees left.
+        assert!(near(
+            aim_angles_on_base([-1.0, 0.0, 0.0], [0.0, 90.0, 0.0]),
+            [0.0, 90.0, 0.0]
+        ));
+        // Straight ahead and a little down (positive pitch looks down).
+        let down = [0.0, 10f32.to_radians().cos(), -10f32.to_radians().sin()];
+        assert!(near(
+            aim_angles_on_base(down, [0.0, 90.0, 0.0]),
+            [10.0, 0.0, 0.0]
+        ));
+        // To the east of a north-facing turret is 90 degrees right.
+        assert!(near(
+            aim_angles_on_base([1.0, 0.0, 0.0], [0.0, 90.0, 0.0]),
+            [0.0, -90.0, 0.0]
+        ));
+    }
 
     #[test]
     fn sentries_ignore_cold_blooded_and_dead_players() {

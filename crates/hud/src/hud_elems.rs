@@ -411,16 +411,18 @@ pub(crate) fn update_hud_elems(
             } else {
                 hud_elem_placement(surface.placement(), elem, cg_time, 0.0, font_height)
             };
+            let [s0, t0, s1, t1] =
+                hud_images.stretch_pic_st(material_namespace, &material, cg_time);
             cmds.push(Draw2dCmd {
                 material_namespace,
                 x: placed.x,
                 y: placed.y,
                 w: placed.w,
                 h: placed.h,
-                s0: 0.0,
-                t0: 0.0,
-                s1: 1.0,
-                t1: 1.0,
+                s0,
+                t0,
+                s1,
+                t1,
                 color: face_color(color),
                 material,
                 op: Draw2dOp::StretchPic,

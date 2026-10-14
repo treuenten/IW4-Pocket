@@ -148,6 +148,7 @@ pub struct HudImages {
     zone_states: HashMap<String, Option<render_material::CompiledPassState>>,
     zone_srgb_reads: HashMap<String, bool>,
     zone_samplers: HashMap<String, u8>,
+    grain_overlays: std::collections::HashSet<String>,
     blood_plan: Option<Result<BloodMaterialBinding, String>>,
     zone_installed: bool,
     zone_uploaded: bool,
@@ -224,6 +225,9 @@ impl HudImages {
                 .map(|(material, image)| (cache_key(material), image.clone())),
         );
         for (name, plan) in &catalog.material_2d_plans {
+            if plan.technique_set.as_deref() == Some(hud_iw4::GRAIN_OVERLAY_TECHSET) {
+                self.grain_overlays.insert(cache_key(name));
+            }
             let binding =
                 plan.textures
                     .iter()
@@ -240,6 +244,11 @@ impl HudImages {
                 self.zone_samplers
                     .insert(cache_key(name), binding.sampler_state);
             }
+        }
+        if !self.grain_overlays.is_empty() {
+            let mut names: Vec<_> = self.grain_overlays.iter().collect();
+            names.sort();
+            diag::info!(Ui, "hud grain_overlay materials: {names:?}");
         }
         for (name, state) in &catalog.material_state_bits {
             let compiled = state.agreed().and_then(|words| {
@@ -276,6 +285,21 @@ impl HudImages {
             self.zone_states.get(&cache_key(name)).copied().flatten()
         } else {
             asset_material::zone_ui_material_state(ns, name)
+        }
+    }
+
+    /// Whether the material draws with MW2's `grain_overlay` technique, whose
+    /// texture coordinates move every frame (see [`hud_iw4::grain_overlay_st`]).
+    pub fn draws_grain_overlay(&self, ns: AssetNamespace, name: &str) -> bool {
+        ns == HUD_CHROME_NAMESPACE && self.grain_overlays.contains(&cache_key(name))
+    }
+
+    /// The `[s0, t0, s1, t1]` a stretch-pic of this material samples at `time_ms`.
+    pub fn stretch_pic_st(&self, ns: AssetNamespace, name: &str, time_ms: i32) -> [f32; 4] {
+        if self.draws_grain_overlay(ns, name) {
+            hud_iw4::grain_overlay_st(time_ms)
+        } else {
+            [0.0, 0.0, 1.0, 1.0]
         }
     }
 

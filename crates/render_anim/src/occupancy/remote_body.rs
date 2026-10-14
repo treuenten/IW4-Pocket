@@ -50,25 +50,17 @@ pub struct RemotePlayer {
     pub shield: Option<sim::ShieldAttachment>,
 }
 
-/// A body draws the shield it died with; a live player draws the one it holds now.
-fn drawn_shield(
-    snapshot: &sim::Snapshot,
-    number: u16,
-    client: sim::ClientId,
-) -> Option<sim::ShieldAttachment> {
-    let body = snapshot
-        .meta
-        .corpses
-        .slots
-        .iter()
-        .find(|slot| slot.occupied && slot.entnum == i32::from(number));
-    match body {
-        Some(body) => body.shield,
-        None => snapshot
-            .meta
-            .for_client(client)
-            .and_then(|meta| meta.shield),
-    }
+/// A body draws the uniform and shield it died with; a live player draws its current ones.
+fn drawn_kit(presented: &PresentedSnapshot, number: u16, client: sim::ClientId) -> sim::DrawnKit {
+    presented
+        .snapshot()
+        .map_or_else(sim::DrawnKit::default, |snap| {
+            sim::DrawnKit::of_entity(
+                &snap.meta.corpses,
+                i32::from(number),
+                snap.meta.for_client(client),
+            )
+        })
 }
 
 #[derive(Component, Default)]
@@ -293,21 +285,15 @@ fn occupy_remote_scene_ents(
         let Some(client) = identity.client() else {
             continue;
         };
-        let meta = presented
-            .snapshot()
-            .and_then(|snap| snap.meta.for_client(client));
-        let ffa_team = meta.and_then(|m| m.ffa_team);
-        let client_state_team = meta.map(|m| m.client_state_team).unwrap_or(0);
-        let axis = asset_model::kit_assignment_is_axis(client_state_team, ffa_team);
+        let kit = drawn_kit(&presented, identity.number(), client);
+        let axis = asset_model::kit_assignment_is_axis(kit.client_state_team, kit.ffa_team);
         let Ok(soldier) = soldiers.side(axis) else {
             continue;
         };
         if !soldier.owns_bodies(&bodies.0) {
             continue;
         }
-        let shield = presented
-            .snapshot()
-            .and_then(|snap| drawn_shield(snap, identity.number(), client));
+        let shield = kit.shield;
         let held = remote_pose_sample(runtime).weapon;
         let (kit_models, radius, hide_part_bits) = match live_kits.filter(|_| shield.is_none()) {
             Some((kits, _world)) => {
@@ -435,14 +421,10 @@ fn sync_remote_bodies(
             }
             continue;
         }
-        let meta = presented
-            .snapshot()
-            .and_then(|snap| snap.meta.for_client(client));
-        let ffa_team = meta.and_then(|m| m.ffa_team);
-        let client_state_team = meta.map(|m| m.client_state_team).unwrap_or(0);
+        let kit = drawn_kit(&presented, identity.number(), client);
         let Ok(soldier) = soldiers.side(asset_model::kit_assignment_is_axis(
-            client_state_team,
-            ffa_team,
+            kit.client_state_team,
+            kit.ffa_team,
         )) else {
             if remote.is_some() {
                 commands
@@ -477,11 +459,9 @@ fn sync_remote_bodies(
             scale: Vec3::ONE,
         };
         let marker = RemotePlayer {
-            ffa_team,
-            client_state_team,
-            shield: presented
-                .snapshot()
-                .and_then(|snap| drawn_shield(snap, identity.number(), client)),
+            ffa_team: kit.ffa_team,
+            client_state_team: kit.client_state_team,
+            shield: kit.shield,
         };
         if remote.is_some() {
             commands.entity(entity).insert((pose, marker));

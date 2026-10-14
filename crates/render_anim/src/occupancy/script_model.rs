@@ -393,6 +393,11 @@ fn apply_presented_script_model_dobjs(
     for (owner, state) in &snapshot.meta.entity_dobjs {
         by_owner.entry(*owner).or_insert(state);
     }
+    // A turret's aim turns between snapshots instead of in 20 Hz steps.
+    let previous = presented
+        .as_ref()
+        .and_then(|value| value.interpolation_pair())
+        .map(|(before, _, fraction)| (before, fraction));
     for (mut owner, mut visibility) in &mut owners {
         let Some(authority_owner) = owner.authority_owner else {
             *visibility = Visibility::Hidden;
@@ -409,8 +414,36 @@ fn apply_presented_script_model_dobjs(
         if owner.current_model.0 != base.model {
             owner.current_model = asset_world::MapXModelAssetKey(base.model.clone());
         }
-        if owner.dobj_state != *state {
-            owner.dobj_state = state.clone();
+        let turned = previous
+            .filter(|_| !state.tag_rotations.is_empty())
+            .and_then(|(before, fraction)| {
+                let (_, earlier) = before
+                    .meta
+                    .entity_dobjs
+                    .iter()
+                    .find(|(owner, _)| *owner == authority_owner)?;
+                (earlier.tag_rotations != state.tag_rotations).then(|| {
+                    xmodel_runtime::lerp_tag_rotations(
+                        &earlier.tag_rotations,
+                        &state.tag_rotations,
+                        fraction,
+                    )
+                })?
+            });
+        match turned {
+            Some(tag_rotations) => {
+                if owner.dobj_state.tag_rotations != tag_rotations
+                    || owner.dobj_state.pose_revision != state.pose_revision
+                    || owner.dobj_state.composition != state.composition
+                {
+                    owner.dobj_state = xmodel_runtime::DObjSemanticState {
+                        tag_rotations,
+                        ..state.clone()
+                    };
+                }
+            }
+            None if owner.dobj_state != *state => owner.dobj_state = state.clone(),
+            None => {}
         }
 
         *visibility = Visibility::Inherited;
@@ -1366,9 +1399,14 @@ fn publish_script_model_bolt_poses(
         else {
             continue;
         };
+        // A turret's tags follow its aim, so an effect on tag_flash sits on the muzzle.
+        let request = xmodel_runtime::DObjPoseRequest {
+            tag_rotations: owner.dobj_state.tag_rotations.clone(),
+            ..xmodel_runtime::DObjPoseRequest::bind_pose()
+        };
         let Ok(local) = xmodel_runtime::pose_dobj_with_controller(
             &slot.dobj,
-            &xmodel_runtime::DObjPoseRequest::bind_pose(),
+            &request,
             Mat4::IDENTITY,
             |_, _, _| {},
         ) else {

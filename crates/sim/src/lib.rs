@@ -77,7 +77,7 @@ pub use combat::{
     ShotCollisionVerdict, TracePhaseOutput, spread_direction_on_plane, spread_pellet_direction,
 };
 pub use content::{CONTENT_DIGEST_SCHEME, ContentComponents, content_components, content_digest};
-pub use corpse::{PlayerCorpsePool, PlayerCorpseSlot, level_time_ms};
+pub use corpse::{DrawnKit, PlayerCorpsePool, PlayerCorpseSlot, level_time_ms};
 pub use damage::{DamageAttempt, DamageOutcome, DamageRefusal, DeathCommit};
 pub use equipment::{
     EquipmentRuntimeFacts, ProjectileHitGeometry, ProjectileImpact, ProjectileState,

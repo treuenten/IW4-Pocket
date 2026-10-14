@@ -2186,6 +2186,14 @@ fn encode_corpse_pool(out: &mut WireWriter, pool: &PlayerCorpsePool) {
         out.put_i32(slot.spawn_time_ms);
         out.put_u32(slot.shield.map_or(0, |shield| shield.weapon));
         out.put_u8(u8::from(slot.shield.is_some_and(|shield| shield.on_back)));
+        out.put_i32(slot.client_state_team);
+        match slot.ffa_team {
+            None => out.put_u8(0),
+            Some(team) => {
+                out.put_u8(1);
+                out.put_u8(team);
+            }
+        }
     }
 }
 
@@ -2221,6 +2229,12 @@ fn decode_corpse_pool(input: &mut WireReader<'_>) -> Result<PlayerCorpsePool, Wi
                     ground_entity_num: input.get_i32()?,
                     spawn_time_ms: input.get_i32()?,
                     shield: decode_corpse_shield(input)?,
+                    client_state_team: input.get_i32()?,
+                    ffa_team: match input.get_u8()? {
+                        0 => None,
+                        1 => Some(input.get_u8()?),
+                        _ => return Err(WireError::Malformed("bad corpse ffa_team tag")),
+                    },
                 };
             }
             _ => return Err(WireError::Malformed("bad corpse slot tag")),
@@ -2630,6 +2644,14 @@ fn encode_entity_dobjs(
             out.put_u8(u8::from(model.ignore_collision));
         }
         out.put_u32(state.pose_revision);
+        debug_assert!(state.tag_rotations.len() <= u16::MAX as usize);
+        out.put_u16(state.tag_rotations.len() as u16);
+        for rotation in &state.tag_rotations {
+            put_text(out, &rotation.tag);
+            for angle in rotation.angles {
+                out.put_f32(angle);
+            }
+        }
         put_optional_part_bits(out, state.requested_parts);
         for word in state.hide_part_bits.words() {
             out.put_u32(*word);
@@ -2692,6 +2714,19 @@ fn decode_entity_dobjs(
             });
         }
         let pose_revision = input.get_u32()?;
+        let rotation_count = input.get_u16()? as usize;
+        if rotation_count > anim_iw4::PartBits::CAPACITY {
+            return Err(WireError::Malformed("too many tag rotations"));
+        }
+        let mut tag_rotations = Vec::with_capacity(rotation_count);
+        for _ in 0..rotation_count {
+            let tag = get_text(input)?;
+            let angles = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+            if tag.is_empty() || !angles.iter().all(|angle| angle.is_finite()) {
+                return Err(WireError::Malformed("invalid tag rotation"));
+            }
+            tag_rotations.push(xmodel_runtime::TagRotation { tag, angles });
+        }
         let requested_parts = get_optional_part_bits(input)?;
         let mut hide_words = [0u32; anim_iw4::PartBits::WORDS];
         for word in &mut hide_words {
@@ -2753,6 +2788,7 @@ fn decode_entity_dobjs(
                     models,
                 },
                 pose_revision,
+                tag_rotations,
                 tree,
                 requested_parts,
                 hide_part_bits: xmodel_runtime::HidePartBits::from_words(hide_words),
@@ -3158,11 +3194,42 @@ fn decode_objectives(input: &mut WireReader<'_>) -> Result<sim::ObjectiveMatch, 
 }
 
 #[cfg(test)]
+mod entity_dobj_wire_tests {
+    use super::*;
+
+    #[test]
+    fn a_turret_aim_round_trips_with_its_model() {
+        let mut state = xmodel_runtime::DObjSemanticState::bind_pose("sentry_minigun".into(), 3, 9);
+        state.tag_rotations = vec![
+            xmodel_runtime::TagRotation {
+                tag: "tag_aim".into(),
+                angles: [4.5, -60.0, 0.0],
+            },
+            xmodel_runtime::TagRotation {
+                tag: "tag_aim_animated".into(),
+                angles: [4.5, -60.0, 0.0],
+            },
+        ];
+        let rows = vec![(
+            sim::AuthorityModelOwner::ScriptModel(sim::ScriptModelId::from_wire(1_073_741_840)),
+            state,
+        )];
+        let mut out = WireWriter::new();
+        encode_entity_dobjs(&mut out, &rows);
+        let bytes = out.finish();
+        let mut input = WireReader::new(&bytes);
+        let decoded = decode_entity_dobjs(&mut input).expect("decodes");
+        assert!(input.is_empty());
+        assert_eq!(decoded, rows);
+    }
+}
+
+#[cfg(test)]
 mod corpse_pool_wire_tests {
     use super::*;
 
     #[test]
-    fn a_corpse_pool_round_trips_with_each_body_spawn_time_and_shield() {
+    fn a_corpse_pool_round_trips_with_each_body_spawn_time_shield_and_uniform() {
         let mut pool = PlayerCorpsePool {
             spawn_ring: 3,
             ..PlayerCorpsePool::default()
@@ -3192,12 +3259,15 @@ mod corpse_pool_wire_tests {
                 weapon: 41,
                 on_back: true,
             }),
+            client_state_team: 2,
+            ffa_team: None,
         };
         pool.slots[2] = PlayerCorpseSlot {
             occupied: true,
             entnum: 1002,
             victim: ClientId(5),
             spawn_time_ms: 23_000,
+            ffa_team: Some(1),
             ..PlayerCorpseSlot::default()
         };
         let mut out = WireWriter::new();
@@ -3209,5 +3279,7 @@ mod corpse_pool_wire_tests {
         assert_eq!(decoded, pool);
         assert_eq!(decoded.slots[1].spawn_time_ms, 22_350);
         assert_eq!(decoded.slots[2].shield, None);
+        assert_eq!(decoded.slots[1].client_state_team, 2);
+        assert_eq!(decoded.slots[2].ffa_team, Some(1));
     }
 }

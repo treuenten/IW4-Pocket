@@ -15,9 +15,48 @@ pub struct BoneCollision {
     pub part_classification: u8,
 }
 
+/// A bone controller set by the game, as DObjSetControlTagAngles does: the
+/// bone turns by `angles` (pitch, yaw, roll in degrees) in the model's frame,
+/// on top of its parent. A turret aims its gun this way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TagRotation {
+    pub tag: String,
+    pub angles: [f32; 3],
+}
+
+/// The controllers between two snapshots, `fraction` of the way from
+/// `previous` to `next`, each angle the short way round, as the client turns a
+/// turret between server frames. `None` when the two name different tags.
+pub fn lerp_tag_rotations(
+    previous: &[TagRotation],
+    next: &[TagRotation],
+    fraction: f32,
+) -> Option<Vec<TagRotation>> {
+    if previous.len() != next.len() || previous.iter().zip(next).any(|(a, b)| a.tag != b.tag) {
+        return None;
+    }
+    let fraction = fraction.clamp(0.0, 1.0);
+    let turn = |from: f32, to: f32| {
+        let delta = (to - from).rem_euclid(360.0);
+        let delta = if delta >= 180.0 { delta - 360.0 } else { delta };
+        from + delta * fraction
+    };
+    Some(
+        previous
+            .iter()
+            .zip(next)
+            .map(|(a, b)| TagRotation {
+                tag: b.tag.clone(),
+                angles: std::array::from_fn(|i| turn(a.angles[i], b.angles[i])),
+            })
+            .collect(),
+    )
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DObjPoseRequest {
     pub tree: Option<XAnimTreeRuntime>,
+    pub tag_rotations: Vec<TagRotation>,
     pub requested_parts: Option<PartBits>,
     pub hide_part_bits: HidePartBits,
 }
@@ -26,6 +65,7 @@ impl DObjPoseRequest {
     pub const fn bind_pose() -> Self {
         Self {
             tree: None,
+            tag_rotations: Vec::new(),
             requested_parts: None,
             hide_part_bits: HidePartBits::from_words([0; PartBits::WORDS]),
         }
@@ -458,9 +498,45 @@ pub fn pose_dobj_with_controller(
     } else {
         dobj.bind_locals()
     };
+    for rotation in &request.tag_rotations {
+        if let Some(bone) = dobj.find(&rotation.tag) {
+            crate::set_control_tag_angles(&mut locals, bone, rotation.angles);
+        }
+    }
     controller(dobj, &requested, &mut locals);
     dobj.apply_duplicates(&mut locals);
     Ok(dobj.compose(&locals, world_from_model))
+}
+
+#[cfg(test)]
+mod tag_rotation_tests {
+    use super::*;
+
+    fn aim(yaw: f32) -> Vec<TagRotation> {
+        vec![TagRotation {
+            tag: "tag_aim_animated".into(),
+            angles: [5.0, yaw, 0.0],
+        }]
+    }
+
+    #[test]
+    fn a_turret_turns_between_snapshots_the_short_way() {
+        let half = lerp_tag_rotations(&aim(170.0), &aim(-170.0), 0.5).expect("same tags");
+        assert!((half[0].angles[1] - 180.0).abs() < 1e-4, "{half:?}");
+        let quarter = lerp_tag_rotations(&aim(0.0), &aim(40.0), 0.25).expect("same tags");
+        assert!((quarter[0].angles[1] - 10.0).abs() < 1e-4);
+        assert_eq!(quarter[0].angles[0], 5.0);
+    }
+
+    #[test]
+    fn different_tags_do_not_blend() {
+        let other = vec![TagRotation {
+            tag: "tag_aim".into(),
+            angles: [0.0; 3],
+        }];
+        assert!(lerp_tag_rotations(&aim(0.0), &other, 0.5).is_none());
+        assert!(lerp_tag_rotations(&aim(0.0), &[], 0.5).is_none());
+    }
 }
 
 #[cfg(test)]

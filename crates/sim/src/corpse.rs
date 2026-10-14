@@ -45,6 +45,14 @@ pub struct PlayerCorpseSlot {
     /// The shield on the victim's back at death. A body draws this one, never
     /// the victim's current shield, which changes when the victim respawns.
     pub shield: Option<crate::ShieldAttachment>,
+
+    /// The victim's team at death (`client_state_team`). A body is dressed
+    /// from this, never from the victim's current team, so it keeps the
+    /// uniform it died in when its player switches team.
+    pub client_state_team: i32,
+
+    /// The victim's free-for-all uniform side at death, as `ffa_team`.
+    pub ffa_team: Option<u8>,
 }
 
 impl Default for PlayerCorpseSlot {
@@ -68,6 +76,8 @@ impl Default for PlayerCorpseSlot {
             ground_entity_num: ENTITYNUM_NONE,
             spawn_time_ms: 0,
             shield: None,
+            client_state_team: 0,
+            ffa_team: None,
         }
     }
 }
@@ -100,7 +110,46 @@ impl Default for PlayerCorpsePool {
     }
 }
 
+/// What a player entity is dressed in: its uniform side and the shield it carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrawnKit {
+    pub client_state_team: i32,
+    pub ffa_team: Option<u8>,
+    pub shield: Option<crate::ShieldAttachment>,
+}
+
+impl DrawnKit {
+    /// A body wears what it died in; a live player wears what it has now. MW2's
+    /// clonePlayer copies the victim's models into the body at death, so a later
+    /// team switch or respawn never changes a body already on the ground.
+    pub fn of_entity(
+        corpses: &PlayerCorpsePool,
+        entnum: i32,
+        live: Option<&crate::ClientSnapshotMeta>,
+    ) -> Self {
+        match corpses.body(entnum) {
+            Some(body) => Self {
+                client_state_team: body.client_state_team,
+                ffa_team: body.ffa_team,
+                shield: body.shield,
+            },
+            None => live.map_or_else(Self::default, |meta| Self {
+                client_state_team: meta.client_state_team,
+                ffa_team: meta.ffa_team,
+                shield: meta.shield,
+            }),
+        }
+    }
+}
+
 impl PlayerCorpsePool {
+    /// The occupied slot drawn as entity `entnum`, when that entity is a body.
+    pub fn body(&self, entnum: i32) -> Option<&PlayerCorpseSlot> {
+        self.slots
+            .iter()
+            .find(|slot| slot.occupied && slot.entnum == entnum)
+    }
+
     pub fn alloc_clone_entity(&mut self) -> i32 {
         let entnum = PLAYER_CORPSE_ENTITY_BASE + i32::from(self.spawn_ring);
         self.spawn_ring = (self.spawn_ring + 1) % MAX_CLIENT_CORPSES as u8;
@@ -168,11 +217,14 @@ pub(crate) fn occupy_player_clone(
     ps: &PlayerState,
     time_ms: i32,
 ) -> u8 {
+    let meta = world.client_meta(victim);
     // A shield in hand is the one dropped as an item; only a stowed one stays on the body.
-    let shield = world
-        .client_meta(victim)
+    let shield = meta
         .and_then(|meta| meta.shield)
         .filter(|shield| shield.on_back);
+    // The uniform is the one the victim died in (G_ClonePlayer copies the models).
+    let client_state_team = meta.map_or(0, |meta| meta.client_state_team);
+    let ffa_team = meta.and_then(|meta| meta.ffa_team);
     let pool = world.corpses_mut();
     let entnum = pool.alloc_clone_entity();
     let slot = pool.get_free(ps.origin);
@@ -196,6 +248,8 @@ pub(crate) fn occupy_player_clone(
             falling: true,
             spawn_time_ms: time_ms,
             shield,
+            client_state_team,
+            ffa_team,
             ..PlayerCorpseSlot::default()
         },
     );
@@ -666,6 +720,63 @@ mod step_corpse_tests {
     fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
         let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
         dot(d, d).sqrt()
+    }
+
+    #[test]
+    fn a_body_keeps_the_uniform_and_shield_it_died_with() {
+        let shield = crate::ShieldAttachment {
+            weapon: 41,
+            on_back: true,
+        };
+        let mut pool = PlayerCorpsePool::default();
+        pool.slots[0] = PlayerCorpseSlot {
+            client_state_team: entity_iw4::TEAM_ALLIES,
+            shield: Some(shield),
+            ..grounded([0.0; 3])
+        };
+        // The victim has since switched to axis and respawned without a shield.
+        let live = crate::ClientSnapshotMeta {
+            client_state_team: entity_iw4::TEAM_AXIS,
+            ..Default::default()
+        };
+        assert_eq!(
+            DrawnKit::of_entity(&pool, 1001, Some(&live)),
+            DrawnKit {
+                client_state_team: entity_iw4::TEAM_ALLIES,
+                ffa_team: None,
+                shield: Some(shield),
+            }
+        );
+    }
+
+    #[test]
+    fn a_live_player_wears_its_current_uniform() {
+        let mut pool = PlayerCorpsePool::default();
+        pool.slots[0] = PlayerCorpseSlot {
+            client_state_team: entity_iw4::TEAM_ALLIES,
+            ..grounded([0.0; 3])
+        };
+        let live = crate::ClientSnapshotMeta {
+            client_state_team: 0,
+            ffa_team: Some(1),
+            ..Default::default()
+        };
+        // Entity 3 is the player itself, not one of its bodies.
+        let kit = DrawnKit::of_entity(&pool, 3, Some(&live));
+        assert_eq!(kit.client_state_team, 0);
+        assert_eq!(kit.ffa_team, Some(1));
+        assert_eq!(DrawnKit::of_entity(&pool, 3, None), DrawnKit::default());
+    }
+
+    #[test]
+    fn a_freed_body_slot_no_longer_names_the_entity() {
+        let mut pool = PlayerCorpsePool::default();
+        pool.slots[0] = PlayerCorpseSlot {
+            client_state_team: entity_iw4::TEAM_ALLIES,
+            ..grounded([0.0; 3])
+        };
+        pool.clear_entnum(1001);
+        assert!(pool.body(1001).is_none());
     }
 
     #[test]
