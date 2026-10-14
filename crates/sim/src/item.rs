@@ -1115,11 +1115,15 @@ pub(crate) fn phase_use_items(
             }
             world.client_meta_mut(id).item_use_entity = None;
         }
+        // Player_UpdateCursorHints offers a frozen player nothing (bFrozen):
+        // the swap hint goes once the end of a match or round freezes him.
+        let frozen = world.client_meta(id).is_some_and(|m| m.controls.frozen);
         let selected = selected_item(
             world,
             id,
             &world.player(id).copied().expect("client exists"),
-        );
+        )
+        .filter(|_| !frozen);
         let dual = selected.is_some_and(|item| {
             world
                 .combat_facts_for(item.weapon)

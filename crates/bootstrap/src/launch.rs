@@ -80,9 +80,10 @@ fn install_class_catalog(
     for line in &common.report {
         diag::info!(Launch, "{line}");
     }
-    commands.insert_resource(ui::frontend::maps::MapPresentation::from_tables(
-        &common.tables,
-    ));
+    commands.insert_resource(
+        ui::frontend::maps::MapPresentation::from_tables(&common.tables)
+            .with_iw4_arena(menus.rawfile_text("mp/basemaps.arena")),
+    );
     let mut class_catalog =
         ClassLoadoutCatalog::from_weapon_registry(std::sync::Arc::new(common.weapons))
             .with_weapon_tables(&common.tables);

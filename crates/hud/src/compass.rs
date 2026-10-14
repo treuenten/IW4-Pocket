@@ -256,18 +256,26 @@ pub(crate) fn update_compass(
         live.push((offset, alpha));
     }
 
-    let mut list = build_compass_list(
+    let map_list = build_compass_list(
         &surface,
         items.map,
-        items.player.zip(player_stem),
         &drawable.image_name,
         hud_images.map_namespace().expect("drawable compass family"),
         uv,
         map_rotation,
-        [player_w, player_h],
         radar,
-        jam_fade,
     );
+    let player_list = Draw2dList {
+        cmds: player_arrow_cmd(
+            &surface,
+            map_item,
+            items.player.zip(player_stem),
+            [player_w, player_h],
+            jam_fade,
+        )
+        .into_iter()
+        .collect(),
+    };
 
     let Some(map_ns) = hud_images.map_namespace() else {
         return;
@@ -280,6 +288,46 @@ pub(crate) fn update_compass(
         return;
     }
 
+    // MW2's minimap_fullscreen draws its owner-draw items in menu order: the
+    // map, friendlies, objectives, enemies, vehicles, and the player's own
+    // arrow last, so the arrow sits on top of anything at the centre (the
+    // ESCORT icon on a bomb carrier's own minimap among them).
+    let (mut quads, _) = crate::draw2d::tessellate_fonts(&map_list, &HashMap::new());
+    if let Some(snapshot) = presented.snapshot() {
+        for (id, _) in &snapshot.players {
+            if *id == local.0 {
+                continue;
+            }
+            let Some(meta) = snapshot.meta.for_client(*id) else {
+                continue;
+            };
+            if !same_team(local_team, meta.client_state_team) {
+                continue;
+            }
+            let Some(other) = presented.alive_player(*id) else {
+                continue;
+            };
+            let offset = world_pos_to_compass_partial(
+                north,
+                player_xy,
+                [other.origin[0], other.origin[1]],
+                map_item.rect.h * COMPASS_SIZE_DEFAULT,
+                drawable.max_range,
+            );
+            quads.push(friendly_quad(
+                &surface,
+                map_item,
+                offset,
+                [ping_w, ping_h],
+                ps.viewangles[1] - other.viewangles[1],
+                jam_fade,
+                "compassping_friendly_mp",
+                [0.0, 0.0, 1.0, 1.0],
+                Draw2dProvenance::OwnerDraw(158),
+            ));
+        }
+    }
+    let mut list = Draw2dList { cmds: Vec::new() };
     let mut fonts = HashMap::new();
     if let Some(snapshot) = presented.snapshot() {
         let team_mode = snapshot.meta.kind.is_team();
@@ -349,7 +397,7 @@ pub(crate) fn update_compass(
         &live,
         jam_fade,
     ));
-    let (mut quads, _) = crate::draw2d::tessellate_fonts(&list, &fonts);
+    quads.extend(crate::draw2d::tessellate_fonts(&list, &fonts).0);
     if let Some(snapshot) = presented.snapshot() {
         for vehicle in &snapshot.meta.objectives.vehicles {
             let friendly = vehicle.owner == local.0.0 || same_team(local_team, vehicle.team);
@@ -382,39 +430,8 @@ pub(crate) fn update_compass(
                 Draw2dProvenance::OwnerDraw(158),
             ));
         }
-        for (id, _) in &snapshot.players {
-            if *id == local.0 {
-                continue;
-            }
-            let Some(meta) = snapshot.meta.for_client(*id) else {
-                continue;
-            };
-            if !same_team(local_team, meta.client_state_team) {
-                continue;
-            }
-            let Some(other) = presented.alive_player(*id) else {
-                continue;
-            };
-            let offset = world_pos_to_compass_partial(
-                north,
-                player_xy,
-                [other.origin[0], other.origin[1]],
-                map_item.rect.h * COMPASS_SIZE_DEFAULT,
-                drawable.max_range,
-            );
-            quads.push(friendly_quad(
-                &surface,
-                map_item,
-                offset,
-                [ping_w, ping_h],
-                ps.viewangles[1] - other.viewangles[1],
-                jam_fade,
-                "compassping_friendly_mp",
-                [0.0, 0.0, 1.0, 1.0],
-                Draw2dProvenance::OwnerDraw(158),
-            ));
-        }
     }
+    quads.extend(crate::draw2d::tessellate_fonts(&player_list, &HashMap::new()).0);
     if quads.is_empty() {
         hide(&mut pass);
         return;
@@ -426,14 +443,11 @@ pub(crate) fn update_compass(
 fn build_compass_list(
     surface: &crate::surface::Hud2dSurface,
     map: (usize, &MenuItem),
-    player: Option<((usize, &MenuItem), &str)>,
     map_image: &str,
     map_namespace: asset_core::AssetNamespace,
     uv: CompassMapUvWindow,
     rotation_deg: f32,
-    player_size: [f32; 2],
     radar_center_s: Option<f32>,
-    jam_fade: f32,
 ) -> Draw2dList {
     let (map_index, map_item) = map;
     let horz = map_item.rect.horz_align as i32;
@@ -494,38 +508,49 @@ fn build_compass_list(
             layer: 1,
         });
     }
-    if let Some(((player_index, player_item), player_image)) = player {
-        let cx = map_item.rect.x + vw * 0.5;
-        let cy = map_item.rect.y + vh * 0.5;
-        let pr = surface.apply_rect(
-            cx - player_size[0] * 0.5,
-            cy - player_size[1] * 0.5,
-            player_size[0],
-            player_size[1],
-            horz,
-            vert,
-        );
-        cmds.push(Draw2dCmd {
-            material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-            x: pr.x,
-            y: pr.y,
-            w: pr.w,
-            h: pr.h,
-            s0: 0.0,
-            t0: 0.0,
-            s1: 1.0,
-            t1: 1.0,
-            color: scale_icon_alpha(player_item.fore_color, jam_fade),
-            material: player_image.into(),
-            op: Draw2dOp::StretchPic,
-            provenance: Draw2dProvenance::MenuItem {
-                menu: MINIMAP_MENU.into(),
-                index: player_index,
-            },
-            layer: 1,
-        });
-    }
     Draw2dList { cmds }
+}
+
+/// The player's own arrow at the centre of the compass.
+fn player_arrow_cmd(
+    surface: &crate::surface::Hud2dSurface,
+    map_item: &MenuItem,
+    player: Option<((usize, &MenuItem), &str)>,
+    player_size: [f32; 2],
+    jam_fade: f32,
+) -> Option<Draw2dCmd> {
+    let ((player_index, player_item), player_image) = player?;
+    let vw = map_item.rect.w * COMPASS_SIZE_DEFAULT;
+    let vh = map_item.rect.h * COMPASS_SIZE_DEFAULT;
+    let cx = map_item.rect.x + vw * 0.5;
+    let cy = map_item.rect.y + vh * 0.5;
+    let pr = surface.apply_rect(
+        cx - player_size[0] * 0.5,
+        cy - player_size[1] * 0.5,
+        player_size[0],
+        player_size[1],
+        map_item.rect.horz_align as i32,
+        map_item.rect.vert_align as i32,
+    );
+    Some(Draw2dCmd {
+        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+        x: pr.x,
+        y: pr.y,
+        w: pr.w,
+        h: pr.h,
+        s0: 0.0,
+        t0: 0.0,
+        s1: 1.0,
+        t1: 1.0,
+        color: scale_icon_alpha(player_item.fore_color, jam_fade),
+        material: player_image.into(),
+        op: Draw2dOp::StretchPic,
+        provenance: Draw2dProvenance::MenuItem {
+            menu: MINIMAP_MENU.into(),
+            index: player_index,
+        },
+        layer: 1,
+    })
 }
 
 fn enemy_ping_cmds(

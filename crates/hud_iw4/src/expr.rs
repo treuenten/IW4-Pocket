@@ -223,6 +223,12 @@ pub trait ExprHost {
         None
     }
 
+    /// The controller button that backs out of a menu while the prompts name
+    /// a controller's buttons.
+    fn menu_back_label(&self) -> Option<&str> {
+        None
+    }
+
     fn localize_string(&self, _args: &[Operand]) -> Result<String, ExprError> {
         Err(ExprError::UnsupportedOp(OP_LOCALIZESTRING))
     }

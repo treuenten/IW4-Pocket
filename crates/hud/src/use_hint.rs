@@ -21,6 +21,29 @@ pub(crate) struct HintMemory {
     last_seen: f64,
 }
 
+/// Weapons that put the player behind a remote or killstreak view.
+const REMOTE_VIEW_WEAPONS: [&str; 7] = [
+    "killstreak_ac130_mp",
+    "killstreak_helicopter_minigun_mp",
+    "killstreak_predator_missile_mp",
+    "ac130_105mm_mp",
+    "ac130_40mm_mp",
+    "ac130_25mm_mp",
+    "heli_remote_mp",
+];
+
+/// MW2 draws the cursor hint (hud_fullscreen's ownerdraw 72) only when its
+/// `visible when` holds: among the rest, not while flashbanged, aiming a
+/// Javelin, steering a Predator missile (missilecam) or holding a killstreak
+/// that takes over the view. Its other conditions (a script menu open, the
+/// killcam, following another player) are checked here too.
+fn hidden_by_view(vis: &crate::weaponbar::HudPlayerVis) -> bool {
+    vis.flashbanged
+        || vis.ads_javelin
+        || vis.missilecam
+        || REMOTE_VIEW_WEAPONS.contains(&vis.weapon_script.as_str())
+}
+
 pub(crate) fn update(
     surface: Res<crate::surface::Hud2dSurface>,
     catalog: Option<Res<MenuCatalog>>,
@@ -36,11 +59,13 @@ pub(crate) fn update(
     time: Res<Time>,
     mut memory: Local<HintMemory>,
     view: Option<Res<frame::ViewSubject>>,
+    vis_input: crate::weaponbar::HudPlayerVisInput,
 ) {
     pass.use_hint = TessJob::Hide;
     if !surface.is_ready()
         || input.script_menu_open
         || view.as_ref().is_some_and(|v| v.in_killcam())
+        || hidden_by_view(&vis_input.read(&presented, local.0))
     {
         memory.caption = None;
         return;

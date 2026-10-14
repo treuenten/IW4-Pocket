@@ -545,6 +545,8 @@
       }
     },
     "item_overrides": [
+      {"index": 0, "fields": {"rect": {"w": 3416}}},
+      {"index": 1, "fields": {"rect": {"w": 3416}}},
       {"index": 2, "fields": {"rect": {"h": 176}, "float_exp": []}},
       {"index": 5, "fields": {"rect": {"h": 176}, "float_exp": []}},
       {"index": 8, "fields": {"rect": {"h": 176}, "float_exp": []}},

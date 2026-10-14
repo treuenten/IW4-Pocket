@@ -22,6 +22,7 @@ pub(crate) struct MenuWorld<'a> {
     pub weapons: Option<&'a asset_game::WeaponRegistry>,
     pub emp_jammed: bool,
     pub radar_blocked: bool,
+    pub menu_back_key: Option<String>,
 }
 
 const GAMETYPES_TABLE: &str = "mp/gametypestable.csv";
@@ -247,6 +248,10 @@ fn dvar_number(value: &str) -> f32 {
 }
 
 impl ExprHost for MenuHost<'_> {
+    fn menu_back_label(&self) -> Option<&str> {
+        self.world.menu_back_key.as_deref()
+    }
+
     fn localize_string(&self, args: &[Operand]) -> Result<String, ExprError> {
         let Some(Operand::Str(key)) = args.first() else {
             return Err(ExprError::Host("locstring template"));

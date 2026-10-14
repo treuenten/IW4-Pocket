@@ -251,21 +251,27 @@ fn add_rule_rows(items: &mut Vec<asset_game::MenuItem>) {
     let counts = |max: u32| -> Vec<(String, String)> {
         (0..=max).map(|n| (n.to_string(), n.to_string())).collect()
     };
-    let (Some(gameplay), Some((below_gameplay, _))) = (
-        pair(items, "scr_game_onlyheadshots"),
-        pair(items, "camera_thirdperson"),
-    ) else {
+    let Some(gameplay) = pair(items, "scr_game_onlyheadshots") else {
         return;
     };
     let (left_x, top_y) = (items[gameplay.0].rect.x, items[gameplay.0].rect.y);
-    let team = items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            item.item_type == 1 && item.rect.x < left_x - 1.0 && item.rect.y >= top_y - 1.0
-        })
-        .filter_map(|(i, item)| pair(items, &item.dvar).filter(|(button, _)| *button == i))
-        .max_by(|a, b| items[a.0].rect.y.total_cmp(&items[b.0].rect.y));
+    // The lowest row of a column of the Team and Gameplay Options panel. The
+    // rows go below it. (MW2's own last Gameplay row is 3rd Person,
+    // scr_thirdperson, on every game mode's page.)
+    let lowest = |column: &dyn Fn(f32) -> bool| {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                item.item_type == 1 && column(item.rect.x) && item.rect.y >= top_y - 1.0
+            })
+            .filter_map(|(i, item)| pair(items, &item.dvar).filter(|(button, _)| *button == i))
+            .max_by(|a, b| items[a.0].rect.y.total_cmp(&items[b.0].rect.y))
+    };
+    let Some((below_gameplay, _)) = lowest(&|x| (x - left_x).abs() <= 1.0) else {
+        return;
+    };
+    let team = lowest(&|x| x < left_x - 1.0);
     let team_based = items.iter().any(|item| item.dvar == "scr_team_fftype");
     let mut bot_rows: Vec<Row> = vec![(
         "enemy_bots",

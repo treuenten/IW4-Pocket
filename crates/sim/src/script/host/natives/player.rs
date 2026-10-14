@@ -317,7 +317,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                     crate::MenuCommandKind::Open(menu.to_string()),
                 );
             }
-            slot(world, client)?.menu = Some(menu);
+            let slot = slot(world, client)?;
+            slot.picker_opened |= super::super::players::menu_kind(&menu).is_some();
+            slot.menu = Some(menu);
             Ok(Value::Int(1))
         });
     }
