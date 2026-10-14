@@ -349,6 +349,10 @@ impl PlayerState {
     }
 }
 
+/// Martyrdom (`specialty_grenadepulldeath`, perk 6 in MW2's engine perk
+/// table): player_die drops a live grenade (iw4mp 0x526524).
+pub const PERK_GRENADEPULLDEATH: u32 = 1 << 6;
+
 pub const PERK_PISTOLDEATH: u32 = 1 << 7;
 
 pub const PERK_QUIETER: u32 = 1 << 8;

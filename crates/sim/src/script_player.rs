@@ -333,12 +333,15 @@ pub(crate) fn revive(world: &mut FrameWorld, id: ClientId) {
     }
 }
 
+/// MW2's player_die. `means_of_death` is the script's sMeansOfDeath
+/// ("MOD_SUICIDE" for `suicide()` and a grenade held past its fuse).
 pub(crate) fn kill(
     world: &mut FrameWorld,
     tick: Tick,
     victim: ClientId,
     attacker: Option<ClientId>,
     commit: Option<DeathCommit>,
+    means_of_death: &str,
 ) {
     if !world
         .client_meta(victim)
@@ -358,6 +361,8 @@ pub(crate) fn kill(
             ps.grenade_time_left = 0;
         }
     }
+    // Then Martyrdom drops a grenade of its own (iw4mp 0x526519).
+    crate::equipment::drop_martyrdom_grenade(world, victim, means_of_death, tick);
     let life_sequence = {
         let meta = world.client_meta_mut(victim);
         meta.lifecycle = ClientLifecycle::Dead;
@@ -870,6 +875,7 @@ fn perk_bits(name: &str) -> ([u32; 2], u32) {
         "specialty_marathon" => movement_iw4::PERK_MARATHON,
         "specialty_bulletaccuracy" => weapon_iw4::PERK_BULLETACCURACY,
         "specialty_pistoldeath" => playerstate_iw4::PERK_PISTOLDEATH,
+        "specialty_grenadepulldeath" => playerstate_iw4::PERK_GRENADEPULLDEATH,
         "specialty_fastmantle" => playerstate_iw4::PERK_FASTMANTLE,
         "specialty_quickdraw" => playerstate_iw4::PERK_QUICKDRAW,
         "specialty_holdbreath" => playerstate_iw4::PERK_HOLDBREATH,
@@ -1118,5 +1124,26 @@ mod spawn_health_tests {
         spawn(&mut frame, Tick(6), id, [0.0; 3], [0.0; 3], "spectator");
         assert_eq!(health(&frame), Some(0));
         assert_eq!(frame.player(id).map(|ps| ps.max_health), Some(30));
+    }
+}
+
+#[cfg(test)]
+mod perk_tests {
+    use super::*;
+
+    /// MW2's engine perk table (iw4mp 0x6f6ac0) has specialty_grenadepulldeath
+    /// at 6 and specialty_pistoldeath at 7; the other deathstreaks are script
+    /// perks (level.scriptPerks in _perks.gsc) with no engine bit.
+    #[test]
+    fn martyrdom_and_last_stand_set_their_engine_perk_bits() {
+        assert_eq!(perk_bits("specialty_grenadepulldeath"), ([1 << 6, 0], 0));
+        assert_eq!(perk_bits("specialty_pistoldeath"), ([1 << 7, 0], 0));
+        for name in [
+            "specialty_copycat",
+            "specialty_combathigh",
+            "specialty_finalstand",
+        ] {
+            assert_eq!(perk_bits(name), ([0, 0], 0), "{name}");
+        }
     }
 }
