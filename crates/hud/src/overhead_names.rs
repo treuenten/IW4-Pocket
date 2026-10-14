@@ -488,11 +488,8 @@ fn update_overhead_names(
     }
 }
 
-pub(crate) fn rank_presentation(
-    catalog: &MenuCatalog,
-    rank: i32,
-    prestige: i32,
-) -> Option<(&str, &str)> {
+/// A rank's icon and the level shown beside it, as the scoreboard draws them.
+pub fn rank_presentation(catalog: &MenuCatalog, rank: i32, prestige: i32) -> Option<(&str, &str)> {
     if rank < 0 || prestige < 0 {
         return None;
     }
