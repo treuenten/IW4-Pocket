@@ -131,11 +131,25 @@ pub fn evaluate_elem_collide_motion(
                 orientation_pos_to_world(q.orient.origin, q.orient.axis, end_local),
             );
             let hit = trace(start, end, coll_mins, coll_maxs, mask);
+            // MW2 lets an element whose step starts inside something move on
+            // as if nothing were there: no collision for that step. Freezing
+            // it instead held a bullet's exit tracer, which spawns 50 units
+            // beyond the exit hole and often inside the floor or a wall, in
+            // place for its whole half second, its tail poking back out of
+            // the hole towards the shooter.
+            if (hit.startsolid || hit.allsolid) && !leaves_start_solid {
+                total_delta[0] += free.origin_delta[0];
+                total_delta[1] += free.origin_delta[1];
+                total_delta[2] += free.origin_delta[2];
+                origin = end_local;
+                base_vel = free.base_vel;
+                break;
+            }
             // `leaves_start_solid`: a model piece from a prop lying on the
             // floor (a suitcase's clothes) spawns partly inside it, and a step
             // that starts inside but leaves (startsolid, not allsolid) lets it
             // out instead of freezing it there spinning.
-            if hit.allsolid || (hit.startsolid && !leaves_start_solid) {
+            if hit.allsolid {
                 crate::frozen_log::note(
                     "start-in-solid",
                     q.def_name,
@@ -783,6 +797,67 @@ mod physics_piece_tests {
         )
         .expect("collide motion");
         assert!(r.origin_delta[2] > 0.0, "{r:?}");
+        assert!(r.at_rest_fraction.is_none());
+    }
+
+    #[test]
+    fn sprite_that_starts_inside_a_wall_moves_on() {
+        // impacts/exit_tracer elem 0: a tail with collision that dies on
+        // touch, spawned 50 units past the exit hole, so often inside the
+        // floor or the next wall. MW2 moves it on without collision.
+        let local_graph = vec![
+            FxElemVec3Range {
+                base: [4.0, 0.0, 0.0],
+                amplitude: [-1.0, 0.0, 0.0],
+            };
+            2
+        ];
+        let q = FxElemMotionQuery {
+            def_name: "impacts/exit_tracer",
+            catalog_index: 0,
+            def_index: 0,
+            age0: 0.0,
+            age1: 16.0 / 500.0,
+            life_ms: 500.0,
+            dt_sec: 0.016,
+            base_vel: [0.0; 3],
+            elem_random_seed: 3,
+            origin: [50.0, 0.0, 0.0],
+            prev_msec: 0,
+            msec_now: 16,
+            msec_begin: 0,
+            effect_axis: IDENTITY,
+            orient: fx_iw4::FxOrientation {
+                origin: [0.0; 3],
+                axis: IDENTITY,
+            },
+            at_rest_fraction: FX_ELEM_AT_REST_NONE,
+        };
+        let r = evaluate_elem_collide_motion(
+            0x1100_0346,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            [0.0; 3],
+            [0.0; 3],
+            false,
+            false,
+            false,
+            3,
+            &local_graph,
+            &[],
+            q,
+            |_start, _end, _mins, _maxs, _mask| FxElemTraceHit {
+                fraction: 0.0,
+                normal: [0.0, 0.0, 1.0],
+                startsolid: true,
+                allsolid: false,
+            },
+        )
+        .expect("collide motion");
+        assert!(r.origin_delta[0] > 1.0, "{r:?}");
+        assert!(!r.remove);
         assert!(r.at_rest_fraction.is_none());
     }
 }
