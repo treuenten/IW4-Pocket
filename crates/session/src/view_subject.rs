@@ -17,6 +17,10 @@ pub fn publish_view_subject(
                 focus,
             }
         }
+        Some(p) if p.is_live_follow() => ViewSubject::Follow {
+            viewer: local.0.0,
+            focus: u32::try_from(p.kill_cam_client_num).ok(),
+        },
         Some(_) => ViewSubject::Own { client: local.0.0 },
     };
 }

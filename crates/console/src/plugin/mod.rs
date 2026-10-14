@@ -101,6 +101,7 @@ impl Plugin for ConsolePlugin {
             .init_resource::<sim::LocalPlayerProfile>()
             .init_resource::<crate::local_profile::ProfilePersistence>()
             .init_resource::<crate::local_account::AccountPersistence>()
+            .init_resource::<crate::lobby_rank::LobbyRank>()
             .add_message::<ConsoleCommand>()
             .add_message::<frame::TestControllerRumble>()
             .add_systems(
@@ -163,6 +164,7 @@ impl Plugin for ConsolePlugin {
                             crate::frontend::route,
                             crate::class_menu::route,
                             crate::barracks_menu::route,
+                            crate::lobby_rank::sync_lobby_rank,
                         )
                             .chain(),
                         crate::feature_dispatch::route_capture_commands,

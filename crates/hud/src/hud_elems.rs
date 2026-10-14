@@ -350,12 +350,11 @@ pub(crate) fn update_hud_elems(
     };
 
     let cg_time = cg_clock.time();
-    let eyes = match view.as_deref() {
-        Some(frame::ViewSubject::Seat {
-            focus: Some(focus), ..
-        }) => i32::try_from(*focus).unwrap_or(-1),
-        _ => i32::try_from(local.0.0).unwrap_or(-1),
-    };
+    let eyes = i32::try_from(
+        view.as_deref()
+            .map_or(local.0.0, |view| view.eyes(local.0.0)),
+    )
+    .unwrap_or(-1);
     let mut layers: [Vec<Draw2dCmd>; 2] = Default::default();
     let mut fonts = HashMap::new();
     for (index, elem) in elems.iter().enumerate() {

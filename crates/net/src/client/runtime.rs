@@ -1879,7 +1879,7 @@ pub fn publish_presented(
     let archived = snap_arc
         .players
         .iter()
-        .any(|(id, ps)| *id == local.0 && !ps.is_live_frame());
+        .any(|(id, ps)| *id == local.0 && ps.is_seat_frame());
     let snap_arc = if archived {
         proxy
             .0

@@ -477,16 +477,16 @@
       {
         "index": 27,
         "fields": {
-          "name": "lobby_prestige", "vis_exp": "1", "rect": {"x": -46, "y": 30, "w": 16, "h": 16},
-          "background": "cardicon_prestige_1", "style": 3,
+          "name": "lobby_prestige", "vis_exp": "op 38 s:75695f6c6f6262795f72616e6b5f69636f6e op 1 op 13 s:", "rect": {"x": -46, "y": 30, "w": 16, "h": 16},
+          "background": "", "material_exp": "op 38 s:75695f6c6f6262795f72616e6b5f69636f6e op 1", "style": 3,
           "text_key": "", "text_exp": "", "fore_color": [1, 1, 1, 1]
         }
       },
       {
         "index": 27,
         "fields": {
-          "name": "lobby_rank", "vis_exp": "1", "rect": {"x": -28, "y": 28, "w": 20, "h": 20},
-          "background": "", "style": 0, "text_key": "70", "text_exp": "",
+          "name": "lobby_rank", "vis_exp": "op 38 s:75695f6c6f6262795f72616e6b op 1 op 13 s:", "rect": {"x": -28, "y": 28, "w": 20, "h": 20},
+          "background": "", "style": 0, "text_key": "", "text_exp": "op 38 s:75695f6c6f6262795f72616e6b op 1",
           "text_literal": true, "font_enum": 3, "text_scale": 0.375,
           "fore_color": [1, 1, 1, 1], "text_align_mode": 10, "text_align_x": 0
         }

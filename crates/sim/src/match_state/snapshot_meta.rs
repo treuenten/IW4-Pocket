@@ -33,6 +33,10 @@ pub struct ClientSnapshotMeta {
     pub score: i32,
     pub kills: i32,
     pub deaths: i32,
+    /// The GSC client field `assists` (`processAssist` in team modes). Only the
+    /// authority holds it: it reaches clients through the `b` scores command,
+    /// not the meta wire.
+    pub assists: i32,
     pub kill_streak: i32,
     pub radar: RadarMode,
     pub radar_blocked: bool,

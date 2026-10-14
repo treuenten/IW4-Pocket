@@ -23,15 +23,24 @@ use crate::surface::Hud2dSurface;
 
 const LIST_X: f32 = 70.0;
 const LIST_WIDTH: f32 = 500.0;
+/// The rows' background; the ping graph sits to its right.
+const ROW_WIDTH: f32 = LIST_WIDTH - 24.0;
 const WHITE: [f32; 4] = [1.0; 4];
 const MINE: [f32; 4] = [1.0, 0.8, 0.4, 1.0];
-const COLUMNS: [(f32, f32, &str); 5] = [
-    (248.0, 49.0, "CGAME_SB_SCORE"),
-    (297.0, 44.0, "CGAME_SB_KILLS"),
-    (341.0, 48.0, "CGAME_SB_ASSISTS"),
-    (389.0, 47.0, "CGAME_SB_DEATHS"),
-    (436.0, 40.0, "CGAME_SB_PING"),
+/// MW2's four stat columns, each a tenth of the 500-wide board
+/// (`cg_scoreboardWidth`), ending at the right edge of the row. The ping is
+/// shown only as the bar graph (`cg_scoreboardPingText` 0,
+/// `cg_scoreboardPingGraph` 1).
+const STAT_WIDTH: f32 = 50.0;
+const COLUMNS: [(f32, &str); 4] = [
+    (ROW_WIDTH - 4.0 * STAT_WIDTH, "CGAME_SB_SCORE"),
+    (ROW_WIDTH - 3.0 * STAT_WIDTH, "CGAME_SB_KILLS"),
+    (ROW_WIDTH - 2.0 * STAT_WIDTH, "CGAME_SB_ASSISTS"),
+    (ROW_WIDTH - STAT_WIDTH, "CGAME_SB_DEATHS"),
 ];
+const NAME_X: f32 = 44.0;
+/// The dead icon sits between the name and the stats.
+const DEAD_ICON_X: f32 = COLUMNS[0].0 - 22.0;
 
 #[derive(Clone, Debug)]
 struct ScoreboardRow {
@@ -220,7 +229,7 @@ fn team_presentation(
     icons: &MapTeamSettings,
     team: i32,
     strings: Option<&PreparedLocalizedStrings>,
-) -> (String, Option<asset_core::AssetKey>, [f32; 4]) {
+) -> (String, Option<asset_core::AssetKey>) {
     let icon = match team {
         1 => icons.axis.clone(),
         2 => icons.allies.clone(),
@@ -231,13 +240,6 @@ fn team_presentation(
         2 => icons.allies_name.as_ref(),
         _ => None,
     };
-    let color = match team {
-        1 => icons.axis_color,
-        2 => icons.allies_color,
-        _ => None,
-    }
-    .map(|rgb| [rgb[0], rgb[1], rgb[2], 0.5])
-    .unwrap_or([0.25, 0.25, 0.25, 0.5]);
     if let Some(name) = name {
         return (
             strings
@@ -245,21 +247,20 @@ fn team_presentation(
                 .unwrap_or(&name.name)
                 .to_owned(),
             icon,
-            color,
         );
     }
-    let (key, color) = match team {
-        0 => ("", [0.76, 0.78, 0.10, 0.5]),
-        1 => ("MPUI_AXIS", [0.25, 0.25, 0.25, 0.5]),
-        2 => ("MPUI_ALLIES", [0.25, 0.25, 0.25, 0.5]),
-        _ => ("CGAME_SPECTATORS", [0.25, 0.25, 0.25, 0.5]),
+    let key = match team {
+        0 => "",
+        1 => "MPUI_AXIS",
+        2 => "MPUI_ALLIES",
+        _ => "CGAME_SPECTATORS",
     };
     let name = if key.is_empty() {
         String::new()
     } else {
         localized(strings, key)
     };
-    (name, icon, color)
+    (name, icon)
 }
 
 // Only intermission opens the scoreboard; the ended phase alone would cover the final killcam.
@@ -339,20 +340,23 @@ pub(crate) fn update_scoreboard(
         cmds: Vec::new(),
     };
 
-    for (x, w, key) in COLUMNS {
+    for (x, key) in COLUMNS {
+        let label = localized(loc, key);
+        let label_width = ui_text_width(font, &label, hud_iw4::SCOREBOARD_HEADER_SCALE);
+        let (header_scale, left) = hud_iw4::scoreboard_header_fit(x, STAT_WIDTH, label_width);
         draw.text(
-            LIST_X + x,
+            LIST_X + left,
             77.0,
-            w,
-            scale,
-            true,
-            &localized(loc, key),
+            STAT_WIDTH,
+            header_scale,
+            false,
+            &label,
             WHITE,
         );
     }
     let mut y = 82.0;
     for team in teams {
-        let (name, icon, back) = team_presentation(icons, team, loc);
+        let (name, icon) = team_presentation(icons, team, loc);
         let count = rows.iter().filter(|r| r.score.team == team).count();
         if let Some(icon) = icon {
             draw.picture(LIST_X, y, 28.0, 28.0, &icon.name, WHITE);
@@ -378,7 +382,13 @@ pub(crate) fn update_scoreboard(
             } else {
                 WHITE
             };
-            draw.picture(LIST_X, y, LIST_WIDTH - 24.0, row_h, "white", back);
+            let back = hud_iw4::scoreboard_row_color(
+                local.0.0 as i32,
+                local_team,
+                row.score.client,
+                row.score.team,
+            );
+            draw.picture(LIST_X, y, ROW_WIDTH, row_h, "white", back);
             if let Some((icon, level)) = rank_presentation(catalog, row.score.rank, row.prestige) {
                 draw.picture(LIST_X, y, row_h, row_h, icon, WHITE);
                 draw.text(
@@ -392,34 +402,43 @@ pub(crate) fn update_scoreboard(
                 );
             }
             draw.text(
-                LIST_X + 44.0,
+                LIST_X + NAME_X,
                 y + row_h * 0.8,
-                182.0,
+                DEAD_ICON_X - NAME_X - 2.0,
                 scale,
                 false,
                 &row.name,
                 color,
             );
             if row.dead {
-                draw.picture(LIST_X + 228.0, y, row_h, row_h, "hud_status_dead", WHITE);
+                draw.picture(
+                    LIST_X + DEAD_ICON_X,
+                    y,
+                    row_h,
+                    row_h,
+                    "hud_status_dead",
+                    WHITE,
+                );
             }
             let values = [
                 row.score.score,
                 row.score.kills,
                 row.score.assists,
                 row.score.deaths,
-                row.score.ping,
             ];
-            for ((x, w, _), value) in COLUMNS.into_iter().zip(values) {
-                if team == 3 && x < 436.0 {
-                    continue;
+            for ((x, _), value) in COLUMNS.into_iter().zip(values) {
+                if team == 3 {
+                    break;
                 }
-                let value = if x == 436.0 && value < 0 {
-                    String::new()
-                } else {
-                    value.to_string()
-                };
-                draw.text(LIST_X + x, y + row_h * 0.8, w, scale, true, &value, color);
+                draw.text(
+                    LIST_X + x,
+                    y + row_h * 0.8,
+                    STAT_WIDTH,
+                    scale,
+                    true,
+                    &value.to_string(),
+                    color,
+                );
             }
             draw.ping(LIST_X + 480.0, y, row_h, row.score.ping);
             y += row_step;

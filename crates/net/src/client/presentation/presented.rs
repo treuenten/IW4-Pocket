@@ -96,7 +96,7 @@ impl PresentedSnapshot {
         previous_presented: Option<PlayerState>,
     ) -> PlayerState {
         if let Some(ps) = snapshot_local
-            && !ps.is_live_frame()
+            && ps.is_seat_frame()
         {
             return *ps;
         }
@@ -111,7 +111,7 @@ impl PresentedSnapshot {
         predicted: Option<&PlayerState>,
         previous_presented: Option<&PlayerState>,
     ) -> &'static str {
-        if snapshot_local.is_some_and(|ps| !ps.is_live_frame()) {
+        if snapshot_local.is_some_and(|ps| ps.is_seat_frame()) {
             return "archived";
         }
         if predicted.is_some() {
@@ -129,7 +129,7 @@ impl PresentedSnapshot {
         snapshot_local: Option<&PlayerState>,
     ) -> PlayerState {
         if let Some(ps) = snapshot_local
-            && !ps.is_live_frame()
+            && ps.is_seat_frame()
         {
             return *ps;
         }
@@ -137,7 +137,7 @@ impl PresentedSnapshot {
     }
 
     pub fn presentation_local_choice_unarmed(snapshot_local: Option<&PlayerState>) -> &'static str {
-        if snapshot_local.is_some_and(|ps| !ps.is_live_frame()) {
+        if snapshot_local.is_some_and(|ps| ps.is_seat_frame()) {
             "archived"
         } else if snapshot_local.is_some() {
             "snapshot"

@@ -98,10 +98,14 @@ pub fn sample_killcam_seat(
             .iter()
             .find(|(id, _)| *id == session.focus_client)?
             .1;
+        // A live follow is the followed player's own state, as MW2's server
+        // copies it to a spectator: their stance, eye height and gun, marked
+        // as a follow (the bit a killcam seat sets too). The client then draws
+        // it from their eyes with their viewmodel, hides their body, and does
+        // not predict it from the spectator's own input.
         let mut player_state = target;
-        player_state.pm_type = playerstate_iw4::PM_TYPE_SPECTATOR;
-        player_state.other_flags &= !(playerstate_iw4::other_flags::PLAYER
-            | playerstate_iw4::other_flags::DEAD_KILLCAM_TPV);
+        player_state.other_flags = (target.other_flags & !playerstate_iw4::other_flags::PLAYER)
+            | playerstate_iw4::other_flags::DEAD_KILLCAM_TPV;
         player_state.kill_cam_entity = playerstate_iw4::ENTITYNUM_NONE;
         player_state.kill_cam_look_at_entity = playerstate_iw4::ENTITYNUM_NONE;
         player_state.kill_cam_client_num = session.focus_client.0 as i32;
@@ -572,6 +576,42 @@ mod tests {
         assert!(!ps.is_live_frame());
         assert_eq!(ps.kill_cam_client_num, 1);
         assert_eq!(*ps, sample.player_state);
+    }
+
+    #[test]
+    fn a_live_follow_is_the_followed_players_own_view() {
+        let mut live = snapshot(LIVE_TICK, &[(0, Dead), (1, Alive)]);
+        let target = PlayerState {
+            pm_type: 0,
+            other_flags: playerstate_iw4::other_flags::PLAYER,
+            origin: [100.0, 200.0, 8.0],
+            viewangles: [5.0, 90.0, 0.0],
+            weapon: 7,
+            ..PlayerState::ZERO
+        };
+        live.players[1].1 = target;
+        let viewer = ClientId(0);
+        let follow = KillcamSession {
+            killcamoffset_ms: 0,
+            archivetime_ms: 0,
+            ..session(1, false)
+        };
+        let archive = archive(1, |_, _| {});
+        let now_ms = sim::level_time_ms(live.tick);
+        let (out, _) =
+            snapshot_and_sample_for_viewer(&archive, &seated(0, follow), &live, viewer, now_ms);
+        let (_, ps) = out.players.iter().find(|(id, _)| *id == viewer).unwrap();
+        assert!(ps.is_live_follow());
+        assert_eq!(
+            ps.pm_type, target.pm_type,
+            "their stance, not a spectator's"
+        );
+        assert_eq!(ps.other_flags & playerstate_iw4::other_flags::PLAYER, 0);
+        assert_eq!(ps.kill_cam_client_num, 1);
+        assert_eq!(
+            (ps.origin, ps.viewangles, ps.weapon),
+            (target.origin, target.viewangles, 7)
+        );
     }
 
     #[test]

@@ -126,7 +126,7 @@ pub fn sync_client_entities(
 ) {
     let archived = adopted.next().is_some_and(|snap| {
         snap.players.iter().any(|(id, ps)| {
-            local.as_ref().is_some_and(|local| *id == local.0) && !ps.is_live_frame()
+            local.as_ref().is_some_and(|local| *id == local.0) && ps.is_seat_frame()
         })
     });
     let selected = if archived {

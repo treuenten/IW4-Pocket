@@ -267,12 +267,12 @@ fn occupy_remote_scene_ents(
     };
     let eye = cameras.single().ok().map(|xf| xf.translation());
     let in_killcam = subject.as_ref().is_some_and(|s| s.in_killcam());
-    let eyes = match subject.as_deref() {
-        Some(ViewSubject::Seat {
-            focus: Some(focus), ..
-        }) => i32::try_from(*focus).unwrap_or(0),
-        _ => i32::try_from(local.0.0).unwrap_or(0),
-    };
+    let eyes = i32::try_from(
+        subject
+            .as_deref()
+            .map_or(local.0.0, |subject| subject.eyes(local.0.0)),
+    )
+    .unwrap_or(0);
     let gate = PlayerDrawGate {
         eyes_entity_num: eyes,
         other_flags: presented
@@ -398,12 +398,12 @@ fn sync_remote_bodies(
     };
 
     let in_killcam = subject.as_ref().is_some_and(|s| s.in_killcam());
-    let eyes = match subject.as_deref() {
-        Some(ViewSubject::Seat {
-            focus: Some(focus), ..
-        }) => i32::try_from(*focus).unwrap_or(0),
-        _ => i32::try_from(local.0.0).unwrap_or(0),
-    };
+    let eyes = i32::try_from(
+        subject
+            .as_deref()
+            .map_or(local.0.0, |subject| subject.eyes(local.0.0)),
+    )
+    .unwrap_or(0);
     let gate = PlayerDrawGate {
         eyes_entity_num: eyes,
         other_flags: presented

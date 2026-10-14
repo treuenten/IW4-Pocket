@@ -29,6 +29,7 @@ mod frontend;
 mod game_folders;
 mod gamepad;
 pub mod input;
+mod lobby_rank;
 mod local_account;
 mod local_profile;
 pub mod plugin;
