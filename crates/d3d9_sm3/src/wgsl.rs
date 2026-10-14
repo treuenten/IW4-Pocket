@@ -486,7 +486,7 @@ pub fn lower_sm3_to_wgsl(program: &Sm3ProgramIr) -> Result<Sm3Wgsl, Sm3WgslError
         &program.instructions,
         &plan.external,
         &plan.samplers,
-        &BTreeSet::new(),
+        &SamplerModes::default(),
         &mut defined,
         None,
     )?;
@@ -509,12 +509,20 @@ pub fn lower_pass_to_wgsl(
 ) -> Result<PassWgsl, Sm3WgslError> {
     let vertex_plan = plan_program(vertex)?;
     let pixel_plan = plan_program(pixel)?;
-    let compare: BTreeSet<u16> = abi
-        .samplers
-        .iter()
-        .filter(|slot| slot.depth_compare)
-        .map(|slot| slot.register)
-        .collect();
+    let modes = SamplerModes {
+        compare: abi
+            .samplers
+            .iter()
+            .filter(|slot| slot.depth_compare)
+            .map(|slot| slot.register)
+            .collect(),
+        black: abi
+            .samplers
+            .iter()
+            .filter(|slot| slot.black)
+            .map(|slot| slot.register)
+            .collect(),
+    };
 
     let vertex_constant_len = constant_block_len(abi, &vertex_plan, Stage::Vertex)?;
     let pixel_constant_len = constant_block_len(abi, &pixel_plan, Stage::Pixel)?;
@@ -641,7 +649,7 @@ pub fn lower_pass_to_wgsl(
         &vertex.instructions,
         &vertex_plan.external,
         &vertex_plan.samplers,
-        &BTreeSet::new(),
+        &SamplerModes::default(),
         &mut defined,
         vertex_relative,
     )?;
@@ -739,7 +747,7 @@ pub fn lower_pass_to_wgsl(
         &pixel.instructions,
         &pixel_plan.external,
         &pixel_plan.samplers,
-        &compare,
+        &modes,
         &mut defined,
         None,
     )?;
@@ -1171,12 +1179,21 @@ fn emit_vs_relative_const_loader(source: &mut String, len: usize) {
     source.push_str("    return sm3_constants.c[base + u32(i)];\n}\n");
 }
 
+/// Samplers a pass reads some other way than a plain fetch.
+#[derive(Default)]
+struct SamplerModes {
+    /// Depth-format shadow maps: a filtered depth test (`sm3_shadow_compare`).
+    compare: BTreeSet<u16>,
+    /// Read as opaque black, with no fetch at all.
+    black: BTreeSet<u16>,
+}
+
 fn emit_body(
     wgsl: &mut String,
     instructions: &[Sm3Instruction],
     external: &BTreeSet<Sm3Register>,
     samplers: &BTreeMap<u16, SamplerTextureDimension>,
-    compare: &BTreeSet<u16>,
+    modes: &SamplerModes,
     defined: &mut BTreeMap<Sm3Register, u8>,
     relative_c: Option<&str>,
 ) -> Result<(), Sm3WgslError> {
@@ -1187,7 +1204,7 @@ fn emit_body(
             instruction,
             external,
             samplers,
-            compare,
+            modes,
             defined,
             &mut flow,
             relative_c,
@@ -1233,7 +1250,7 @@ fn emit_instruction(
     instruction: &Sm3Instruction,
     external: &BTreeSet<Sm3Register>,
     samplers: &BTreeMap<u16, SamplerTextureDimension>,
-    compare: &BTreeSet<u16>,
+    modes: &SamplerModes,
     defined: &mut BTreeMap<Sm3Register, u8>,
     flow: &mut Vec<FlowFrame>,
     relative_c: Option<&str>,
@@ -1411,7 +1428,7 @@ fn emit_instruction(
                     component,
                     external,
                     samplers,
-                    compare,
+                    modes,
                     defined,
                     relative_c,
                 )?;
@@ -1476,7 +1493,7 @@ fn operation_component(
     component: u8,
     external: &BTreeSet<Sm3Register>,
     samplers: &BTreeMap<u16, SamplerTextureDimension>,
-    compare: &BTreeSet<u16>,
+    modes: &SamplerModes,
     defined: &BTreeMap<Sm3Register, u8>,
     relative_c: Option<&str>,
 ) -> Result<String, Sm3WgslError> {
@@ -1619,7 +1636,7 @@ fn operation_component(
             format!("({x0} * {x1} + {y0} * {y1} + {})", scalar(&sources[2], 0)?)
         }
         Sm3Opcode::TexLd | Sm3Opcode::TexLdL | Sm3Opcode::TexLdD => texture_component(
-            at_word, opcode, controls, sources, component, external, samplers, compare, defined,
+            at_word, opcode, controls, sources, component, external, samplers, modes, defined,
             relative_c,
         )?,
         Sm3Opcode::Nop
@@ -1668,7 +1685,7 @@ fn texture_component(
     component: u8,
     external: &BTreeSet<Sm3Register>,
     samplers: &BTreeMap<u16, SamplerTextureDimension>,
-    compare: &BTreeSet<u16>,
+    modes: &SamplerModes,
     defined: &BTreeMap<Sm3Register, u8>,
     relative_c: Option<&str>,
 ) -> Result<String, Sm3WgslError> {
@@ -1720,7 +1737,10 @@ fn texture_component(
         }
     };
     let slot = format!("sm3_slot_s{}", sampler.register.index);
-    if compare.contains(&sampler.register.index)
+    if modes.black.contains(&sampler.register.index) {
+        return Ok(String::from(if component == 3 { "1.0" } else { "0.0" }));
+    }
+    if modes.compare.contains(&sampler.register.index)
         && dimension == SamplerTextureDimension::D2
         && opcode != Sm3Opcode::TexLdD
     {
