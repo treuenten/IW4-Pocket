@@ -877,8 +877,8 @@ impl FxGlassSystemHost {
         let collapse = cause == 2;
         let scale = glass_piece_speed_scale(area_x2);
         let lin_r = self.next_rand();
-        let mut speed =
-            glass_lerp_range(FX_GLASS_LINEAR_VEL_MIN, FX_GLASS_LINEAR_VEL_MAX, lin_r) * scale;
+        let mut speed = glass_lerp_range(FX_GLASS_LINEAR_VEL_MIN, FX_GLASS_LINEAR_VEL_MAX, lin_r)
+            * glass_linear_speed_scale(scale);
         if collapse {
             speed *= 0.25;
         }
@@ -1437,5 +1437,20 @@ impl FxGlassSystemHost {
             *src = parent_pane;
         }
         Some(child)
+    }
+}
+
+/// How much of the glass_linear_vel range a shard leaves with for its size
+/// (`glass_piece_speed_scale`, the reciprocal square root of its area, 1 at
+/// 64 square units). Smaller shards leave no faster than the range: scaled
+/// up to 13.5 times, a shard under an inch across shot out of a roof from
+/// below left at up to 5,400 units a second and rose far above the trees
+/// (IP-114). Larger ones still leave slower. `IW4L_FX_MOTION=0` brings back
+/// the full scale.
+fn glass_linear_speed_scale(scale: f32) -> f32 {
+    if fx_iw4::motion_fix() {
+        scale.min(1.0)
+    } else {
+        scale
     }
 }

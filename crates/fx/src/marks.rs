@@ -196,8 +196,8 @@ impl FxMarksSystemHost {
             || self.free_tri_groups() < needed_tris
             || self.free_point_groups() < needed_points
         {
-            let oldest = self.allocation_order.pop_front()?;
-            self.release_mark(oldest);
+            let lru = self.least_recently_drawn()?;
+            self.release_mark(lru);
         }
         let tri_head = self.pop_tri_chain(needed_tris)?;
         let point_head = self.pop_point_chain(needed_points)?;
@@ -309,6 +309,43 @@ impl FxMarksSystemHost {
             hidden = hidden.saturating_add(1);
         }
         hidden
+    }
+
+    /// Takes from the allocation order the mark that has gone longest without
+    /// being drawn, the oldest of those that tie: a full pool gives up the
+    /// marks out of view before the ones the player is looking at, as MW2's
+    /// does (a mark's frame-drawn count, set one frame before its allocation,
+    /// is what it is judged by). Before IP-080 it took the oldest mark, and a
+    /// match's bullets elsewhere wore away the holes in front of the player
+    /// within seconds.
+    fn least_recently_drawn(&mut self) -> Option<u16> {
+        let (at, _) = self
+            .allocation_order
+            .iter()
+            .enumerate()
+            .filter_map(|(at, &handle)| {
+                let mark = self.constructed.get(handle as usize)?.as_ref()?;
+                Some((at, mark.frame_count_drawn))
+            })
+            .min_by_key(|&(at, drawn)| (drawn, at))
+            .or_else(|| (!self.allocation_order.is_empty()).then_some((0, 0)))?;
+        self.allocation_order.remove(at)
+    }
+
+    /// Records that the marks in view of `planes` are drawn this `frame`.
+    /// World and glass marks are judged by their bounding sphere; marks on
+    /// models, whose origin is the model's, count as drawn while they last.
+    pub fn note_drawn(&mut self, frame: i32, planes: &[[f32; 4]]) {
+        for mark in self.constructed.iter_mut().flatten() {
+            let context = mark.context as u8;
+            let placed_in_world = mark_context_is_world_list(context) || context == 4;
+            if placed_in_world
+                && fx_iw4::cull_sphere(planes, planes.len() as u32, mark.origin, mark.radius)
+            {
+                continue;
+            }
+            mark.frame_count_drawn = frame;
+        }
     }
 
     fn release_mark(&mut self, handle: u16) {
@@ -525,5 +562,73 @@ impl FxMarksSystemHost {
                 req.receivers.fx_marks_smodels,
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mark_at(host: &mut FxMarksSystemHost, x: f32, frame: i32) -> u16 {
+        let tri = FxMarkStagingTri {
+            indices: [0, 1, 2],
+            context: [0; 7],
+            _pad: 0,
+        };
+        let point = FxMarkStagingPoint {
+            xyz: [x, 0.0, 0.0],
+            ..FxMarkStagingPoint::ZERO
+        };
+        let req = FxAllocMarkRequest {
+            any_marks: true,
+            tri_count: 1,
+            point_count: 3,
+            origin: [x, 0.0, 0.0],
+            radius: 4.0,
+            tex_coord_axis: [1.0, 0.0, 0.0],
+            native_color: 0,
+            material: 0,
+            frame_count: frame,
+            first_tri_context: 0,
+        };
+        host.alloc_mark_from_go_callback(req, &[tri], &[point; 3])
+            .expect("mark")
+    }
+
+    /// In view: everything with x under 100.
+    const VIEW: [[f32; 4]; 1] = [[-1.0, 0.0, 0.0, 100.0]];
+
+    #[test]
+    fn a_full_pool_gives_up_the_marks_out_of_view_first() {
+        let mut host = FxMarksSystemHost::init();
+        // The player's wall gets the first ten holes; bullets elsewhere fill
+        // the rest of the pool and then keep coming.
+        let wall: Vec<u16> = (0..10).map(|i| mark_at(&mut host, i as f32, 1)).collect();
+        for i in 0..(FX_MARKS_ACTIVE_LIMIT - 10) {
+            mark_at(&mut host, 1000.0 + i as f32, 1);
+        }
+        assert_eq!(host.live_count(), FX_MARKS_ACTIVE_LIMIT);
+        for frame in 2..200 {
+            host.note_drawn(frame, &VIEW);
+            mark_at(&mut host, 2000.0 + frame as f32, frame);
+        }
+        assert_eq!(host.live_count(), FX_MARKS_ACTIVE_LIMIT);
+        for handle in wall {
+            let mark = host.constructed(handle).expect("the wall's hole is gone");
+            assert!(mark.origin[0] < 10.0, "{mark:?}");
+        }
+    }
+
+    #[test]
+    fn marks_out_of_view_go_oldest_first() {
+        let mut host = FxMarksSystemHost::init();
+        let first = mark_at(&mut host, 500.0, 1);
+        for i in 1..FX_MARKS_ACTIVE_LIMIT {
+            mark_at(&mut host, 500.0 + i as f32, 1);
+        }
+        host.note_drawn(2, &VIEW);
+        mark_at(&mut host, 900.0, 3);
+        let first = host.constructed(first).map(|mark| mark.origin[0]);
+        assert_ne!(first, Some(500.0), "the oldest mark out of view is kept");
     }
 }

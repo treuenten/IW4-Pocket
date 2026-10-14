@@ -139,6 +139,10 @@ pub struct FxPhysPiece {
     pub flat_axis: u8,
     pub flat_mid: f32,
     pub flat_half: f32,
+    /// The model's bounds midpoint and half size, zero when unknown. The
+    /// midpoint is the centre of mass the piece turns about.
+    pub mid: [f32; 3],
+    pub half: [f32; 3],
 }
 
 impl FxPhysPiece {
@@ -149,6 +153,8 @@ impl FxPhysPiece {
         flat_axis: 3,
         flat_mid: 0.0,
         flat_half: 0.0,
+        mid: [0.0; 3],
+        half: [0.0; 3],
     };
 
     /// `preset` is the model's (bounce, friction), `bounds` its IW4 bounds:
@@ -157,10 +163,10 @@ impl FxPhysPiece {
         let (bounce, friction) = preset
             .filter(|(b, f)| b.is_finite() && f.is_finite())
             .unwrap_or((Self::FALLBACK.bounce, Self::FALLBACK.friction));
+        let bounds = bounds.filter(|(mid, half)| {
+            mid.iter().all(|v| v.is_finite()) && half.iter().all(|v| v.is_finite() && *v > 0.0)
+        });
         let (flat_axis, flat_mid, flat_half) = bounds
-            .filter(|(mid, half)| {
-                mid.iter().all(|v| v.is_finite()) && half.iter().all(|v| v.is_finite() && *v > 0.0)
-            })
             .and_then(|(mid, half)| {
                 let axis = (0..3).min_by(|&a, &b| half[a].total_cmp(&half[b]))?;
                 Some((axis as u8, mid[axis], half[axis]))
@@ -170,12 +176,15 @@ impl FxPhysPiece {
                 Self::FALLBACK.flat_mid,
                 Self::FALLBACK.flat_half,
             ));
+        let (mid, half) = bounds.unwrap_or((Self::FALLBACK.mid, Self::FALLBACK.half));
         Self {
             bounce: bounce.clamp(0.0, 1.0),
             friction: friction.clamp(0.0, 1.0),
             flat_axis,
             flat_mid,
             flat_half,
+            mid,
+            half,
         }
     }
 

@@ -29,6 +29,7 @@ mod orient;
 mod orientation;
 mod origin;
 mod particle_cloud;
+mod phys_piece;
 mod pool;
 mod post_light;
 mod quat;
@@ -242,6 +243,7 @@ pub use particle_cloud::{
     sparkcloud_fill_sample, sparkcloud_history_advance, sparkcloud_history_should_advance,
     sparkcloud_lerp_sample, sparkcloud_tent_weights,
 };
+pub use phys_piece::{FX_PHYS_ANGULAR_DRAG, FX_PHYS_TIP_MS, FxPhysSpin};
 pub use pool::{
     FX_BUFFERS_OFF_EFFECTS, FX_BUFFERS_OFF_ELEMS, FX_BUFFERS_OFF_SPARK_CLOUD,
     FX_BUFFERS_POOL_STRIDE, FX_EFFECT_HANDLE_RING_MASK, FX_EFFECT_HANDLE_RING_SIZE,
@@ -342,7 +344,9 @@ pub use vec::{
     FX_PERP_VECTOR_UNIT, effect_orient_arc, perpendicular_vector, vec3_distance, vec3_length_sq,
     vec3_normalize, vector_vectors,
 };
-pub use velocity::{FX_VEL_AT_TIME_SCALE, elem_launch_velocity, get_velocity_at_time};
+pub use velocity::{
+    FX_VEL_AT_TIME_SCALE, elem_launch_velocity, get_velocity_at_time, motion_fix, set_motion_fix,
+};
 pub use view::{
     FX_EFFECT_DEF_SIZE, FX_ELEM_DEF_STRIDE, FxEffectDefView, FxElemDefView, effect_def_view,
     elem_def_gravity_accel_z, elem_def_view, elem_def_view_x64,
