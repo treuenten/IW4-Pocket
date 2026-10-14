@@ -66,9 +66,24 @@ pub const BOUNCE_EVENT_SPEED_DELTA: f32 = 100.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GrenadeLaunchKind {
-    Thrown { remaining_fuse_ms: Option<i32> },
+    Thrown {
+        remaining_fuse_ms: Option<i32>,
+    },
     Launcher,
+    /// A grenade let go of while still held: MW2's player_die drops it live
+    /// with the fuse it had left (`ps.grenadeTimeLeft`). A timed grenade goes
+    /// off that long from now, so at once when the fuse ran out in the hand
+    /// (-1); any other keeps its authored fuse (G_SetGrenadeFuse).
+    Dropped {
+        fuse_left_ms: i32,
+    },
 }
+
+/// Height above the holder's feet a dropped live grenade starts at, and the
+/// most it is tossed along each axis (iw4mp 0x526460: origin + 40 up, each
+/// axis crandom() * 160).
+const HELD_GRENADE_DROP_Z: f32 = 40.0;
+const HELD_GRENADE_DROP_SPEED: f32 = 160.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum WeaponNote {
@@ -239,7 +254,11 @@ fn grenade_deadlines(
             };
             (Some(now_ms.saturating_add(fuse)), cleanup_at_ms)
         }
-        GrenadeLaunchKind::Launcher => {
+        GrenadeLaunchKind::Dropped { fuse_left_ms } if facts.timed_detonation => (
+            Some(now_ms.saturating_add(fuse_left_ms.min(GRENADE_FUSE_CAP_MS))),
+            cleanup_at_ms,
+        ),
+        GrenadeLaunchKind::Launcher | GrenadeLaunchKind::Dropped { .. } => {
             let fuse = if facts.fuse_time_ms <= 0 {
                 GRENADE_DEFAULT_FUSE_MS
             } else {
@@ -263,26 +282,45 @@ pub(crate) fn spawn_grenade_projectile(
     let Some(facts) = world.equipment_facts_for(weapon) else {
         return false;
     };
+    let direction = forward(angles);
+    let velocity = grenade_launch_velocity(direction, &facts, owner_vel);
+    spawn_grenade_moving(
+        world, owner, weapon, tick, origin, direction, velocity, kind,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_grenade_moving(
+    world: &mut FrameWorld,
+    owner: ClientId,
+    weapon: u32,
+    tick: Tick,
+    origin: [f32; 3],
+    direction: [f32; 3],
+    velocity: [f32; 3],
+    kind: GrenadeLaunchKind,
+) -> bool {
+    let Some(facts) = world.equipment_facts_for(weapon) else {
+        return false;
+    };
     if !facts.is_usable() {
         return false;
     }
     let owner_life = world.client_meta(owner).unwrap().life_sequence;
-    let direction = forward(angles);
     let time_ms = level_time_ms(tick);
     let (pitch_rate, roll_rate) = match kind {
         GrenadeLaunchKind::Launcher => (0.0, 0.0),
-        GrenadeLaunchKind::Thrown { .. } if facts.weap_class == WEAPCLASS_THROWINGKNIFE => {
+        _ if facts.weap_class == WEAPCLASS_THROWINGKNIFE => {
             (entity_iw4::GRENADE_BLADE_SPIN_PITCH, 0.0)
         }
-        GrenadeLaunchKind::Thrown { .. } if facts.projectile_rotates => grenade_spin_rates(world),
-        GrenadeLaunchKind::Thrown { .. } => (0.0, 0.0),
+        _ if facts.projectile_rotates => grenade_spin_rates(world),
+        _ => (0.0, 0.0),
     };
     let apos = if pitch_rate == 0.0 && roll_rate == 0.0 {
         fire_missile_apos(direction)
     } else {
         init_grenade_apos(direction, time_ms, pitch_rate, roll_rate)
     };
-    let velocity = grenade_launch_velocity(direction, &facts, owner_vel);
     let pos = init_grenade_pos(origin, velocity, time_ms);
     let speed = vec3_length(velocity);
     let launch_time = time_ms + fire_grenade_no_draw_ms(speed);
@@ -352,56 +390,87 @@ pub(crate) fn spawn_offhand_projectile(
     )
 }
 
-pub(crate) fn explode_offhand_in_hand(
+/// A grenade held past its fuse, as MW2 does it (iw4mp: PM_UpdateGrenadeThrow
+/// 0x476970 raises EV_GRENADE_SUICIDE; G_ClientEvent 0x51bd41 kills the holder
+/// with 100000 MOD_SUICIDE damage unless god mode is on; player_die 0x526890
+/// first drops the grenade still in the hand, 0x526460, with the fuse it had
+/// left, -1, so it goes off at once where the holder stood). The blast is the
+/// grenade's own explosion: its effect, sound and damage to everyone near.
+/// With god mode on, MW2 does none of it and the grenade is simply spent.
+pub(crate) fn cook_off_in_hand(world: &mut FrameWorld, id: ClientId, weapon: u32, tick: Tick) {
+    if !world.publishes_snapshot()
+        || crate::script_player::god_mode(world, id)
+        || !world
+            .client_meta(id)
+            .is_some_and(|meta| meta.lifecycle == ClientLifecycle::Alive)
+    {
+        return;
+    }
+    drop_live_grenade(world, id, weapon, -1, tick);
+    crate::script::grenade_suicide(world.ecs(), tick, id.0, weapon);
+}
+
+/// MW2's player_die lets go of a grenade still in the hand (iw4mp 0x526460):
+/// it falls from 40 units above the feet, tossed up to 160 units/s along
+/// each axis, with the fuse it had left. Returns whether one was spawned.
+pub(crate) fn drop_live_grenade(
     world: &mut FrameWorld,
     id: ClientId,
     weapon: u32,
+    fuse_left_ms: i32,
     tick: Tick,
-) {
-    let Some(facts) = world.equipment_facts_for(weapon) else {
-        return;
-    };
+) -> bool {
     let Some(ps) = world.player(id).copied() else {
-        return;
+        return false;
     };
-    let owner_life = world
-        .client_meta(id)
-        .map(|m| m.life_sequence)
-        .unwrap_or_default();
     let origin = [
         ps.origin[0],
         ps.origin[1],
-        ps.origin[2] + ps.view_height_current,
+        ps.origin[2] + HELD_GRENADE_DROP_Z,
     ];
-    let radius = facts
-        .explosion_radius
-        .max(facts.explosion_radius_min)
-        .max(0) as f32;
-    if facts.projectile_explosion_type == 2 {
-        crate::damage::apply_flashbang_blast(
-            world,
-            origin,
-            facts.explosion_radius.max(0) as f32,
-            facts.explosion_radius_min.max(0) as f32,
-            id,
-        );
-    }
-    if radius <= 0.0 || facts.explosion_inner_damage <= 0 {
-        return;
-    }
-    let blast = crate::damage::ExplosionBlast {
-        cone: None,
-        origin,
-        radius,
-        inner_damage: facts.explosion_inner_damage as f32,
-        outer_damage: facts.explosion_outer_damage.max(0) as f32,
-        weapon,
-        source: DamageSource::Projectile(ProjectileId(0)),
-        attacker: id,
-        attacker_life: owner_life,
-        killcam_entity_start_time: level_time_ms(tick),
+    let velocity = {
+        let rng = world.combat_rng_mut();
+        let mut toss = || host_flrand(rng, -1.0, 1.0) * HELD_GRENADE_DROP_SPEED;
+        [toss(), toss(), toss()]
     };
-    crate::damage::apply_explosion_blast(world, tick, &blast);
+    let direction = vec3_normalize(velocity).unwrap_or([0.0, 0.0, -1.0]);
+    spawn_grenade_moving(
+        world,
+        id,
+        weapon,
+        tick,
+        origin,
+        direction,
+        velocity,
+        GrenadeLaunchKind::Dropped { fuse_left_ms },
+    )
+}
+
+/// `IW4L_HELD_GRENADE_DROP=1`: a player killed while holding a live grenade
+/// (cooking a frag, or between pulling the pin and letting go) drops it, as
+/// MW2's player_die does, and it goes off when its fuse runs out. Off by
+/// default until it is checked on the phone; a grenade held past its fuse
+/// always goes off (`cook_off_in_hand`).
+pub(crate) fn drops_held_grenade_on_death() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var(HELD_GRENADE_DROP_ENV).is_ok_and(|value| value.trim() == "1"))
+}
+
+pub const HELD_GRENADE_DROP_ENV: &str = "IW4L_HELD_GRENADE_DROP";
+
+/// The grenade a player is holding live, and its fuse left, as MW2's
+/// player_die reads them: `grenadeTimeLeft` is set while an offhand is held
+/// (zero otherwise), and the weapon is the offhand while it is in view.
+pub(crate) fn held_live_grenade(ps: &playerstate_iw4::PlayerState) -> Option<(u32, i32)> {
+    if ps.grenade_time_left == 0 {
+        return None;
+    }
+    let weapon = if ps.weap_flags & playerstate_iw4::weap_flags::OFFHAND_VIEW != 0 {
+        u32::try_from(ps.off_hand_index).unwrap_or(0)
+    } else {
+        ps.weapon
+    };
+    (weapon != 0).then_some((weapon, ps.grenade_time_left))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1861,6 +1930,64 @@ mod tests {
         contents: 1,
         glass_encoded: 0,
     };
+
+    fn frag() -> EquipmentRuntimeFacts {
+        EquipmentRuntimeFacts {
+            fuse_time_ms: 3500,
+            cook_off_hold: true,
+            timed_detonation: true,
+            projectile_speed: 600,
+            explosion_inner_damage: 130,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_grenade_cooked_past_its_fuse_goes_off_as_it_is_dropped() {
+        let now = 10_000;
+        let (detonate, cleanup) = grenade_deadlines(
+            &frag(),
+            GrenadeLaunchKind::Dropped { fuse_left_ms: -1 },
+            now,
+        );
+        let detonate = detonate.expect("a dropped frag has a fuse");
+        assert!(grenade_fuse_due(now, Some(detonate), true));
+        assert_eq!(cleanup, now + GRENADE_FUSE_CAP_MS);
+    }
+
+    #[test]
+    fn a_grenade_dropped_while_cooking_keeps_the_fuse_it_had_left() {
+        let (detonate, _) = grenade_deadlines(
+            &frag(),
+            GrenadeLaunchKind::Dropped { fuse_left_ms: 1200 },
+            0,
+        );
+        assert_eq!(detonate, Some(1200));
+        // One that does not count down in the hand keeps its own fuse.
+        let flash = EquipmentRuntimeFacts {
+            fuse_time_ms: 1500,
+            cook_off_hold: false,
+            timed_detonation: false,
+            ..frag()
+        };
+        let (detonate, _) =
+            grenade_deadlines(&flash, GrenadeLaunchKind::Dropped { fuse_left_ms: 1500 }, 0);
+        assert_eq!(detonate, Some(1500));
+    }
+
+    #[test]
+    fn only_a_grenade_in_the_hand_is_held_live() {
+        let mut ps = playerstate_iw4::PlayerState::ZERO;
+        ps.weapon = 7;
+        ps.off_hand_index = 42;
+        assert_eq!(held_live_grenade(&ps), None);
+        ps.grenade_time_left = 900;
+        ps.weap_flags = playerstate_iw4::weap_flags::OFFHAND_VIEW;
+        assert_eq!(held_live_grenade(&ps), Some((42, 900)));
+        // Run out in the hand: still held, with no fuse left.
+        ps.grenade_time_left = -1;
+        assert_eq!(held_live_grenade(&ps), Some((42, -1)));
+    }
 
     #[test]
     fn a_grenade_waiting_for_the_ground_goes_off_at_a_floor_bounce() {

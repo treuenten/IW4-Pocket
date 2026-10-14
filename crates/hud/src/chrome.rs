@@ -1005,9 +1005,9 @@ fn push_stretch(
         _ => (crate::images::HUD_CHROME_NAMESPACE, material),
     };
     let [s0, t0, s1, t1] = atlas_frame_st(catalog, &material, time_ms);
-    list.cmds.push(Draw2dCmd {
+    let cmd = |x: f32, material: String| Draw2dCmd {
         material_namespace,
-        x: applied.x,
+        x,
         y: applied.y,
         w: applied.w,
         h: applied.h,
@@ -1023,5 +1023,47 @@ fn push_stretch(
             index,
         },
         layer: 1,
-    });
+    };
+    if item.wrap_x {
+        for x in wrapped_xs(applied.x, applied.w, surface.width()) {
+            list.cmds.push(cmd(x, material.clone()));
+        }
+    }
+    list.cmds.push(cmd(applied.x, material));
+}
+
+/// Where a `wrap_x` strip is drawn again: a whole width further left or right
+/// of `x`, while the screen (0 to `screen_w`) reaches past it.
+fn wrapped_xs(x: f32, w: f32, screen_w: f32) -> Vec<f32> {
+    let mut xs = Vec::new();
+    if w <= 1.0 {
+        return xs;
+    }
+    let mut left = x;
+    while left > 0.0 {
+        left -= w;
+        xs.push(left);
+    }
+    let mut right = x + w;
+    while right < screen_w {
+        xs.push(right);
+        right += w;
+    }
+    xs
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrapped_xs;
+
+    #[test]
+    fn a_wrapped_strip_is_repeated_only_where_the_screen_reaches_past_it() {
+        // Covers the screen: no copies.
+        assert!(wrapped_xs(-100.0, 2000.0, 1500.0).is_empty());
+        // Starts inside the left edge: one copy to its left.
+        assert_eq!(wrapped_xs(90.0, 2000.0, 1500.0), vec![-1910.0]);
+        // Ends short of the right edge: one copy to its right.
+        assert_eq!(wrapped_xs(-900.0, 2000.0, 1500.0), vec![1100.0]);
+        assert!(wrapped_xs(10.0, 0.5, 1500.0).is_empty());
+    }
 }

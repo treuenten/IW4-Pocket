@@ -374,12 +374,93 @@ fn blocked_fall(
 
 /// A dropped weapon keeps the dropper's yaw; see `SHIELD_DROP_PITCH`.
 fn dropped_angles(script_name: &str, yaw: f32) -> [f32; 3] {
-    let pitch = if script_name.contains("riotshield") {
+    let pitch = if is_shield(script_name) {
         SHIELD_DROP_PITCH
     } else {
         0.0
     };
     [pitch, yaw, 0.0]
+}
+
+fn is_shield(script_name: &str) -> bool {
+    script_name.contains("riotshield")
+}
+
+/// How far above and below a swapped gun's spot the ground under it is looked for.
+const SWAP_GROUND_PROBE: f32 = 2.0;
+
+/// MW2 rolls a weapon lying on the ground this far onto its side.
+const REST_ROLL: f32 = 90.0;
+
+const UP: [f32; 3] = [0.0, 0.0, 1.0];
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn unit(v: [f32; 3]) -> Option<[f32; 3]> {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (len > 1e-4).then(|| [v[0] / len, v[1] / len, v[2] / len])
+}
+
+/// The ground a resting item lies on: the face it stopped on when that faces
+/// up, else level ground.
+fn rest_normal(hit: &trace_iw4::Trace) -> [f32; 3] {
+    if hit.startsolid != 0 || hit.allsolid != 0 || hit.normal[2] <= 0.0 {
+        return UP;
+    }
+    unit(hit.normal).unwrap_or(UP)
+}
+
+/// How MW2 lays a dropped weapon down where it comes to rest (iw4mp G_RunItem
+/// 0x52d190 calls 0x52ce10 once the item can fall no further): the item keeps
+/// its facing along the ground, the ground's normal becomes its up, and an
+/// item that is a weapon is rolled 90 degrees onto its side. Dropped upright
+/// as carried, a gun stood on its grip with half of it in the floor. The riot
+/// shield lies on its back instead (`SHIELD_DROP_PITCH`), tilted the same way.
+fn rest_angles(script_name: &str, yaw: f32, normal: [f32; 3]) -> [f32; 3] {
+    let up = unit(normal).filter(|n| n[2] > 0.0).unwrap_or(UP);
+    let (facing, _, _) = angle_vectors([0.0, yaw, 0.0]);
+    let Some(left) = unit(cross(up, facing)) else {
+        return dropped_angles(script_name, yaw);
+    };
+    let forward = cross(left, up);
+    if is_shield(script_name) {
+        let back = [-forward[0], -forward[1], -forward[2]];
+        return math_iw4::axis_to_angles([up, left, back]);
+    }
+    let mut angles = math_iw4::axis_to_angles([forward, left, up]);
+    angles[2] += REST_ROLL;
+    angles
+}
+
+/// G_SetAngle: the item holds these angles from now on.
+fn set_item_angles(state: &mut entity_iw4::EntityState, angles: [f32; 3]) {
+    state.apos_tr_type = TR_STATIONARY;
+    state.apos_tr_base = angles;
+    state.apos_tr_delta = [0.0; 3];
+    state.apos_tr_time = 0;
+    state.apos_tr_duration = 0;
+}
+
+/// The way a dropped item faces along the ground, from its angles whether it
+/// is still falling or already lies there (a shield lies on its back, so its
+/// facing is the way its top points).
+fn facing_yaw(script_name: &str, angles: [f32; 3]) -> f32 {
+    let (forward, _, up) = angle_vectors(angles);
+    let facing = if is_shield(script_name) {
+        [-up[0], -up[1], -up[2]]
+    } else {
+        forward
+    };
+    if facing[0].abs() < 1e-4 && facing[1].abs() < 1e-4 {
+        return angles[1];
+    }
+    math_iw4::vec_to_yaw(facing[0], facing[1])
 }
 
 fn launch_dropped_from_ps(
@@ -521,6 +602,17 @@ pub(crate) fn think_item_move(world: &mut FrameWorld, time_ms: i32, number: i32)
             }
         }
     }
+    let rest = match &outcome {
+        Some(BlockedFall::Rest(_)) => {
+            let name = world.weapon_script_name(u32::try_from(item.state.index).unwrap_or(0));
+            Some(rest_angles(
+                name,
+                facing_yaw(name, item.state.apos_tr_base),
+                rest_normal(&hit),
+            ))
+        }
+        _ => None,
+    };
     let Some(item) = world.dropped_item_mut_by_number(number) else {
         return;
     };
@@ -537,6 +629,9 @@ pub(crate) fn think_item_move(world: &mut FrameWorld, time_ms: i32, number: i32)
             item.state.tr_delta = [0.0; 3];
             item.state.tr_time = 0;
             item.state.tr_duration = 0;
+            if let Some(angles) = rest {
+                set_item_angles(&mut item.state, angles);
+            }
         }
         BlockedFall::Deflect(fall) => {
             item.origin = fall.tr_base;
@@ -683,13 +778,8 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
     } else {
         let current = current_primary_weapon(world, &ps);
         if current != 0 && primary_count(world, &ps) >= 2 {
-            swapped_entnum = drop_current_primary_at(
-                world,
-                walker,
-                current,
-                item.origin,
-                item.state.apos_tr_base,
-            );
+            let yaw = facing_yaw(world.weapon_script_name(weapon), item.state.apos_tr_base);
+            swapped_entnum = drop_current_primary_at(world, walker, current, item.origin, yaw);
         }
         if let Some(mut next) = world.player(walker).copied() {
             give_weapon_to_ps_akimbo(&mut next, weapon, akimbo);
@@ -793,12 +883,16 @@ fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
     perf::pickup(picker_pm_type);
 }
 
+/// The gun given up for a picked-up one takes its place, lying the way it lay
+/// (MW2 copies the picked item's angles; a shield on either side of the swap
+/// lies on its back instead, so the pose is rebuilt from its facing and the
+/// ground under it).
 fn drop_current_primary_at(
     world: &mut FrameWorld,
     walker: ClientId,
     weapon: u32,
     origin: [f32; 3],
-    angles: [f32; 3],
+    yaw: f32,
 ) -> i32 {
     let Some(ps) = world.player(walker).copied() else {
         return ENTITYNUM_NONE;
@@ -811,12 +905,24 @@ fn drop_current_primary_at(
         tr_delta: [0.0; 3],
         tr_base: origin,
     };
+    let ground = world.trace_clip(
+        [origin[0], origin[1], origin[2] + SWAP_GROUND_PROBE],
+        [origin[0], origin[1], origin[2] - SWAP_GROUND_PROBE],
+        ITEM_MINS,
+        ITEM_MAXS,
+        MASK_PLAYER_SOLID,
+    );
+    let normal = if ground.fraction < 1.0 {
+        rest_normal(&ground)
+    } else {
+        UP
+    };
     let apos = Trajectory {
         tr_type: TR_STATIONARY,
         tr_time: 0,
         tr_duration: 0,
         tr_delta: [0.0; 3],
-        tr_base: dropped_angles(world.weapon_script_name(weapon), angles[1]),
+        tr_base: rest_angles(world.weapon_script_name(weapon), yaw, normal),
     };
     let entnum = push_dropped_item(
         world,
@@ -1150,6 +1256,62 @@ mod dropped_item_tests {
             [SHIELD_DROP_PITCH, 90.0, 0.0]
         );
         assert_eq!(dropped_angles("m4_reflex_mp", 45.0), [0.0, 45.0, 0.0]);
+    }
+
+    fn near(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 1e-3)
+    }
+
+    fn same_yaw(a: f32, b: f32) -> bool {
+        let d = (a - b).rem_euclid(360.0);
+        d < 1e-2 || d > 360.0 - 1e-2
+    }
+
+    #[test]
+    fn a_gun_at_rest_lies_on_its_side_facing_the_way_it_fell() {
+        let angles = rest_angles("m4_reflex_mp", 45.0, UP);
+        assert!(near(angles, [0.0, 45.0, REST_ROLL]), "{angles:?}");
+        assert!(same_yaw(facing_yaw("m4_reflex_mp", angles), 45.0));
+    }
+
+    #[test]
+    fn a_gun_at_rest_on_a_slope_lies_along_it() {
+        let slope = [0.0, 0.6, 0.8];
+        let angles = rest_angles("ak47_mp", 0.0, slope);
+        let unrolled = [angles[0], angles[1], angles[2] - REST_ROLL];
+        let axis = math_iw4::angles_to_axis(unrolled);
+        assert!(near(axis[2], slope), "{axis:?}");
+        assert!(near(axis[0], [1.0, 0.0, 0.0]), "{axis:?}");
+        assert!(same_yaw(facing_yaw("ak47_mp", angles), 0.0));
+    }
+
+    #[test]
+    fn a_shield_at_rest_lies_on_its_back_tilted_with_the_ground() {
+        let flat = math_iw4::angles_to_axis(rest_angles("riotshield_mp", 90.0, UP));
+        let dropped = math_iw4::angles_to_axis(dropped_angles("riotshield_mp", 90.0));
+        for (a, b) in flat.iter().zip(dropped.iter()) {
+            assert!(near(*a, *b), "{flat:?} vs {dropped:?}");
+        }
+        let angles = rest_angles("riotshield_mp", 90.0, [0.6, 0.0, 0.8]);
+        assert!(near(math_iw4::angles_to_axis(angles)[0], [0.6, 0.0, 0.8]));
+        assert!(same_yaw(facing_yaw("riotshield_mp", angles), 90.0));
+        assert!(same_yaw(
+            facing_yaw("riotshield_mp", dropped_angles("riotshield_mp", 90.0)),
+            90.0
+        ));
+    }
+
+    #[test]
+    fn walls_ceilings_and_solid_starts_leave_an_item_level() {
+        assert_eq!(rest_normal(&trace(0.5, [1.0, 0.0, 0.0], [0.0; 3])), UP);
+        assert_eq!(rest_normal(&trace(0.5, [0.0, 0.0, -1.0], [0.0; 3])), UP);
+        let mut solid = trace(0.0, [0.0, 0.6, 0.8], [0.0; 3]);
+        solid.startsolid = 1;
+        assert_eq!(rest_normal(&solid), UP);
+        assert!(near(
+            rest_normal(&trace(0.5, [0.0, 0.6, 0.8], [0.0; 3])),
+            [0.0, 0.6, 0.8]
+        ));
     }
 
     fn trace(fraction: f32, normal: [f32; 3], endpos: [f32; 3]) -> trace_iw4::Trace {

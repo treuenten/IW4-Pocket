@@ -184,6 +184,20 @@ pub(crate) fn owe(world: &mut World, client: u32, callback: &'static str, args: 
 }
 
 pub(crate) fn suicide(world: &mut World, tick: crate::Tick, client: u32) {
+    suicide_with(world, tick, client, 0);
+}
+
+/// A grenade that went off in its holder's hand: MW2's G_ClientEvent for
+/// EV_GRENADE_SUICIDE (iw4mp 0x51bd41) calls player_die with the holder as
+/// inflictor and attacker, 100000 damage, MOD_SUICIDE and the grenade, so the
+/// scripts' Callback_PlayerKilled sees the suicide `handleSuicideDeath` checks
+/// for (`lastGrenadeSuicideTime`). Settled at once, as player_die is.
+pub(crate) fn grenade_suicide(world: &mut World, tick: crate::Tick, client: u32, weapon: u32) {
+    suicide_with(world, tick, client, weapon);
+    settle_deaths(world);
+}
+
+fn suicide_with(world: &mut World, tick: crate::Tick, client: u32, weapon: u32) {
     let id = crate::ClientId(client);
     let mut frame = FrameWorld::from_world(world);
     if !frame
@@ -194,6 +208,13 @@ pub(crate) fn suicide(world: &mut World, tick: crate::Tick, client: u32) {
     }
     crate::script_player::kill(&mut frame, tick, id, Some(id), None);
     let me = player_object(world, client);
+    let weapon = match weapon {
+        0 => "none".to_owned(),
+        weapon => {
+            let weapon = event_weapon(world, client, weapon);
+            crate::script_player::weapon_name(&FrameWorld::from_world(world), weapon)
+        }
+    };
     owe(
         world,
         client,
@@ -203,7 +224,7 @@ pub(crate) fn suicide(world: &mut World, tick: crate::Tick, client: u32) {
             me,
             Value::Int(100_000),
             Value::string("MOD_SUICIDE"),
-            Value::string("none"),
+            Value::String(weapon.into()),
             Value::Vector([0.0; 3]),
             Value::string("none"),
             Value::Int(0),

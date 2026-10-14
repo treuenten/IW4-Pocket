@@ -346,6 +346,18 @@ pub(crate) fn kill(
     {
         return;
     }
+    // MW2's player_die first lets go of a grenade still in the hand, live, with
+    // the fuse it had left (iw4mp 0x526460).
+    if crate::equipment::drops_held_grenade_on_death()
+        && let Some((weapon, fuse_left_ms)) = world
+            .player(victim)
+            .and_then(crate::equipment::held_live_grenade)
+    {
+        crate::equipment::drop_live_grenade(world, victim, weapon, fuse_left_ms, tick);
+        if let Some(ps) = world.player_mut(victim) {
+            ps.grenade_time_left = 0;
+        }
+    }
     let life_sequence = {
         let meta = world.client_meta_mut(victim);
         meta.lifecycle = ClientLifecycle::Dead;
