@@ -329,6 +329,22 @@ impl PersistentDataStore {
             .definition
             .read(&record.bytes, record.definition.lookup(keys)?)?)
     }
+    /// Reads one field of an account snapshot, a player's own copy of its data, with
+    /// the installed schema. MW2's menus read the local player's stats this way
+    /// (getPlayerData in a menu expression), not the server's copy.
+    pub fn read_snapshot<'a>(
+        &'a self,
+        snapshot: &'a AccountSnapshot,
+        keys: &[Key<'_>],
+    ) -> Result<Value<'a>, PersistentDataError> {
+        let set = self
+            .schemas
+            .get(PLAYER_SCHEMA)
+            .ok_or(PersistentDataError::MissingSchema)?;
+        let definition = select_definition(set, snapshot.version, snapshot.checksum)?;
+        validate_buffer(definition, &snapshot.bytes)?;
+        Ok(definition.read(&snapshot.bytes, definition.lookup(keys)?)?)
+    }
     pub fn path_type(
         &self,
         client: ClientId,
@@ -546,4 +562,106 @@ fn validate_buffer(definition: &Definition, bytes: &[u8]) -> Result<(), Persiste
         return Err(PersistentDataError::SchemaMismatch);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use structured_data_iw4::{DataType, Enum, EnumArray, EnumEntry, Property, Struct};
+
+    fn challenge_schema() -> Definition {
+        Definition {
+            version: 7,
+            checksum: 0xC0FFEE,
+            size: 16,
+            root: DataType::Struct(0),
+            enums: vec![Enum {
+                reserved: 4,
+                entries: vec![
+                    EnumEntry {
+                        name: "ch_expert_m4".into(),
+                        index: 1,
+                    },
+                    EnumEntry {
+                        name: "ch_marksman_m4".into(),
+                        index: 0,
+                    },
+                ],
+            }],
+            structs: vec![Struct {
+                properties: vec![Property {
+                    name: "challengeState".into(),
+                    ty: DataType::EnumArray(0),
+                    offset: 8,
+                }],
+                size: 16,
+                bit_offset: 0,
+            }],
+            indexed_arrays: Vec::new(),
+            enum_arrays: vec![EnumArray {
+                enumeration: 0,
+                element: DataType::Byte,
+                stride: 1,
+            }],
+        }
+    }
+
+    fn store_and_snapshot(definition: &Definition) -> (PersistentDataStore, AccountSnapshot) {
+        definition.validate().expect("test schema is valid");
+        let mut store = PersistentDataStore::default();
+        store
+            .install_schemas(BTreeMap::from([(
+                PLAYER_SCHEMA.to_owned(),
+                Arc::new(DefinitionSet {
+                    definitions: vec![definition.clone()],
+                }),
+            )]))
+            .expect("schemas install");
+        let mut bytes = vec![0; PLAYER_DATA_BUFFER_BYTES];
+        bytes[..4].copy_from_slice(&definition.version.to_le_bytes());
+        bytes[4..8].copy_from_slice(&definition.checksum.to_le_bytes());
+        bytes[8] = 2; // ch_marksman_m4: first tier done
+        let snapshot = AccountSnapshot {
+            account: AccountId([1; 16]),
+            revision: 3,
+            version: definition.version,
+            checksum: definition.checksum,
+            bytes,
+            skills: crate::SkillRatings::default(),
+        };
+        (store, snapshot)
+    }
+
+    #[test]
+    fn read_snapshot_reads_a_challenge_state() {
+        let definition = challenge_schema();
+        let (store, snapshot) = store_and_snapshot(&definition);
+        let state =
+            |name| store.read_snapshot(&snapshot, &[Key::Name("challengeState"), Key::Name(name)]);
+        assert_eq!(state("ch_marksman_m4"), Ok(Value::Int(2)));
+        assert_eq!(state("ch_expert_m4"), Ok(Value::Int(0)));
+        assert_eq!(
+            state("ch_unknown"),
+            Err(PersistentDataError::Field(
+                structured_data_iw4::Error::UnknownName
+            ))
+        );
+    }
+
+    #[test]
+    fn read_snapshot_refuses_another_schema() {
+        let definition = challenge_schema();
+        let (store, mut snapshot) = store_and_snapshot(&definition);
+        snapshot.version += 1;
+        assert_eq!(
+            store.read_snapshot(&snapshot, &[Key::Name("challengeState")]),
+            Err(PersistentDataError::SchemaMismatch)
+        );
+        let empty = PersistentDataStore::default();
+        snapshot.version -= 1;
+        assert_eq!(
+            empty.read_snapshot(&snapshot, &[Key::Name("challengeState")]),
+            Err(PersistentDataError::MissingSchema)
+        );
+    }
 }

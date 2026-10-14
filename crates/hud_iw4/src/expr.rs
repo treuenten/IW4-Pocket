@@ -1118,6 +1118,29 @@ fn logic_op(op: i32, a: Operand, b: Operand) -> Result<Operand, ExprError> {
     Ok(r)
 }
 
+/// Fills a localized template's `&&1`..`&&9` insertions for `locString(key, ...)`;
+/// an insertion with no value is dropped, any other `&&` is kept.
+pub fn fill_insertions(template: &str, values: &[String]) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(at) = rest.find("&&") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        match tail.as_bytes().first() {
+            Some(digit @ b'1'..=b'9') => {
+                out.push_str(values.get((digit - b'1') as usize).map_or("", |v| v));
+                rest = &tail[1..];
+            }
+            _ => {
+                out.push_str("&&");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn source_int(v: &Operand) -> i32 {
     match v {
         Operand::Int(n) => *n,
@@ -1162,5 +1185,118 @@ pub fn source_str(v: &Operand) -> String {
                 String::from("f")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn fill_insertions_places_values_and_keeps_other_ampersands() {
+        let values = vec![String::from("M4A1"), String::from("10")];
+        assert_eq!(fill_insertions("&&1: &&2 kills", &values), "M4A1: 10 kills");
+        assert_eq!(fill_insertions("&&3 left", &values), " left");
+        assert_eq!(fill_insertions("A && B", &values), "A && B");
+        assert_eq!(fill_insertions(" II", &[]), " II");
+    }
+
+    /// MW2's challenge splash (menu "challenge", item challenge_title_tiered), as
+    /// stored in common_mp: the name line is the weapon from the challenges table
+    /// plus the tier string picked by the player's challengeState.
+    const CHALLENGE_TITLE_VIS: &str = "op 16 { op 16 op 7 { op 16 op 24 22 op 1 } } op 14 op 16 op 27 op 33 op 108 s:6368616c6c656e67655374617465 op 17 op 81 s:73706c617368526566 op 1 op 1 op 17 1 op 1 op 1 op 6 1 op 1 op 10 0";
+    const CHALLENGE_TITLE_TEXT: &str = "op 16 op 77 s:40 op 5 op 74 s:6d702f616c6c4368616c6c656e6765735461626c652e637376 op 17 0 op 17 op 81 s:73706c617368526566 op 1 op 17 1 op 1 op 1 op 5 op 77 s:40 op 5 op 74 s:6d702f616c6c4368616c6c656e6765735461626c652e637376 op 17 0 op 17 op 81 s:73706c617368526566 op 1 op 17 3 op 1 op 5 s:5f op 5 op 16 op 27 op 33 op 108 s:6368616c6c656e67655374617465 op 17 op 81 s:73706c617368526566 op 1 op 1 op 17 1 op 1 op 1 op 6 1 op 1 op 1";
+
+    struct ChallengeHost {
+        state: i32,
+    }
+
+    impl ExprHost for ChallengeHost {
+        fn localize_string(&self, args: &[Operand]) -> Result<String, ExprError> {
+            let key = source_str(&args[0]);
+            Ok(String::from(match key.as_str() {
+                "@WEAPON_M4" => "M4A1",
+                "@CHALLENGE_MARKSMAN_1" => ": Marksman I",
+                "@CHALLENGE_MARKSMAN_2" => ": Marksman II",
+                _ => return Err(ExprError::Host("missing localization")),
+            }))
+        }
+        fn milliseconds(&self) -> i32 {
+            0
+        }
+        fn static_dvar_int(&self, _index: i32) -> Result<i32, ExprError> {
+            Ok(0)
+        }
+        fn team_field(&self, _field: &str) -> Result<Operand, ExprError> {
+            Err(ExprError::Host("team"))
+        }
+        fn player_field(&self, _field: &str) -> Result<Operand, ExprError> {
+            Err(ExprError::Host("player"))
+        }
+        fn other_team_field(&self, _field: &str) -> Result<Operand, ExprError> {
+            Err(ExprError::Host("team"))
+        }
+        fn local_var_string(&self, name: &str) -> Result<Operand, ExprError> {
+            assert_eq!(name, "splashRef");
+            Ok(Operand::Str(String::from("ch_marksman_m4")))
+        }
+        fn time_left(&self) -> Result<i32, ExprError> {
+            Err(ExprError::Host("time"))
+        }
+        fn score_at_rank(&self, _rank: i32) -> Result<i32, ExprError> {
+            Err(ExprError::Host("score"))
+        }
+        fn gametype_name(&self) -> Result<Operand, ExprError> {
+            Err(ExprError::Host("gametype"))
+        }
+        fn weapon_lock(&self) -> Result<WeaponLockView, ExprError> {
+            Err(ExprError::Host("lock"))
+        }
+        fn table_lookup(
+            &self,
+            table: &str,
+            col0: i32,
+            key: &str,
+            result_col: i32,
+        ) -> Result<Operand, ExprError> {
+            assert_eq!(
+                (table, col0, key),
+                ("mp/allChallengesTable.csv", 0, "ch_marksman_m4")
+            );
+            Ok(Operand::Str(String::from(match result_col {
+                1 => "WEAPON_M4",
+                3 => "CHALLENGE_MARKSMAN",
+                _ => "",
+            })))
+        }
+        fn player_data(&self, path: &[Operand]) -> Result<Operand, ExprError> {
+            assert_eq!(
+                path,
+                [
+                    Operand::Str(String::from("challengeState")),
+                    Operand::Str(String::from("ch_marksman_m4"))
+                ]
+            );
+            Ok(Operand::Int(self.state))
+        }
+    }
+
+    #[test]
+    fn challenge_splash_name_line_names_weapon_and_tier() {
+        let tier_one_done = ChallengeHost { state: 2 };
+        assert!(is_expression_true(CHALLENGE_TITLE_VIS, &tier_one_done).unwrap());
+        assert_eq!(
+            evaluate_string(CHALLENGE_TITLE_TEXT, &tier_one_done).unwrap(),
+            "M4A1: Marksman I"
+        );
+        let tier_two_done = ChallengeHost { state: 3 };
+        assert_eq!(
+            evaluate_string(CHALLENGE_TITLE_TEXT, &tier_two_done).unwrap(),
+            "M4A1: Marksman II"
+        );
+        // Nothing completed yet: MW2 hides the line.
+        let untouched = ChallengeHost { state: 1 };
+        assert!(!is_expression_true(CHALLENGE_TITLE_VIS, &untouched).unwrap());
     }
 }

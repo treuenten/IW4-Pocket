@@ -267,24 +267,7 @@ impl ExprHost for MenuHost<'_> {
                 Operand::Str(s) => self.localized(s).unwrap_or_else(|| s.clone()),
             })
             .collect();
-        let mut out = String::new();
-        let mut rest = template.as_str();
-        while let Some(at) = rest.find("&&") {
-            out.push_str(&rest[..at]);
-            let tail = &rest[at + 2..];
-            match tail.as_bytes().first() {
-                Some(digit @ b'1'..=b'9') => {
-                    out.push_str(values.get((digit - b'1') as usize).map_or("", |v| v));
-                    rest = &tail[1..];
-                }
-                _ => {
-                    out.push_str("&&");
-                    rest = tail;
-                }
-            }
-        }
-        out.push_str(rest);
-        Ok(out)
+        Ok(hud_iw4::expr::fill_insertions(&template, &values))
     }
     fn milliseconds(&self) -> i32 {
         self.world.ms

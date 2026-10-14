@@ -22,6 +22,7 @@ entity_iw4.workspace = true
 frame.workspace = true
 net = { path = "../net" }
 sim = { path = "../sim" }
+structured_data_iw4.workspace = true
 math_iw4.workspace = true
 gamemode_iw4.workspace = true
 
