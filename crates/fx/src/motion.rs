@@ -728,6 +728,99 @@ mod physics_piece_tests {
     }
 
     #[test]
+    fn a_leaf_blown_into_a_wall_slides_down_it_instead_of_hanging_there() {
+        // A plant leaf (props/plant_*_destroy on Highrise): a 43-interval
+        // world graph blowing it at 200 units a second, easing to nothing over
+        // its life, half gravity, no bounce, flying into a window at x = 100.
+        const WALL_X: f32 = 100.0;
+        let flags = fx_iw4::FX_ELEM_USE_COLLISION | fx_iw4::FX_ELEM_VEL_WORLD;
+        let graph: Vec<_> = (0..44)
+            .map(|i| FxElemVec3Range {
+                base: [0.2 / 43.0 * (1.0 - i as f32 / 43.0), 0.0, 0.0],
+                amplitude: [0.0; 3],
+            })
+            .collect();
+        let life = 3400.0;
+        let mut origin = [70.0, 0.0, 300.0];
+        let mut base_vel = [0.0f32; 3];
+        let mut at_rest = FX_ELEM_AT_REST_NONE;
+        let mut prev = 0;
+        let mut nearest = origin[0];
+        for frame in 1..=100 {
+            let now = frame * 16;
+            let q = FxElemMotionQuery {
+                def_name: "props/plant_large_destroy",
+                catalog_index: 0,
+                def_index: 7,
+                age0: prev as f32 / life,
+                age1: now as f32 / life,
+                life_ms: life,
+                dt_sec: (now - prev) as f32 * 0.001,
+                base_vel,
+                elem_random_seed: 7,
+                origin,
+                prev_msec: prev,
+                msec_now: now,
+                msec_begin: 0,
+                effect_axis: IDENTITY,
+                orient: fx_iw4::FxOrientation {
+                    origin: [0.0; 3],
+                    axis: IDENTITY,
+                },
+                at_rest_fraction: at_rest,
+            };
+            let r = evaluate_elem_collide_motion(
+                flags,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                [0.0; 3],
+                [0.0; 3],
+                false,
+                false,
+                false,
+                7,
+                &[],
+                &graph,
+                q,
+                |start, end, _mins, _maxs, _mask| {
+                    if start[0] >= WALL_X || end[0] <= WALL_X - 0.125 {
+                        return FxElemTraceHit {
+                            fraction: if start[0] >= WALL_X { 0.0 } else { 1.0 },
+                            normal: [-1.0, 0.0, 0.0],
+                            startsolid: false,
+                            allsolid: false,
+                        };
+                    }
+                    let f = ((WALL_X - 0.125 - start[0]) / (end[0] - start[0])).max(0.0);
+                    FxElemTraceHit {
+                        fraction: f,
+                        normal: [-1.0, 0.0, 0.0],
+                        startsolid: false,
+                        allsolid: false,
+                    }
+                },
+            )
+            .expect("collide motion");
+            for k in 0..3 {
+                origin[k] += r.origin_delta[k];
+            }
+            base_vel = r.base_vel;
+            if let Some(f) = r.at_rest_fraction {
+                at_rest = f;
+            }
+            prev = now;
+            nearest = nearest.max(origin[0]);
+            assert!(origin[0] < WALL_X, "through the wall: {origin:?}");
+        }
+        // It reached the window and then fell at half gravity, drifting back
+        // as its blow eased, rather than staying pinned where it hit.
+        assert!(nearest > WALL_X - 1.0, "{nearest}");
+        assert!(origin[2] < 300.0 - 250.0, "hung at {origin:?}");
+    }
+
+    #[test]
     fn colliding_elem_leaves_a_brush_it_spawned_in() {
         // A suitcase's clothes (props/luggage_contents elems 6-11) spawn up to
         // two units into the floor and fly up out of it.

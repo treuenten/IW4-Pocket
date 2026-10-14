@@ -342,7 +342,9 @@ pub use vec::{
     FX_PERP_VECTOR_UNIT, effect_orient_arc, perpendicular_vector, vec3_distance, vec3_length_sq,
     vec3_normalize, vector_vectors,
 };
-pub use velocity::{FX_VEL_AT_TIME_SCALE, elem_launch_velocity, get_velocity_at_time};
+pub use velocity::{
+    FX_VEL_AT_TIME_SCALE, elem_launch_velocity, get_velocity_at_time, motion_fix, set_motion_fix,
+};
 pub use view::{
     FX_EFFECT_DEF_SIZE, FX_ELEM_DEF_STRIDE, FxEffectDefView, FxElemDefView, effect_def_view,
     elem_def_gravity_accel_z, elem_def_view, elem_def_view_x64,

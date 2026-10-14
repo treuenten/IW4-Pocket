@@ -41,6 +41,7 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
     ));
     // Before any effect can play: the source of effect randomness is fixed for the run.
     fx_iw4::set_fast_random(fx_fast_random());
+    fx_iw4::set_motion_fix(fx_motion_fix());
     app.add_plugins(AssetPlugin)
         .add_plugins(UiPlugin)
         .add_plugins(ConsolePlugin)
@@ -268,6 +269,25 @@ const FX_FAST_RANDOM_ENV: &str = "IW4L_FX_FAST_RANDOM";
 /// the same. `IW4L_FX_FAST_RANDOM=1` in iw4l-env.txt turns it on for the phone.
 fn fx_fast_random() -> bool {
     perf::switch(FX_FAST_RANDOM_ENV)
+}
+
+const FX_MOTION_ENV: &str = "IW4L_FX_MOTION";
+
+/// The effect motion fixes (IP-129, IP-089, IP-114): graph velocities read at
+/// the speed the graphs move an element, physics pieces that turn about their
+/// middle and tip onto a face, glass shards at their own speed. On unless
+/// `IW4L_FX_MOTION=0` (also a line in iw4l-env.txt), which brings back the
+/// old motion for comparing runs.
+fn fx_motion_fix() -> bool {
+    let on = std::env::var(FX_MOTION_ENV)
+        .map_or(true, |value| !matches!(value.trim(), "0" | "off" | "false"));
+    diag::info!(
+        World,
+        "fx motion fixes: {} ({FX_MOTION_ENV}={})",
+        if on { "on" } else { "off" },
+        u8::from(on)
+    );
+    on
 }
 
 const FRAME_LATENCY_ENV: &str = "IW4L_FRAME_LATENCY";
