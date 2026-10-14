@@ -561,6 +561,9 @@ pub const MP_LOCALIZED_ZONES: &[&str] = &[
     "localized_code_post_gfx_mp",
     "localized_common_mp",
     "localized_ui_mp",
+    // The patch zone's own strings: the names of the DLC maps
+    // (PATCH_ABANDON "Carnival", PATCH_FUEL2 "Fuel", ...) among them.
+    "patch_mp",
 ];
 
 pub fn load_mp_localized_strings(

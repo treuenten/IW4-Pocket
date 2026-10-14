@@ -166,12 +166,26 @@ pub(crate) fn restore_menu_on_return(
     mut app_screen: ResMut<AppScreen>,
     chrome: Query<Entity, Or<(With<LoadingRoot>, With<LoadingCamera>)>>,
     overlay_cams: Query<Entity, With<OverlayUiCamera>>,
+    presentation: Option<Res<crate::frontend::maps::MapPresentation>>,
+    menus: Option<Res<asset_game::MenuCatalog>>,
 ) {
     if returned.read().count() == 0 {
         return;
     }
     class_overlay.0 = false;
     *app_screen = AppScreen::MainMenu;
+    // A session launched straight into a map never built the shell's map
+    // names (install_class_catalog); MW2's own come from the arena the menu
+    // catalog holds.
+    if presentation.is_none() {
+        commands.insert_resource(
+            crate::frontend::maps::MapPresentation::default().with_iw4_arena(
+                menus
+                    .as_deref()
+                    .and_then(|menus| menus.rawfile_text("mp/basemaps.arena")),
+            ),
+        );
+    }
 
     dismiss_loading_overlay(&mut commands, chrome.iter(), overlay_cams.iter(), false);
     if maps.0.is_empty() {
